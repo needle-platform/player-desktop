@@ -20,7 +20,12 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             format TEXT,
             sample_rate INTEGER,
             bit_depth INTEGER,
-            track_number INTEGER
+            track_number INTEGER,
+            genre TEXT,
+            year INTEGER,
+            added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            play_count INTEGER NOT NULL DEFAULT 0,
+            last_played_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS settings (
@@ -42,6 +47,20 @@ pub fn init_database(db_path: &Path) -> Result<()> {
         "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
         params!["equalizer_preset", "flat"],
     )?;
+
+    let _ = connection.execute("ALTER TABLE tracks ADD COLUMN genre TEXT", []);
+    let _ = connection.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
+    // SQLite ALTER TABLE doesn't allow non-constant defaults; backfill below if needed.
+    let _ = connection.execute("ALTER TABLE tracks ADD COLUMN added_at TEXT", []);
+    let _ = connection.execute(
+        "ALTER TABLE tracks ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = connection.execute("ALTER TABLE tracks ADD COLUMN last_played_at TEXT", []);
+    let _ = connection.execute(
+        "UPDATE tracks SET added_at = CURRENT_TIMESTAMP WHERE added_at IS NULL",
+        [],
+    );
 
     Ok(())
 }
@@ -167,9 +186,24 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
 
+    transaction.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _scan_paths (path TEXT PRIMARY KEY)",
+        [],
+    )?;
+    transaction.execute("DELETE FROM _scan_paths", [])?;
+
+    {
+        let mut stage = transaction.prepare("INSERT OR IGNORE INTO _scan_paths (path) VALUES (?1)")?;
+        for track in tracks {
+            stage.execute(params![track.path])?;
+        }
+    }
+
     let pattern = format!("{}/%", folder.trim_end_matches('/'));
     transaction.execute(
-        "DELETE FROM tracks WHERE path = ?1 OR path LIKE ?2",
+        "DELETE FROM tracks
+         WHERE (path = ?1 OR path LIKE ?2)
+           AND path NOT IN (SELECT path FROM _scan_paths)",
         params![folder, pattern],
     )?;
 
@@ -185,8 +219,11 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
                 format,
                 sample_rate,
                 bit_depth,
-                track_number
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                track_number,
+                genre,
+                year,
+                added_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, CURRENT_TIMESTAMP)
             ON CONFLICT(path) DO UPDATE SET
                 title = excluded.title,
                 artist = excluded.artist,
@@ -195,7 +232,9 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
                 format = excluded.format,
                 sample_rate = excluded.sample_rate,
                 bit_depth = excluded.bit_depth,
-                track_number = excluded.track_number
+                track_number = excluded.track_number,
+                genre = excluded.genre,
+                year = excluded.year
             ",
             params![
                 track.path,
@@ -207,6 +246,8 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
                 track.sample_rate.map(|value| value as i64),
                 track.bit_depth.map(|value| value as i64),
                 track.track_number,
+                track.genre,
+                track.year,
             ],
         )?;
     }
@@ -215,12 +256,25 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
     Ok(())
 }
 
+pub fn record_play(db_path: &Path, path: &str) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "UPDATE tracks
+         SET play_count = play_count + 1,
+             last_played_at = CURRENT_TIMESTAMP
+         WHERE path = ?1",
+        params![path],
+    )?;
+    Ok(())
+}
+
 pub fn load_library(db_path: &Path) -> Result<LibraryData> {
     let connection = Connection::open(db_path)?;
 
     let mut statement = connection.prepare(
         "
-        SELECT id, path, title, artist, album, duration_seconds, format, sample_rate, bit_depth, track_number
+        SELECT id, path, title, artist, album, duration_seconds, format, sample_rate, bit_depth,
+               track_number, genre, year, added_at, play_count, last_played_at
         FROM tracks
         ORDER BY
             COALESCE(artist, ''),
@@ -244,6 +298,11 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                 sample_rate: row.get::<_, Option<i64>>(7)?.map(|value| value as u32),
                 bit_depth: row.get::<_, Option<i64>>(8)?.map(|value| value as u8),
                 track_number: row.get(9)?,
+                genre: row.get(10)?,
+                year: row.get(11)?,
+                added_at: row.get(12)?,
+                play_count: row.get::<_, i64>(13)?,
+                last_played_at: row.get(14)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

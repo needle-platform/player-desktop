@@ -29,3 +29,5 @@ export interface CoverArt {
 
 export const getCoverArt = (trackPath: string) =>
   invoke<CoverArt | null>('get_cover_art', { trackPath });
+
+export const recordPlay = (path: string) => invoke<void>('record_play', { path });

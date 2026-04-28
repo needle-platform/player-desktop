@@ -109,6 +109,11 @@ fn remove_library_root(
 }
 
 #[tauri::command]
+fn record_play(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    db::record_play(&state.db_path, &path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn get_cover_art(track_path: String) -> Result<Option<cover::CoverArt>, String> {
     let path = Path::new(&track_path);
     if !path.exists() {
@@ -147,7 +152,8 @@ pub fn run() {
             stop_playback,
             run_maintenance,
             remove_library_root,
-            get_cover_art
+            get_cover_art,
+            record_play
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

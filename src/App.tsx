@@ -4,6 +4,7 @@ import {
   bootstrapApp,
   pausePlayback,
   playTrack,
+  recordPlay,
   removeLibraryRoot,
   resumePlayback,
   runMaintenance,
@@ -19,8 +20,41 @@ import type {
   Track,
 } from './types';
 import { useCoverArt } from './lib/cover';
+import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
 
-type View = 'tracks' | 'albums' | 'artists' | 'settings';
+type View = 'dashboard' | 'tracks' | 'albums' | 'artists' | 'settings';
+
+const greeting = (): string => {
+  const h = new Date().getHours();
+  if (h < 5) return 'Late night';
+  if (h < 12) return 'Good morning';
+  if (h < 18) return 'Good afternoon';
+  return 'Good evening';
+};
+
+const relativeAdded = (iso: string | null): string => {
+  if (!iso) return 'Recently added';
+  const ts = Date.parse(iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z');
+  if (Number.isNaN(ts)) return 'Recently added';
+  const diff = Date.now() - ts;
+  const day = 24 * 60 * 60 * 1000;
+  if (diff < day) return 'Today';
+  if (diff < 2 * day) return 'Yesterday';
+  if (diff < 7 * day) return `${Math.floor(diff / day)}d ago`;
+  if (diff < 30 * day) return `${Math.floor(diff / (7 * day))}w ago`;
+  if (diff < 365 * day) return `${Math.floor(diff / (30 * day))}mo ago`;
+  return `${Math.floor(diff / (365 * day))}y ago`;
+};
+
+const sampleN = <T,>(arr: T[], n: number): T[] => {
+  if (arr.length <= n) return arr.slice();
+  const copy = arr.slice();
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, n);
+};
 
 const equalizerOptions: Array<{ value: EqualizerPreset; label: string }> = [
   { value: 'flat', label: 'Flat' },
@@ -56,10 +90,12 @@ const folderName = (path: string) => path.split('/').filter(Boolean).pop() ?? pa
 
 function App() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
-  const [view, setView] = useState<View>('tracks');
+  const [view, setView] = useState<View>('dashboard');
+  const [featuredSeed, setFeaturedSeed] = useState(0);
   const [search, setSearch] = useState('');
   const [selectedAlbum, setSelectedAlbum] = useState<string | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
+  const [selectedPlaylist, setSelectedPlaylist] = useState<AutoPlaylist | null>(null);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -93,7 +129,7 @@ function App() {
   const allTracks = data?.library.tracks ?? [];
 
   const filteredTracks = useMemo(() => {
-    let list = allTracks;
+    let list: Track[] = selectedPlaylist ? selectedPlaylist.tracks : allTracks;
     if (selectedAlbum) list = list.filter((t) => t.album === selectedAlbum);
     if (selectedArtist) list = list.filter((t) => t.artist === selectedArtist);
     if (search.trim()) {
@@ -106,21 +142,52 @@ function App() {
       );
     }
     return list;
-  }, [allTracks, search, selectedAlbum, selectedArtist]);
+  }, [allTracks, search, selectedAlbum, selectedArtist, selectedPlaylist]);
+
+  const playlists = useMemo(
+    () => generateAutoPlaylists(allTracks),
+    // featuredSeed reroll also rerolls playlist sampling
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allTracks, featuredSeed],
+  );
 
   const albums = useMemo(() => {
     const map = new Map<
       string,
-      { album: string; artist: string | null; count: number; samplePath: string }
+      {
+        album: string;
+        artist: string | null;
+        count: number;
+        samplePath: string;
+        addedAt: string | null;
+      }
     >();
     for (const t of allTracks) {
       if (!t.album) continue;
       const existing = map.get(t.album);
-      if (existing) existing.count += 1;
-      else map.set(t.album, { album: t.album, artist: t.artist, count: 1, samplePath: t.path });
+      if (existing) {
+        existing.count += 1;
+        if (t.added_at && (!existing.addedAt || t.added_at > existing.addedAt)) {
+          existing.addedAt = t.added_at;
+        }
+      } else {
+        map.set(t.album, {
+          album: t.album,
+          artist: t.artist,
+          count: 1,
+          samplePath: t.path,
+          addedAt: t.added_at ?? null,
+        });
+      }
     }
     return Array.from(map.values()).sort((a, b) => a.album.localeCompare(b.album));
   }, [allTracks]);
+
+  const recentAlbums = useMemo(() => {
+    const withDate = albums.filter((a) => Boolean(a.addedAt));
+    if (withDate.length === 0) return [];
+    return withDate.slice().sort((a, b) => (b.addedAt ?? '').localeCompare(a.addedAt ?? '')).slice(0, 8);
+  }, [albums]);
 
   const artists = useMemo(() => {
     const map = new Map<string, number>();
@@ -196,6 +263,24 @@ function App() {
       setCurrentPath(track.path);
       setIsPlaying(true);
       setStatus(`Playing ${track.title}`);
+
+      const nowIso = new Date().toISOString();
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              library: {
+                ...prev.library,
+                tracks: prev.library.tracks.map((t) =>
+                  t.path === track.path
+                    ? { ...t, play_count: (t.play_count ?? 0) + 1, last_played_at: nowIso }
+                    : t,
+                ),
+              },
+            }
+          : prev,
+      );
+      void recordPlay(track.path).catch(() => {});
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -218,6 +303,12 @@ function App() {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const shufflePlay = async () => {
+    if (allTracks.length === 0) return;
+    const pick = allTracks[Math.floor(Math.random() * allTracks.length)];
+    await play(pick);
   };
 
   const skip = async (delta: 1 | -1) => {
@@ -259,13 +350,20 @@ function App() {
         </div>
 
         <nav className="nav-section">
-          <div className="nav-label">Library</div>
+          <div className="nav-label">Browse</div>
+          <button
+            className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setView('dashboard')}
+          >
+            <span className="nav-icon">⌂</span>Dashboard
+          </button>
           <button
             className={`nav-item ${view === 'tracks' ? 'active' : ''}`}
             onClick={() => {
               setView('tracks');
               setSelectedAlbum(null);
               setSelectedArtist(null);
+              setSelectedPlaylist(null);
             }}
           >
             <span className="nav-icon">♪</span>Tracks
@@ -326,6 +424,48 @@ function App() {
       </aside>
 
       <main className="content">
+        {view === 'dashboard' && (
+          <DashboardView
+            tracks={allTracks}
+            albums={albums}
+            recentAlbums={recentAlbums}
+            artists={artists}
+            playlists={playlists}
+            currentTrack={currentTrack}
+            featuredSeed={featuredSeed}
+            onShuffle={shufflePlay}
+            onAddFolder={importFolder}
+            onMaintenance={maintenance}
+            onShuffleFeatured={() => setFeaturedSeed((s) => s + 1)}
+            onOpenAlbum={(album) => {
+              setSelectedAlbum(album);
+              setSelectedArtist(null);
+              setSelectedPlaylist(null);
+              setView('tracks');
+            }}
+            onOpenArtist={(artist) => {
+              setSelectedArtist(artist);
+              setSelectedAlbum(null);
+              setSelectedPlaylist(null);
+              setView('tracks');
+            }}
+            onOpenPlaylist={(pl) => {
+              setSelectedPlaylist(pl);
+              setSelectedAlbum(null);
+              setSelectedArtist(null);
+              setView('tracks');
+            }}
+            onPlayPlaylist={(pl) => {
+              if (pl.tracks.length === 0) return;
+              const pick = pl.tracks[Math.floor(Math.random() * pl.tracks.length)];
+              void play(pick);
+            }}
+            onOpenView={(v) => setView(v)}
+            onPlay={play}
+            busy={!!busy}
+          />
+        )}
+
         {view === 'tracks' && (
           <TracksView
             tracks={filteredTracks}
@@ -334,19 +474,26 @@ function App() {
             currentPath={currentPath}
             isPlaying={isPlaying}
             onPlay={play}
-            title={selectedAlbum ?? selectedArtist ?? 'All tracks'}
+            title={
+              selectedPlaylist
+                ? selectedPlaylist.name
+                : (selectedAlbum ?? selectedArtist ?? 'All tracks')
+            }
             subtitle={
-              selectedAlbum
-                ? 'Album'
-                : selectedArtist
-                  ? 'Artist'
-                  : `${lib.track_count} tracks in your library`
+              selectedPlaylist
+                ? selectedPlaylist.description
+                : selectedAlbum
+                  ? 'Album'
+                  : selectedArtist
+                    ? 'Artist'
+                    : `${lib.track_count} tracks in your library`
             }
             onClearFilter={
-              selectedAlbum || selectedArtist
+              selectedAlbum || selectedArtist || selectedPlaylist
                 ? () => {
                     setSelectedAlbum(null);
                     setSelectedArtist(null);
+                    setSelectedPlaylist(null);
                   }
                 : undefined
             }
@@ -517,8 +664,16 @@ function TracksView({
   );
 }
 
+type AlbumSummary = {
+  album: string;
+  artist: string | null;
+  count: number;
+  samplePath: string;
+  addedAt: string | null;
+};
+
 interface AlbumsViewProps {
-  albums: Array<{ album: string; artist: string | null; count: number; samplePath: string }>;
+  albums: AlbumSummary[];
   onSelect: (album: string) => void;
 }
 
@@ -684,6 +839,263 @@ function SettingsView({ settings, onChange, onMaintenance, busy }: SettingsViewP
           </p>
         </section>
       </div>
+    </div>
+  );
+}
+
+interface DashboardViewProps {
+  tracks: Track[];
+  albums: AlbumSummary[];
+  recentAlbums: AlbumSummary[];
+  artists: Array<{ artist: string; count: number }>;
+  playlists: AutoPlaylist[];
+  currentTrack: Track | null;
+  featuredSeed: number;
+  onShuffle: () => void;
+  onAddFolder: () => void;
+  onMaintenance: () => void;
+  onShuffleFeatured: () => void;
+  onOpenAlbum: (album: string) => void;
+  onOpenArtist: (artist: string) => void;
+  onOpenPlaylist: (playlist: AutoPlaylist) => void;
+  onPlayPlaylist: (playlist: AutoPlaylist) => void;
+  onOpenView: (view: View) => void;
+  onPlay: (track: Track) => void;
+  busy: boolean;
+}
+
+function DashboardView({
+  tracks,
+  albums,
+  recentAlbums,
+  artists,
+  playlists,
+  currentTrack,
+  featuredSeed,
+  onShuffle,
+  onAddFolder,
+  onMaintenance,
+  onShuffleFeatured,
+  onOpenAlbum,
+  onOpenArtist,
+  onOpenPlaylist,
+  onPlayPlaylist,
+  onOpenView,
+  onPlay,
+  busy,
+}: DashboardViewProps) {
+  const featured = useMemo(
+    () => sampleN(albums, 6),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [albums, featuredSeed],
+  );
+
+  const topArtists = useMemo(
+    () => artists.slice().sort((a, b) => b.count - a.count).slice(0, 6),
+    [artists],
+  );
+
+  const isEmpty = tracks.length === 0;
+
+  if (isEmpty) {
+    return (
+      <div className="view dashboard">
+        <header className="dashboard-hero">
+          <div>
+            <div className="view-eyebrow">{greeting()}</div>
+            <h1 className="view-title">Welcome to Resonance</h1>
+            <p className="dashboard-lead">
+              Your library is empty. Import a folder of music to get started — FLAC, ALAC, WAV, AIFF, M4A, AAC, MP3,
+              OGG, and Opus are all supported.
+            </p>
+          </div>
+        </header>
+        <div className="empty">
+          <div className="empty-icon">♪</div>
+          <h2>No music yet</h2>
+          <p>Add a folder to begin scanning. Your audio files are never modified.</p>
+          <button className="primary" onClick={onAddFolder} disabled={busy} style={{ marginTop: 12 }}>
+            + Add folder
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="view dashboard">
+      <header className="dashboard-hero">
+        <div>
+          <div className="view-eyebrow">{greeting()}</div>
+          <h1 className="view-title">
+            {currentTrack ? `Still spinning · ${currentTrack.title}` : 'What are we listening to?'}
+          </h1>
+          <p className="dashboard-lead">
+            {currentTrack
+              ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
+              : `${tracks.length} tracks across ${albums.length} albums and ${artists.length} artists.`}
+          </p>
+        </div>
+        <div className="dashboard-actions">
+          <button className="primary" onClick={onShuffle} disabled={busy}>
+            ▶ Shuffle play
+          </button>
+          <button className="ghost-button" onClick={onAddFolder} disabled={busy}>
+            + Add folder
+          </button>
+          <button className="ghost-button" onClick={onMaintenance} disabled={busy}>
+            ↻ Maintenance
+          </button>
+        </div>
+      </header>
+
+      <section className="dashboard-stats">
+        <button className="stat-tile" onClick={() => onOpenView('tracks')}>
+          <span className="stat-label">Tracks</span>
+          <span className="stat-value">{tracks.length}</span>
+        </button>
+        <button className="stat-tile" onClick={() => onOpenView('albums')}>
+          <span className="stat-label">Albums</span>
+          <span className="stat-value">{albums.length}</span>
+        </button>
+        <button className="stat-tile" onClick={() => onOpenView('artists')}>
+          <span className="stat-label">Artists</span>
+          <span className="stat-value">{artists.length}</span>
+        </button>
+      </section>
+
+      {recentAlbums.length > 0 && (
+        <section className="dashboard-section">
+          <div className="section-head">
+            <h2 className="section-title">Recently added</h2>
+            <button className="ghost-button" onClick={() => onOpenView('albums')}>
+              See all →
+            </button>
+          </div>
+          <div className="card-grid">
+            {recentAlbums.map((a) => (
+              <button key={a.album} className="card" onClick={() => onOpenAlbum(a.album)}>
+                <Cover
+                  trackPath={a.samplePath}
+                  fallback={a.album[0]?.toUpperCase() ?? '◉'}
+                  size="card"
+                />
+                <div className="card-title">{a.album}</div>
+                <div className="card-sub">{a.artist ?? 'Various artists'}</div>
+                <div className="card-meta">{relativeAdded(a.addedAt)} · {a.count} tracks</div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {playlists.length > 0 && (
+        <section className="dashboard-section">
+          <div className="section-head">
+            <h2 className="section-title">Made for you</h2>
+            <div className="section-actions">
+              <button className="ghost-button" onClick={onShuffleFeatured}>
+                ↻ Refresh
+              </button>
+            </div>
+          </div>
+          <div className="playlist-grid">
+            {playlists.map((pl) => (
+              <div key={pl.id} className="playlist-card" style={{ background: pl.accent }}>
+                <button
+                  className="playlist-open"
+                  onClick={() => onOpenPlaylist(pl)}
+                  title={`Open ${pl.name}`}
+                >
+                  <div className="playlist-name">{pl.name}</div>
+                  <div className="playlist-desc">{pl.description}</div>
+                  <div className="playlist-meta">{pl.tracks.length} tracks</div>
+                </button>
+                <button
+                  className="playlist-play"
+                  onClick={() => onPlayPlaylist(pl)}
+                  title="Shuffle play"
+                >
+                  ▶
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {featured.length > 0 && (
+        <section className="dashboard-section">
+          <div className="section-head">
+            <h2 className="section-title">Featured albums</h2>
+            <div className="section-actions">
+              <button className="ghost-button" onClick={onShuffleFeatured}>
+                ↻ Shuffle
+              </button>
+              <button className="ghost-button" onClick={() => onOpenView('albums')}>
+                See all →
+              </button>
+            </div>
+          </div>
+          <div className="card-grid">
+            {featured.map((a) => (
+              <button key={a.album} className="card" onClick={() => onOpenAlbum(a.album)}>
+                <Cover
+                  trackPath={a.samplePath}
+                  fallback={a.album[0]?.toUpperCase() ?? '◉'}
+                  size="card"
+                />
+                <div className="card-title">{a.album}</div>
+                <div className="card-sub">{a.artist ?? 'Various artists'}</div>
+                <div className="card-meta">{a.count} tracks</div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {topArtists.length > 0 && (
+        <section className="dashboard-section">
+          <div className="section-head">
+            <h2 className="section-title">Top artists</h2>
+            <button className="ghost-button" onClick={() => onOpenView('artists')}>
+              See all →
+            </button>
+          </div>
+          <div className="artist-row">
+            {topArtists.map((a) => (
+              <button key={a.artist} className="artist-tile" onClick={() => onOpenArtist(a.artist)}>
+                <div className="avatar avatar-lg">{a.artist[0]?.toUpperCase() ?? '?'}</div>
+                <div className="artist-tile-name">{a.artist}</div>
+                <div className="artist-tile-meta">{a.count} tracks</div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <section className="dashboard-section">
+        <div className="section-head">
+          <h2 className="section-title">Quick picks</h2>
+          <button className="ghost-button" onClick={onShuffle}>
+            ↻ Shuffle one
+          </button>
+        </div>
+        <div className="quick-list">
+          {sampleN(tracks, 5).map((t) => (
+            <button key={t.id} className="quick-item" onClick={() => onPlay(t)}>
+              <Cover trackPath={t.path} fallback={t.title[0]?.toUpperCase() ?? '♪'} size="md" />
+              <div className="quick-meta">
+                <div className="quick-title">{t.title}</div>
+                <div className="quick-sub">
+                  {(t.artist ?? 'Unknown artist') + ' — ' + (t.album ?? 'Unknown album')}
+                </div>
+              </div>
+              <span className="quick-duration">{formatDuration(t.duration_seconds)}</span>
+            </button>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }

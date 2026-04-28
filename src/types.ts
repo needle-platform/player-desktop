@@ -18,6 +18,11 @@ export interface Track {
   sample_rate: number | null;
   bit_depth: number | null;
   track_number: number | null;
+  genre: string | null;
+  year: number | null;
+  added_at: string | null;
+  play_count: number;
+  last_played_at: string | null;
 }
 
 export interface LibraryData {

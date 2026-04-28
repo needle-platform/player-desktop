@@ -51,6 +51,8 @@ fn read_track(path: &Path) -> Track {
     let mut sample_rate = None;
     let mut bit_depth = None;
     let mut track_number = None;
+    let mut genre = None;
+    let mut year = None;
 
     if let Ok(tagged_file) = Probe::open(path).and_then(|probe| probe.read()) {
         let properties = tagged_file.properties();
@@ -65,6 +67,8 @@ fn read_track(path: &Path) -> Track {
             artist = tag.artist().map(|value| value.to_string());
             album = tag.album().map(|value| value.to_string());
             track_number = tag.track().map(|value| value as i64);
+            genre = tag.genre().map(|value| value.to_string());
+            year = tag.year().map(|value| value as i64);
         }
     }
 
@@ -82,6 +86,11 @@ fn read_track(path: &Path) -> Track {
         sample_rate,
         bit_depth,
         track_number,
+        genre,
+        year,
+        added_at: None,
+        play_count: 0,
+        last_played_at: None,
     }
 }
 

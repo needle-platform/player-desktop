@@ -32,6 +32,11 @@ pub struct Track {
     pub sample_rate: Option<u32>,
     pub bit_depth: Option<u8>,
     pub track_number: Option<i64>,
+    pub genre: Option<String>,
+    pub year: Option<i64>,
+    pub added_at: Option<String>,
+    pub play_count: i64,
+    pub last_played_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
