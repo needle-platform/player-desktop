@@ -94,7 +94,8 @@ impl MpvController {
 
     pub fn play(&mut self, path: &str) -> Result<()> {
         let mut stream = self.connect_or_spawn()?;
-        self.send(&mut stream, json!({ "command": ["loadfile", path, "replace"] }))
+        self.send(&mut stream, json!({ "command": ["loadfile", path, "replace"] }))?;
+        self.send(&mut stream, json!({ "command": ["set_property", "pause", false] }))
     }
 
     pub fn play_queue(&mut self, paths: &[String]) -> Result<()> {
@@ -104,7 +105,8 @@ impl MpvController {
         self.write_playlist(paths)?;
         let mut stream = self.connect_or_spawn()?;
         let playlist_path = self.playlist_path.to_string_lossy().to_string();
-        self.send(&mut stream, json!({ "command": ["loadlist", playlist_path, "replace"] }))
+        self.send(&mut stream, json!({ "command": ["loadlist", playlist_path, "replace"] }))?;
+        self.send(&mut stream, json!({ "command": ["set_property", "pause", false] }))
     }
 
     pub fn pause(&mut self) -> Result<()> {

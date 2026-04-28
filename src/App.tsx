@@ -947,12 +947,28 @@ function App() {
             tracks={allTracks}
             currentPath={currentPath}
             isPlaying={isPlaying}
+            isCurrentAlbumCurrent={currentTrack?.album === selectedAlbum}
             onBack={() => {
               setSelectedAlbum(null);
               setView(albumReturnView.current);
             }}
             onPlayTrack={(track) => playAlbumFromTrack(selectedAlbum, track)}
-            onPlayAlbum={() => playAlbum(selectedAlbum)}
+            onPlayAlbum={() => {
+              if (currentTrack?.album === selectedAlbum) {
+                if (isPlaying) {
+                  void pausePlayback().then(() => setIsPlaying(false)).catch((error) => {
+                    setStatus(error instanceof Error ? error.message : String(error));
+                  });
+                  return;
+                }
+
+                void resumePlayback().then(() => setIsPlaying(true)).catch((error) => {
+                  setStatus(error instanceof Error ? error.message : String(error));
+                });
+                return;
+              }
+              void playAlbum(selectedAlbum);
+            }}
             onShuffleAlbum={() => {
               const list = tracksForAlbum(selectedAlbum);
               for (let i = list.length - 1; i > 0; i--) {
@@ -1233,6 +1249,7 @@ interface AlbumDetailViewProps {
   tracks: Track[];
   currentPath: string | null;
   isPlaying: boolean;
+  isCurrentAlbumCurrent: boolean;
   onBack: () => void;
   onPlayTrack: (track: Track) => void;
   onPlayAlbum: () => void;
@@ -1245,6 +1262,7 @@ function AlbumDetailView({
   tracks,
   currentPath,
   isPlaying,
+  isCurrentAlbumCurrent,
   onBack,
   onPlayTrack,
   onPlayAlbum,
@@ -1375,7 +1393,7 @@ function AlbumDetailView({
           )}
           <div className="album-hero-actions">
             <button className="primary-button" onClick={onPlayAlbum}>
-              ▶ Play
+              {isCurrentAlbumCurrent ? (isPlaying ? '⏸ Pause' : '▶ Resume') : '▶ Play'}
             </button>
             <button className="ghost-button" onClick={onShuffleAlbum}>
               ⤮ Shuffle
