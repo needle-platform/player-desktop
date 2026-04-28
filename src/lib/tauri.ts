@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppSettings, BootstrapPayload } from '../types';
+import type { AppSettings, BootstrapPayload, PlaybackState } from '../types';
 
 export const bootstrapApp = () => invoke<BootstrapPayload>('bootstrap_app');
 
@@ -21,6 +21,17 @@ export const stopPlayback = () => invoke<void>('stop_playback');
 
 export const seekPlayback = (positionSeconds: number) =>
   invoke<void>('seek_playback', { positionSeconds });
+
+export const getPlaybackState = () => invoke<PlaybackState>('get_playback_state');
+
+export const setPlaybackVolume = (volumePercent: number) =>
+  invoke<void>('set_playback_volume', { volumePercent });
+
+export const setPlaybackMuted = (muted: boolean) =>
+  invoke<void>('set_playback_muted', { muted });
+
+export const setAudioDevice = (deviceName: string) =>
+  invoke<void>('set_audio_device', { deviceName });
 
 export const runMaintenance = () => invoke<BootstrapPayload>('run_maintenance');
 

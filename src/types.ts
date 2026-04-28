@@ -42,3 +42,15 @@ export interface BootstrapPayload {
   settings: AppSettings;
   library: LibraryData;
 }
+
+export interface AudioDevice {
+  name: string;
+  description: string;
+}
+
+export interface PlaybackState {
+  volume: number;
+  muted: boolean;
+  audio_device: string;
+  audio_devices: AudioDevice[];
+}

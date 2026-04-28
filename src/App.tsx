@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   bootstrapApp,
+  getPlaybackState,
   pausePlayback,
   playQueue as tauriPlayQueue,
   playTrack,
@@ -10,12 +11,16 @@ import {
   removeLibraryRoot,
   resumePlayback,
   runMaintenance,
+  setAudioDevice as setPlaybackAudioDevice,
+  setPlaybackMuted,
+  setPlaybackVolume as setPlaybackVolumeLevel,
   saveSettings,
   scanLibrary,
   seekPlayback,
   stopPlayback,
 } from './lib/tauri';
 import type {
+  AudioDevice,
   AppSettings,
   BootstrapPayload,
   EqualizerPreset,
@@ -92,6 +97,36 @@ const formatQuality = (track: Track) => {
 };
 
 const folderName = (path: string) => path.split('/').filter(Boolean).pop() ?? path;
+const defaultAudioDevice: AudioDevice = { name: 'auto', description: 'System default' };
+
+const clampVolume = (value: number) => Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+const audioDeviceKey = (description: string) => description.trim().toLowerCase();
+
+const normalizeAudioDevices = (data: unknown): AudioDevice[] => {
+  if (!Array.isArray(data)) return [];
+
+  const seen = new Set<string>();
+
+  return data
+    .map((device) => {
+      if (!device || typeof device !== 'object') return null;
+      const record = device as Record<string, unknown>;
+      const name = typeof record.name === 'string' ? record.name : null;
+      if (!name) return null;
+      const description =
+        typeof record.description === 'string' && record.description.trim().length > 0
+          ? record.description
+          : name === 'auto'
+            ? defaultAudioDevice.description
+            : name;
+      return { name, description };
+    })
+    .filter((device): device is AudioDevice => {
+      if (!device || seen.has(device.name)) return false;
+      seen.add(device.name);
+      return true;
+    });
+};
 
 function PlayingIndicator() {
   return (
@@ -100,6 +135,88 @@ function PlayingIndicator() {
       <span className="playing-indicator-bar" />
       <span className="playing-indicator-bar" />
     </span>
+  );
+}
+
+function PreviousIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6 6v12" />
+      <path d="M18 6.5 10 12l8 5.5z" />
+    </svg>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 6.5 18 12 8 17.5z" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 6.5v11" />
+      <path d="M15 6.5v11" />
+    </svg>
+  );
+}
+
+function NextIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M18 6v12" />
+      <path d="M6 6.5 14 12l-8 5.5z" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="7" y="7" width="10" height="10" rx="1.5" />
+    </svg>
+  );
+}
+
+function VolumeHighIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 9v6h4l5 4V5l-5 4z" />
+      <path d="M18 9.5a4.5 4.5 0 0 1 0 5" />
+      <path d="M20 7a8 8 0 0 1 0 10" />
+    </svg>
+  );
+}
+
+function VolumeLowIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 9v6h4l5 4V5l-5 4z" />
+      <path d="M18 10a3 3 0 0 1 0 4" />
+    </svg>
+  );
+}
+
+function VolumeMutedIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 9v6h4l5 4V5l-5 4z" />
+      <path d="m17 9 4 6" />
+      <path d="m21 9-4 6" />
+    </svg>
+  );
+}
+
+function OutputDeviceIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="6" width="16" height="10" rx="2" />
+      <path d="M8 20h8" />
+      <path d="M12 16v4" />
+    </svg>
   );
 }
 
@@ -115,6 +232,11 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackPosition, setPlaybackPosition] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(0);
+  const [volumeLevel, setVolumeLevel] = useState(100);
+  const [isMuted, setIsMuted] = useState(false);
+  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([defaultAudioDevice]);
+  const [selectedAudioDevice, setSelectedAudioDevice] = useState(defaultAudioDevice.name);
+  const [isDeviceMenuOpen, setIsDeviceMenuOpen] = useState(false);
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [status, setStatus] = useState('');
@@ -122,6 +244,7 @@ function App() {
   const lastRecordedPath = useRef<string | null>(null);
   const scrubPositionRef = useRef<number | null>(null);
   const albumReturnView = useRef<View>('albums');
+  const deviceMenuRef = useRef<HTMLDivElement | null>(null);
 
   const openAlbum = (album: string) => {
     albumReturnView.current = view === 'tracks' ? 'albums' : view;
@@ -150,6 +273,9 @@ function App() {
               setStatus('');
               return;
             }
+            // Queue transitions can briefly clear `path`; mark the next loaded
+            // track as active immediately and let a later pause event override.
+            setIsPlaying(true);
             scrubPositionRef.current = null;
             setScrubPosition(null);
             setPlaybackPosition(0);
@@ -181,11 +307,27 @@ function App() {
             const paused = data === true;
             setIsPlaying(!paused);
           } else if (name === 'time-pos') {
+            if (typeof data === 'number') {
+              setIsPlaying(true);
+            }
             if (scrubPositionRef.current == null) {
               setPlaybackPosition(typeof data === 'number' ? data : 0);
             }
           } else if (name === 'duration') {
             setPlaybackDuration(typeof data === 'number' ? data : 0);
+          } else if (name === 'volume') {
+            setVolumeLevel(typeof data === 'number' ? clampVolume(data) : 100);
+          } else if (name === 'mute') {
+            setIsMuted(data === true);
+          } else if (name === 'audio-device') {
+            if (typeof data === 'string' && data.length > 0) {
+              setSelectedAudioDevice(data);
+            }
+          } else if (name === 'audio-device-list') {
+            const devices = normalizeAudioDevices(data);
+            if (devices.length > 0) {
+              setAudioDevices(devices);
+            }
           }
         },
       );
@@ -209,6 +351,29 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const playback = await getPlaybackState();
+        if (cancelled) return;
+        setVolumeLevel(clampVolume(playback.volume));
+        setIsMuted(playback.muted);
+        setSelectedAudioDevice(playback.audio_device || defaultAudioDevice.name);
+        setAudioDevices(playback.audio_devices.length > 0 ? playback.audio_devices : [defaultAudioDevice]);
+      } catch (error) {
+        if (!cancelled) {
+          setStatus((prev) => prev || (error instanceof Error ? error.message : String(error)));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!data) return;
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const apply = () => {
@@ -219,6 +384,29 @@ function App() {
     media.addEventListener('change', apply);
     return () => media.removeEventListener('change', apply);
   }, [data]);
+
+  useEffect(() => {
+    if (!isDeviceMenuOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!deviceMenuRef.current?.contains(event.target as Node)) {
+        setIsDeviceMenuOpen(false);
+      }
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsDeviceMenuOpen(false);
+      }
+    };
+
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isDeviceMenuOpen]);
 
   const allTracks = data?.library.tracks ?? [];
 
@@ -299,7 +487,50 @@ function App() {
     [allTracks, currentPath],
   );
 
+  const selectedRawOutputDevice = useMemo(
+    () => audioDevices.find((device) => device.name === selectedAudioDevice) ?? null,
+    [audioDevices, selectedAudioDevice],
+  );
+  const selectedOutputDeviceKey = audioDeviceKey(
+    selectedRawOutputDevice?.description ??
+      (selectedAudioDevice === 'auto' ? defaultAudioDevice.description : selectedAudioDevice),
+  );
   const currentAlbum = currentTrack?.album ?? null;
+  const outputDevices = useMemo(() => {
+    const devices = audioDevices.length > 0 ? audioDevices : [defaultAudioDevice];
+
+    const deduped = new Map<string, AudioDevice>();
+    for (const device of devices) {
+      const key = audioDeviceKey(device.description);
+      const existing = deduped.get(key);
+      if (!existing || device.name === selectedAudioDevice) {
+        deduped.set(key, device);
+      }
+    }
+
+    const visibleDevices = Array.from(deduped.values());
+    if (
+      selectedAudioDevice &&
+      !visibleDevices.some((device) => device.name === selectedAudioDevice) &&
+      !visibleDevices.some((device) => audioDeviceKey(device.description) === selectedOutputDeviceKey)
+    ) {
+      visibleDevices.unshift({
+        name: selectedAudioDevice,
+        description: selectedRawOutputDevice?.description ??
+          (selectedAudioDevice === 'auto' ? defaultAudioDevice.description : selectedAudioDevice),
+      });
+    }
+
+    return visibleDevices;
+  }, [audioDevices, selectedAudioDevice, selectedOutputDeviceKey, selectedRawOutputDevice]);
+  const activeOutputDevice = useMemo(
+    () =>
+      outputDevices.find((device) => device.name === selectedAudioDevice) ??
+      outputDevices.find((device) => audioDeviceKey(device.description) === selectedOutputDeviceKey) ??
+      outputDevices[0] ??
+      defaultAudioDevice,
+    [outputDevices, selectedAudioDevice, selectedOutputDeviceKey],
+  );
   const effectiveDuration = playbackDuration > 0 ? playbackDuration : (currentTrack?.duration_seconds ?? 0);
   const shownPosition = scrubPosition ?? playbackPosition;
   const clampedPosition = effectiveDuration > 0 ? Math.min(shownPosition, effectiveDuration) : shownPosition;
@@ -482,6 +713,56 @@ function App() {
       setStatus(error instanceof Error ? error.message : String(error));
     }
   };
+
+  const updateVolume = async (nextVolume: number) => {
+    const clamped = clampVolume(nextVolume);
+    const previous = volumeLevel;
+    setVolumeLevel(clamped);
+
+    try {
+      await setPlaybackVolumeLevel(clamped);
+    } catch (error) {
+      setVolumeLevel(previous);
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const toggleMute = async () => {
+    const nextMuted = !isMuted;
+    const previous = isMuted;
+    setIsMuted(nextMuted);
+
+    try {
+      await setPlaybackMuted(nextMuted);
+    } catch (error) {
+      setIsMuted(previous);
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const updateAudioDevice = async (deviceName: string) => {
+    const previous = selectedAudioDevice;
+    setSelectedAudioDevice(deviceName);
+    setIsDeviceMenuOpen(false);
+
+    try {
+      await setPlaybackAudioDevice(deviceName);
+    } catch (error) {
+      setSelectedAudioDevice(previous);
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const roundedVolume = Math.round(volumeLevel);
+  const volumeLabel = isMuted ? 'Unmute' : 'Mute';
+  const volumeIcon =
+    isMuted || roundedVolume === 0 ? (
+      <VolumeMutedIcon />
+    ) : roundedVolume < 45 ? (
+      <VolumeLowIcon />
+    ) : (
+      <VolumeHighIcon />
+    );
 
   if (loading) {
     return <div className="fullscreen-message">Loading…</div>;
@@ -781,26 +1062,79 @@ function App() {
         </div>
 
         <div className="player-controls">
-          <button className="ctrl" onClick={() => skip(-1)} disabled={!currentTrack} title="Previous">
-            ⏮
+          <button className="ctrl" onClick={() => skip(-1)} disabled={!currentTrack} title="Previous" aria-label="Previous">
+            <PreviousIcon />
           </button>
-          <button className="ctrl ctrl-primary" onClick={togglePlayPause} title={isPlaying ? 'Pause' : 'Play'}>
-            {isPlaying ? '⏸' : '▶'}
+          <button
+            className="ctrl ctrl-primary"
+            onClick={togglePlayPause}
+            title={isPlaying ? 'Pause' : 'Play'}
+            aria-label={isPlaying ? 'Pause' : 'Play'}
+          >
+            {isPlaying ? <PauseIcon /> : <PlayIcon />}
           </button>
-          <button className="ctrl" onClick={() => skip(1)} disabled={!currentTrack} title="Next">
-            ⏭
+          <button className="ctrl" onClick={() => skip(1)} disabled={!currentTrack} title="Next" aria-label="Next">
+            <NextIcon />
           </button>
-          <button className="ctrl" onClick={stop} disabled={!currentTrack} title="Stop">
-            ⏹
+          <button className="ctrl" onClick={stop} disabled={!currentTrack} title="Stop" aria-label="Stop">
+            <StopIcon />
           </button>
         </div>
 
         <div className="player-extra">
-          {currentTrack && (
-            <>
-              <span className="player-quality">{formatQuality(currentTrack)}</span>
-            </>
-          )}
+          <div className="volume-controls">
+            <button
+              className={`ctrl ctrl-volume ${isMuted ? 'is-muted' : ''}`}
+              onClick={toggleMute}
+              title={volumeLabel}
+              aria-label={volumeLabel}
+            >
+              {volumeIcon}
+            </button>
+            <input
+              className="volume-slider"
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={roundedVolume}
+              onChange={(event) => void updateVolume(Number(event.currentTarget.value))}
+              aria-label="Volume"
+              style={{ ['--volume-percent' as string]: roundedVolume }}
+            />
+            <span className="volume-value">{roundedVolume}%</span>
+          </div>
+
+          <div className="device-menu" ref={deviceMenuRef}>
+            <button
+              className={`ctrl ctrl-device ${isDeviceMenuOpen ? 'is-open' : ''}`}
+              onClick={() => setIsDeviceMenuOpen((open) => !open)}
+              title={`Output device · ${activeOutputDevice.description}`}
+              aria-label={`Output device · ${activeOutputDevice.description}`}
+              aria-haspopup="menu"
+              aria-expanded={isDeviceMenuOpen}
+            >
+              <OutputDeviceIcon />
+            </button>
+
+            {isDeviceMenuOpen && (
+              <div className="device-menu-panel" role="menu" aria-label="Output devices">
+                <div className="device-menu-title">Output device</div>
+                {outputDevices.map((device) => (
+                  <button
+                    key={device.name}
+                    className={`device-option ${device.name === activeOutputDevice.name ? 'is-active' : ''}`}
+                    onClick={() => void updateAudioDevice(device.name)}
+                    role="menuitemradio"
+                    aria-checked={device.name === activeOutputDevice.name}
+                  >
+                    <span className="device-option-name">{device.description}</span>
+                    {device.name === activeOutputDevice.name && <span className="device-option-check">✓</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </footer>
     </div>

@@ -11,8 +11,11 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
+
+use crate::models::{AudioDevice, PlaybackState};
 
 // Global registry of mpv child PIDs so any code path (signal handler,
 // graceful shutdown, Drop) can reliably terminate them.
@@ -125,6 +128,43 @@ impl MpvController {
         self.send(&mut stream, json!({ "command": ["seek", clamped, "absolute+exact"] }))
     }
 
+    pub fn playback_state(&mut self) -> Result<PlaybackState> {
+        let mut stream = self.connect_or_spawn()?;
+        Ok(PlaybackState {
+            volume: self.property::<f64>(&mut stream, "volume")?.clamp(0.0, 100.0),
+            muted: self.property::<bool>(&mut stream, "mute")?,
+            audio_device: self
+                .property::<Option<String>>(&mut stream, "audio-device")?
+                .unwrap_or_else(|| "auto".to_string()),
+            audio_devices: self.audio_devices(&mut stream)?,
+        })
+    }
+
+    pub fn set_volume(&mut self, volume_percent: f64) -> Result<()> {
+        let mut stream = self.connect_or_spawn()?;
+        let clamped = volume_percent.clamp(0.0, 100.0);
+        self.send(
+            &mut stream,
+            json!({ "command": ["set_property", "volume", clamped] }),
+        )
+    }
+
+    pub fn set_muted(&mut self, muted: bool) -> Result<()> {
+        let mut stream = self.connect_or_spawn()?;
+        self.send(
+            &mut stream,
+            json!({ "command": ["set_property", "mute", muted] }),
+        )
+    }
+
+    pub fn set_audio_device(&mut self, device_name: &str) -> Result<()> {
+        let mut stream = self.connect_or_spawn()?;
+        self.send(
+            &mut stream,
+            json!({ "command": ["set_property", "audio-device", device_name] }),
+        )
+    }
+
     fn connect_or_spawn(&mut self) -> Result<UnixStream> {
         self.refresh_child_state()?;
 
@@ -132,11 +172,15 @@ impl MpvController {
             self.spawn_mpv()?;
         }
 
-        UnixStream::connect(&self.socket_path).or_else(|_| {
+        let stream = UnixStream::connect(&self.socket_path).or_else(|_| {
             let _ = fs::remove_file(&self.socket_path);
             self.spawn_mpv()?;
             UnixStream::connect(&self.socket_path).context("Unable to connect to mpv IPC socket")
-        })
+        })?;
+
+        self.start_listener();
+
+        Ok(stream)
     }
 
     fn connect_existing(&mut self) -> Result<UnixStream> {
@@ -146,7 +190,10 @@ impl MpvController {
             bail!("No active playback session")
         }
 
-        UnixStream::connect(&self.socket_path).context("Unable to connect to mpv IPC socket")
+        let stream =
+            UnixStream::connect(&self.socket_path).context("Unable to connect to mpv IPC socket")?;
+        self.start_listener();
+        Ok(stream)
     }
 
     fn send(&self, stream: &mut UnixStream, payload: serde_json::Value) -> Result<()> {
@@ -154,6 +201,54 @@ impl MpvController {
         stream.write_all(b"\n")?;
         stream.flush()?;
         Ok(())
+    }
+
+    fn request(&self, stream: &mut UnixStream, payload: serde_json::Value) -> Result<serde_json::Value> {
+        self.send(stream, payload)?;
+
+        let mut reader = BufReader::new(
+            stream
+                .try_clone()
+                .context("Unable to clone mpv IPC stream for response")?,
+        );
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .context("Unable to read mpv IPC response")?;
+
+        if line.trim().is_empty() {
+            bail!("mpv returned an empty IPC response")
+        }
+
+        let value: serde_json::Value =
+            serde_json::from_str(&line).context("Unable to decode mpv IPC response")?;
+
+        match value.get("error").and_then(|error| error.as_str()) {
+            Some("success") | None => {}
+            Some(error) => bail!("mpv IPC error: {error}"),
+        }
+
+        Ok(value.get("data").cloned().unwrap_or(serde_json::Value::Null))
+    }
+
+    fn property<T: DeserializeOwned>(&self, stream: &mut UnixStream, name: &str) -> Result<T> {
+        let data = self.request(stream, json!({ "command": ["get_property", name] }))?;
+        serde_json::from_value(data)
+            .with_context(|| format!("Unable to parse mpv property `{name}`"))
+    }
+
+    fn audio_devices(&self, stream: &mut UnixStream) -> Result<Vec<AudioDevice>> {
+        let mut devices = self.property::<Vec<AudioDevice>>(stream, "audio-device-list")?;
+        if !devices.iter().any(|device| device.name == "auto") {
+            devices.insert(
+                0,
+                AudioDevice {
+                    name: "auto".to_string(),
+                    description: "System default".to_string(),
+                },
+            );
+        }
+        Ok(devices)
     }
 
     fn write_playlist(&self, paths: &[String]) -> Result<()> {
@@ -286,6 +381,26 @@ fn run_property_listener(socket_path: PathBuf, app: AppHandle) {
         writer,
         "{}",
         json!({"command": ["observe_property", 4, "duration"]})
+    );
+    let _ = writeln!(
+        writer,
+        "{}",
+        json!({"command": ["observe_property", 5, "volume"]})
+    );
+    let _ = writeln!(
+        writer,
+        "{}",
+        json!({"command": ["observe_property", 6, "mute"]})
+    );
+    let _ = writeln!(
+        writer,
+        "{}",
+        json!({"command": ["observe_property", 7, "audio-device"]})
+    );
+    let _ = writeln!(
+        writer,
+        "{}",
+        json!({"command": ["observe_property", 8, "audio-device-list"]})
     );
     let _ = writer.flush();
 

@@ -59,3 +59,17 @@ pub struct BootstrapPayload {
     pub settings: AppSettings,
     pub library: LibraryData,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioDevice {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackState {
+    pub volume: f64,
+    pub muted: bool,
+    pub audio_device: String,
+    pub audio_devices: Vec<AudioDevice>,
+}

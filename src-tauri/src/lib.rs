@@ -8,7 +8,7 @@ mod mpv;
 
 use std::{fs, path::Path, sync::Mutex};
 
-use models::{AppSettings, BootstrapPayload};
+use models::{AppSettings, BootstrapPayload, PlaybackState};
 use mpv::MpvController;
 use tauri::Manager;
 
@@ -106,6 +106,49 @@ fn seek_playback(position_seconds: f64, state: tauri::State<'_, AppState>) -> Re
         .lock()
         .map_err(|_| "Unable to acquire player state".to_string())?;
     player.seek_to(position_seconds).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_playback_state(state: tauri::State<'_, AppState>) -> Result<PlaybackState, String> {
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player.playback_state().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_playback_volume(
+    volume_percent: f64,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .set_volume(volume_percent)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_playback_muted(muted: bool, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player.set_muted(muted).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_audio_device(device_name: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .set_audio_device(&device_name)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -273,6 +316,10 @@ pub fn run() {
             resume_playback,
             stop_playback,
             seek_playback,
+            get_playback_state,
+            set_playback_volume,
+            set_playback_muted,
+            set_audio_device,
             run_maintenance,
             remove_library_root,
             get_cover_art,
