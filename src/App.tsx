@@ -20,6 +20,7 @@ import type {
   Track,
 } from './types';
 import { useCoverArt } from './lib/cover';
+import { useArtistImage } from './lib/artistImage';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'artists' | 'settings';
@@ -732,6 +733,35 @@ function Cover({ trackPath, fallback, size }: CoverProps) {
   return <div className={className}>{fallback}</div>;
 }
 
+interface ArtistAvatarProps {
+  name: string;
+  size: 'sm' | 'lg';
+}
+
+function ArtistAvatar({ name, size }: ArtistAvatarProps) {
+  const url = useArtistImage(name);
+  const className = size === 'lg' ? 'avatar avatar-lg' : 'avatar';
+  const initial = name[0]?.toUpperCase() ?? '?';
+
+  if (url) {
+    return (
+      <div className={className}>
+        <img
+          src={url}
+          alt=""
+          className="avatar-img"
+          referrerPolicy="no-referrer"
+          onError={(event) => {
+            (event.currentTarget as HTMLImageElement).style.display = 'none';
+          }}
+        />
+      </div>
+    );
+  }
+
+  return <div className={className}>{initial}</div>;
+}
+
 interface ArtistsViewProps {
   artists: Array<{ artist: string; count: number }>;
   onSelect: (artist: string) => void;
@@ -755,7 +785,7 @@ function ArtistsView({ artists, onSelect }: ArtistsViewProps) {
         <div className="list">
           {artists.map((a) => (
             <button key={a.artist} className="list-row" onClick={() => onSelect(a.artist)}>
-              <div className="avatar">{a.artist[0]?.toUpperCase() ?? '?'}</div>
+              <ArtistAvatar name={a.artist} size="sm" />
               <div className="list-main">
                 <div className="list-title">{a.artist}</div>
                 <div className="list-sub">{a.count} tracks</div>
@@ -1065,7 +1095,7 @@ function DashboardView({
           <div className="artist-row">
             {topArtists.map((a) => (
               <button key={a.artist} className="artist-tile" onClick={() => onOpenArtist(a.artist)}>
-                <div className="avatar avatar-lg">{a.artist[0]?.toUpperCase() ?? '?'}</div>
+                <ArtistAvatar name={a.artist} size="lg" />
                 <div className="artist-tile-name">{a.artist}</div>
                 <div className="artist-tile-meta">{a.count} tracks</div>
               </button>
@@ -1082,7 +1112,7 @@ function DashboardView({
           </button>
         </div>
         <div className="quick-list">
-          {sampleN(tracks, 5).map((t) => (
+          {sampleN(tracks, 10).map((t) => (
             <button key={t.id} className="quick-item" onClick={() => onPlay(t)}>
               <Cover trackPath={t.path} fallback={t.title[0]?.toUpperCase() ?? '♪'} size="md" />
               <div className="quick-meta">

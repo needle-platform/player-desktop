@@ -409,6 +409,7 @@ input, select {
 .list-row:hover { background: var(--row-hover); }
 
 .avatar {
+  position: relative;
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -417,6 +418,17 @@ input, select {
   font-weight: 600;
   display: grid;
   place-items: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.avatar-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .list-title { font-size: 14px; font-weight: 500; }
 .list-sub { font-size: 12px; color: var(--muted); }
@@ -655,29 +667,29 @@ input, select {
 
 .artist-row {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 16px;
 }
 .artist-tile {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 16px 12px;
+  gap: 12px;
+  padding: 22px 14px 18px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 14px;
   text-align: center;
   transition: border-color 120ms ease, transform 120ms ease;
 }
 .artist-tile:hover { border-color: var(--accent); transform: translateY(-2px); }
 .avatar-lg {
-  width: 64px;
-  height: 64px;
-  font-size: 22px;
+  width: 92px;
+  height: 92px;
+  font-size: 30px;
 }
 .artist-tile-name {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text);
   max-width: 100%;
@@ -688,13 +700,19 @@ input, select {
 .artist-tile-meta { font-size: 11px; color: var(--muted); }
 
 .quick-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 8px;
+}
+
+@media (max-width: 900px) {
+  .quick-list {
+    grid-template-columns: 1fr;
+  }
 }
 .quick-item {
   display: grid;

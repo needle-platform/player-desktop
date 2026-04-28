@@ -1,3 +1,4 @@
+mod artist;
 mod cover;
 mod db;
 mod library;
@@ -114,6 +115,38 @@ fn record_play(path: String, state: tauri::State<'_, AppState>) -> Result<(), St
 }
 
 #[tauri::command]
+async fn get_artist_image(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<artist::ArtistImage>, String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(cached) = db::get_artist_image(&state.db_path, &trimmed)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(cached.map(|url| artist::ArtistImage {
+            url,
+            source: "cache".into(),
+        }));
+    }
+
+    match artist::fetch_artist_image(&trimmed).await {
+        Ok(Some(image)) => {
+            let _ = db::cache_artist_image(&state.db_path, &trimmed, Some(&image.url));
+            Ok(Some(image))
+        }
+        Ok(None) => {
+            let _ = db::cache_artist_image(&state.db_path, &trimmed, None);
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
 fn get_cover_art(track_path: String) -> Result<Option<cover::CoverArt>, String> {
     let path = Path::new(&track_path);
     if !path.exists() {
@@ -153,7 +186,8 @@ pub fn run() {
             run_maintenance,
             remove_library_root,
             get_cover_art,
-            record_play
+            record_play,
+            get_artist_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -36,6 +36,12 @@ pub fn init_database(db_path: &Path) -> Result<()> {
         CREATE TABLE IF NOT EXISTS library_roots (
             path TEXT PRIMARY KEY
         );
+
+        CREATE TABLE IF NOT EXISTS artist_images (
+            name TEXT PRIMARY KEY,
+            url TEXT,
+            fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         ",
     )?;
 
@@ -253,6 +259,33 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
     }
 
     transaction.commit()?;
+    Ok(())
+}
+
+pub fn get_artist_image(db_path: &Path, name: &str) -> Result<Option<Option<String>>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "SELECT url FROM artist_images WHERE name = ?1
+         AND datetime(fetched_at) > datetime('now', '-30 days')",
+    )?;
+    let mut rows = stmt.query(params![name])?;
+    if let Some(row) = rows.next()? {
+        let url: Option<String> = row.get(0)?;
+        return Ok(Some(url));
+    }
+    Ok(None)
+}
+
+pub fn cache_artist_image(db_path: &Path, name: &str, url: Option<&str>) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "INSERT INTO artist_images (name, url, fetched_at)
+         VALUES (?1, ?2, CURRENT_TIMESTAMP)
+         ON CONFLICT(name) DO UPDATE SET
+            url = excluded.url,
+            fetched_at = excluded.fetched_at",
+        params![name, url],
+    )?;
     Ok(())
 }
 

@@ -38,6 +38,12 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
   - falls back to embedded artwork via `lofty`
   - cached in-memory on the frontend
 
+### Artist portraits
+- Pulled for free via **MusicBrainz → Wikidata → Wikimedia Commons**
+- No API keys required; polite User-Agent + 1 req/sec serialization
+- Cached in SQLite (`artist_images`) for 30 days, including misses so we don't keep hammering the API
+- Graceful fallback to a gradient initial when no portrait is found
+
 ### Views
 - **Dashboard** (default landing screen)
 - **Tracks** with live search and filterable by album / artist / playlist
@@ -72,12 +78,14 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - `src/App.tsx` — UI, layout, routing-by-state
 - `src/lib/tauri.ts` — typed wrappers around all Tauri commands
 - `src/lib/cover.ts` — cover-art hook with module-level cache
+- `src/lib/artistImage.ts` — artist portrait hook with module-level cache
 - `src/lib/playlists.ts` — auto-playlist generators from tags + heuristics
 - `src/styles.css` — full theming + layout
 - `src-tauri/src/lib.rs` — Tauri command surface and app setup
-- `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence
+- `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, artist-image cache
 - `src-tauri/src/library.rs` — folder scanner, dotfile filter, metadata via `lofty`
 - `src-tauri/src/cover.rs` — sidecar + embedded cover-art extraction
+- `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup
 - `src-tauri/src/mpv.rs` — IPC controller, spawns mpv with `--no-video --idle=yes`
 
 ## Requirements

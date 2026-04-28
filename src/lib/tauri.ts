@@ -31,3 +31,11 @@ export const getCoverArt = (trackPath: string) =>
   invoke<CoverArt | null>('get_cover_art', { trackPath });
 
 export const recordPlay = (path: string) => invoke<void>('record_play', { path });
+
+export interface ArtistImage {
+  url: string;
+  source: string;
+}
+
+export const getArtistImage = (name: string) =>
+  invoke<ArtistImage | null>('get_artist_image', { name });
