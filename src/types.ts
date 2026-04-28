@@ -13,10 +13,12 @@ export interface Track {
   title: string;
   artist: string | null;
   album: string | null;
+  album_artist: string | null;
   duration_seconds: number | null;
   format: string | null;
   sample_rate: number | null;
   bit_depth: number | null;
+  disc_number: number | null;
   track_number: number | null;
   genre: string | null;
   year: number | null;

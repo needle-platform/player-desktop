@@ -4,6 +4,7 @@ use anyhow::Result;
 use lofty::{
     prelude::{Accessor, AudioFile, TaggedFileExt},
     probe::Probe,
+    tag::ItemKey,
 };
 use walkdir::{DirEntry, WalkDir};
 
@@ -29,6 +30,7 @@ pub fn scan_folder(folder: &str) -> Result<Vec<Track>> {
         left.artist
             .cmp(&right.artist)
             .then(left.album.cmp(&right.album))
+            .then(left.disc_number.cmp(&right.disc_number))
             .then(left.track_number.cmp(&right.track_number))
             .then(left.title.cmp(&right.title))
             .then(left.path.cmp(&right.path))
@@ -47,9 +49,11 @@ fn read_track(path: &Path) -> Track {
     let mut title = inferred_title.clone();
     let mut artist = None;
     let mut album = None;
+    let mut album_artist = None;
     let mut duration_seconds = None;
     let mut sample_rate = None;
     let mut bit_depth = None;
+    let mut disc_number = None;
     let mut track_number = None;
     let mut genre = None;
     let mut year = None;
@@ -66,10 +70,20 @@ fn read_track(path: &Path) -> Track {
             }
             artist = tag.artist().map(|value| value.to_string());
             album = tag.album().map(|value| value.to_string());
+            album_artist = tag.get_string(&ItemKey::AlbumArtist).map(|value| value.to_string());
+            disc_number = tag.disk().map(|value| value as i64);
             track_number = tag.track().map(|value| value as i64);
             genre = tag.genre().map(|value| value.to_string());
             year = tag.year().map(|value| value as i64);
         }
+    }
+
+    let (inferred_disc_number, inferred_track_number) = infer_disc_and_track(path);
+    if disc_number.is_none() {
+        disc_number = inferred_disc_number;
+    }
+    if track_number.is_none() {
+        track_number = inferred_track_number;
     }
 
     Track {
@@ -78,6 +92,7 @@ fn read_track(path: &Path) -> Track {
         title,
         artist,
         album,
+        album_artist,
         duration_seconds,
         format: path
             .extension()
@@ -85,6 +100,7 @@ fn read_track(path: &Path) -> Track {
             .map(|value| value.to_uppercase()),
         sample_rate,
         bit_depth,
+        disc_number,
         track_number,
         genre,
         year,
@@ -119,4 +135,79 @@ fn is_hidden_path(path: &Path) -> bool {
         .and_then(|value| value.to_str())
         .map(|value| value.starts_with('.'))
         .unwrap_or(false)
+}
+
+fn infer_disc_and_track(path: &Path) -> (Option<i64>, Option<i64>) {
+    let disc_number = path
+        .ancestors()
+        .skip(1)
+        .filter_map(|ancestor| ancestor.file_name().and_then(|value| value.to_str()))
+        .find_map(parse_disc_hint);
+
+    let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("");
+    let file_numbers = parse_disc_track_prefix(stem);
+
+    let inferred_disc = disc_number.or(file_numbers.map(|(disc, _)| disc));
+    let inferred_track = file_numbers
+        .map(|(_, track)| track)
+        .or_else(|| parse_track_prefix(stem));
+
+    (inferred_disc, inferred_track)
+}
+
+fn parse_disc_hint(input: &str) -> Option<i64> {
+    let lower = input.to_ascii_lowercase();
+    for marker in ["disc", "disk", "cd"] {
+        if let Some(index) = lower.find(marker) {
+            let suffix = &lower[index + marker.len()..];
+            if let Some(number) = leading_number(suffix) {
+                return Some(number);
+            }
+        }
+    }
+    None
+}
+
+fn parse_disc_track_prefix(input: &str) -> Option<(i64, i64)> {
+    let mut chars = input.chars().peekable();
+    let disc = take_number(&mut chars)?;
+    match chars.peek() {
+        Some('-') | Some('_') | Some('.') | Some(' ') => {
+            chars.next();
+        }
+        _ => return None,
+    }
+    let track = take_number(&mut chars)?;
+    Some((disc, track))
+}
+
+fn parse_track_prefix(input: &str) -> Option<i64> {
+    leading_number(input)
+}
+
+fn leading_number(input: &str) -> Option<i64> {
+    let mut chars = input.chars().peekable();
+    take_number(&mut chars)
+}
+
+fn take_number<I>(chars: &mut std::iter::Peekable<I>) -> Option<i64>
+where
+    I: Iterator<Item = char>,
+{
+    while matches!(chars.peek(), Some(ch) if ch.is_whitespace()) {
+        chars.next();
+    }
+
+    let mut value = String::new();
+    while matches!(chars.peek(), Some(ch) if ch.is_ascii_digit()) {
+        if let Some(ch) = chars.next() {
+            value.push(ch);
+        }
+    }
+
+    if value.is_empty() {
+        None
+    } else {
+        value.parse::<i64>().ok()
+    }
 }

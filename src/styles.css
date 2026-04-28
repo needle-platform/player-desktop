@@ -1346,6 +1346,26 @@ input, select {
   text-decoration: underline;
 }
 
+.album-track-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.album-disc-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.album-disc-heading {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  padding-left: 4px;
+}
+
 .album-track-list {
   display: flex;
   flex-direction: column;

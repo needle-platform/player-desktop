@@ -35,6 +35,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
+- **Safer startup volume** defaults to 80% to reduce surprise-blast playback on first launch
 - **Animated current-track indicator** in both the main track list and the album track list
 - **Robust shutdown**: mpv is killed whenever the app exits via Drop, Tauri's exit event, *and* a SIGINT/SIGTERM/SIGHUP handler — with a `pkill` fallback so playback can never outlive the app
 - Album art

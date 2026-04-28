@@ -66,6 +66,7 @@ const MPV_CANDIDATES: &[&str] = &[
     "/usr/bin/mpv",
     "mpv",
 ];
+const DEFAULT_VOLUME_PERCENT: u8 = 80;
 
 pub struct MpvController {
     socket_path: PathBuf,
@@ -276,6 +277,7 @@ impl MpvController {
             .arg("--idle=yes")
             .arg("--force-window=no")
             .arg("--no-video")
+            .arg(format!("--volume={DEFAULT_VOLUME_PERCENT}"))
             .arg(format!("--input-ipc-server={}", self.socket_path.display()))
             .stdout(Stdio::null())
             .stderr(Stdio::null())

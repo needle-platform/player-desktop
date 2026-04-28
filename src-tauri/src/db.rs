@@ -16,10 +16,12 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             title TEXT NOT NULL,
             artist TEXT,
             album TEXT,
+            album_artist TEXT,
             duration_seconds INTEGER,
             format TEXT,
             sample_rate INTEGER,
             bit_depth INTEGER,
+            disc_number INTEGER,
             track_number INTEGER,
             genre TEXT,
             year INTEGER,
@@ -63,6 +65,8 @@ pub fn init_database(db_path: &Path) -> Result<()> {
 
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN genre TEXT", []);
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
+    let _ = connection.execute("ALTER TABLE tracks ADD COLUMN album_artist TEXT", []);
+    let _ = connection.execute("ALTER TABLE tracks ADD COLUMN disc_number INTEGER", []);
     // SQLite ALTER TABLE doesn't allow non-constant defaults; backfill below if needed.
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN added_at TEXT", []);
     let _ = connection.execute(
@@ -228,23 +232,27 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
                 title,
                 artist,
                 album,
+                album_artist,
                 duration_seconds,
                 format,
                 sample_rate,
                 bit_depth,
+                disc_number,
                 track_number,
                 genre,
                 year,
                 added_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, CURRENT_TIMESTAMP)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, CURRENT_TIMESTAMP)
             ON CONFLICT(path) DO UPDATE SET
                 title = excluded.title,
                 artist = excluded.artist,
                 album = excluded.album,
+                album_artist = excluded.album_artist,
                 duration_seconds = excluded.duration_seconds,
                 format = excluded.format,
                 sample_rate = excluded.sample_rate,
                 bit_depth = excluded.bit_depth,
+                disc_number = excluded.disc_number,
                 track_number = excluded.track_number,
                 genre = excluded.genre,
                 year = excluded.year
@@ -254,10 +262,12 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
                 track.title,
                 track.artist,
                 track.album,
+                track.album_artist,
                 track.duration_seconds.map(|value| value as i64),
                 track.format,
                 track.sample_rate.map(|value| value as i64),
                 track.bit_depth.map(|value| value as i64),
+                track.disc_number,
                 track.track_number,
                 track.genre,
                 track.year,
@@ -362,12 +372,13 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
 
     let mut statement = connection.prepare(
         "
-        SELECT id, path, title, artist, album, duration_seconds, format, sample_rate, bit_depth,
-               track_number, genre, year, added_at, play_count, last_played_at
+        SELECT id, path, title, artist, album, album_artist, duration_seconds, format, sample_rate, bit_depth,
+               disc_number, track_number, genre, year, added_at, play_count, last_played_at
         FROM tracks
         ORDER BY
-            COALESCE(artist, ''),
+            COALESCE(album_artist, artist, ''),
             COALESCE(album, ''),
+            COALESCE(disc_number, 0),
             COALESCE(track_number, 0),
             title,
             path
@@ -382,16 +393,18 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                 title: row.get(2)?,
                 artist: row.get(3)?,
                 album: row.get(4)?,
-                duration_seconds: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
-                format: row.get(6)?,
-                sample_rate: row.get::<_, Option<i64>>(7)?.map(|value| value as u32),
-                bit_depth: row.get::<_, Option<i64>>(8)?.map(|value| value as u8),
-                track_number: row.get(9)?,
-                genre: row.get(10)?,
-                year: row.get(11)?,
-                added_at: row.get(12)?,
-                play_count: row.get::<_, i64>(13)?,
-                last_played_at: row.get(14)?,
+                album_artist: row.get(5)?,
+                duration_seconds: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
+                format: row.get(7)?,
+                sample_rate: row.get::<_, Option<i64>>(8)?.map(|value| value as u32),
+                bit_depth: row.get::<_, Option<i64>>(9)?.map(|value| value as u8),
+                disc_number: row.get(10)?,
+                track_number: row.get(11)?,
+                genre: row.get(12)?,
+                year: row.get(13)?,
+                added_at: row.get(14)?,
+                play_count: row.get::<_, i64>(15)?,
+                last_played_at: row.get(16)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -399,7 +412,9 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
     let track_count = query_count(&connection, "SELECT COUNT(*) FROM tracks")?;
     let album_count = query_count(
         &connection,
-        "SELECT COUNT(DISTINCT album) FROM tracks WHERE album IS NOT NULL AND album != ''",
+        "SELECT COUNT(DISTINCT album || char(31) || COALESCE(album_artist, artist, ''))
+         FROM tracks
+         WHERE album IS NOT NULL AND album != ''",
     )?;
     let artist_count = query_count(
         &connection,

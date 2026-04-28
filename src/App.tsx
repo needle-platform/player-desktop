@@ -33,6 +33,14 @@ import { useAlbumInfo } from './lib/albumInfo';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'settings';
+type AlbumSummary = {
+  key: string;
+  album: string;
+  artist: string | null;
+  count: number;
+  samplePath: string;
+  addedAt: string | null;
+};
 
 const greeting = (): string => {
   const h = new Date().getHours();
@@ -79,6 +87,7 @@ const themeOptions: Array<{ value: ThemeMode; label: string }> = [
   { value: 'light', label: 'Light' },
   { value: 'dark', label: 'Dark' },
 ];
+const defaultVolumePercent = 80;
 
 const formatDuration = (seconds: number | null | undefined) => {
   if (!seconds || seconds <= 0) return '—';
@@ -101,6 +110,19 @@ const defaultAudioDevice: AudioDevice = { name: 'auto', description: 'System def
 
 const clampVolume = (value: number) => Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
 const audioDeviceKey = (description: string) => description.trim().toLowerCase();
+const albumIdentitySeparator = '\u0000';
+const albumArtistForTrack = (track: Pick<Track, 'album_artist' | 'artist'>) =>
+  track.album_artist ?? track.artist ?? null;
+const albumKey = (album: string | null | undefined, albumArtist: string | null | undefined) =>
+  `${album ?? ''}${albumIdentitySeparator}${albumArtist ?? ''}`;
+const trackAlbumKey = (track: Pick<Track, 'album' | 'album_artist' | 'artist'>) =>
+  track.album ? albumKey(track.album, albumArtistForTrack(track)) : null;
+const albumTitleFromKey = (key: string) => key.split(albumIdentitySeparator)[0] ?? key;
+const compareAlbumTracks = (a: Track, b: Track) =>
+  (a.disc_number ?? 1) - (b.disc_number ?? 1) ||
+  (a.track_number ?? 9999) - (b.track_number ?? 9999) ||
+  a.title.localeCompare(b.title) ||
+  a.path.localeCompare(b.path);
 
 const normalizeAudioDevices = (data: unknown): AudioDevice[] => {
   if (!Array.isArray(data)) return [];
@@ -232,7 +254,7 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackPosition, setPlaybackPosition] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(0);
-  const [volumeLevel, setVolumeLevel] = useState(100);
+  const [volumeLevel, setVolumeLevel] = useState(defaultVolumePercent);
   const [isMuted, setIsMuted] = useState(false);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([defaultAudioDevice]);
   const [selectedAudioDevice, setSelectedAudioDevice] = useState(defaultAudioDevice.name);
@@ -316,7 +338,7 @@ function App() {
           } else if (name === 'duration') {
             setPlaybackDuration(typeof data === 'number' ? data : 0);
           } else if (name === 'volume') {
-            setVolumeLevel(typeof data === 'number' ? clampVolume(data) : 100);
+            setVolumeLevel(typeof data === 'number' ? clampVolume(data) : defaultVolumePercent);
           } else if (name === 'mute') {
             setIsMuted(data === true);
           } else if (name === 'audio-device') {
@@ -412,7 +434,7 @@ function App() {
 
   const filteredTracks = useMemo(() => {
     let list: Track[] = selectedPlaylist ? selectedPlaylist.tracks : allTracks;
-    if (selectedAlbum) list = list.filter((t) => t.album === selectedAlbum);
+    if (selectedAlbum) list = list.filter((t) => trackAlbumKey(t) === selectedAlbum);
     if (selectedArtist) list = list.filter((t) => t.artist === selectedArtist);
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -434,35 +456,30 @@ function App() {
   );
 
   const albums = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        album: string;
-        artist: string | null;
-        count: number;
-        samplePath: string;
-        addedAt: string | null;
-      }
-    >();
+    const map = new Map<string, AlbumSummary>();
     for (const t of allTracks) {
-      if (!t.album) continue;
-      const existing = map.get(t.album);
+      const key = trackAlbumKey(t);
+      if (!key || !t.album) continue;
+      const existing = map.get(key);
       if (existing) {
         existing.count += 1;
         if (t.added_at && (!existing.addedAt || t.added_at > existing.addedAt)) {
           existing.addedAt = t.added_at;
         }
       } else {
-        map.set(t.album, {
+        map.set(key, {
+          key,
           album: t.album,
-          artist: t.artist,
+          artist: albumArtistForTrack(t),
           count: 1,
           samplePath: t.path,
           addedAt: t.added_at ?? null,
         });
       }
     }
-    return Array.from(map.values()).sort((a, b) => a.album.localeCompare(b.album));
+    return Array.from(map.values()).sort(
+      (a, b) => a.album.localeCompare(b.album) || (a.artist ?? '').localeCompare(b.artist ?? ''),
+    );
   }, [allTracks]);
 
   const recentAlbums = useMemo(() => {
@@ -486,6 +503,10 @@ function App() {
     () => allTracks.find((t) => t.path === currentPath) ?? null,
     [allTracks, currentPath],
   );
+  const selectedAlbumSummary = useMemo(
+    () => albums.find((album) => album.key === selectedAlbum) ?? null,
+    [albums, selectedAlbum],
+  );
 
   const selectedRawOutputDevice = useMemo(
     () => audioDevices.find((device) => device.name === selectedAudioDevice) ?? null,
@@ -496,6 +517,7 @@ function App() {
       (selectedAudioDevice === 'auto' ? defaultAudioDevice.description : selectedAudioDevice),
   );
   const currentAlbum = currentTrack?.album ?? null;
+  const currentAlbumKey = currentTrack ? trackAlbumKey(currentTrack) : null;
   const outputDevices = useMemo(() => {
     const devices = audioDevices.length > 0 ? audioDevices : [defaultAudioDevice];
 
@@ -639,26 +661,22 @@ function App() {
     }
   };
 
-  const tracksForAlbum = (albumName: string) =>
+  const tracksForAlbum = (albumKeyValue: string) =>
     allTracks
-      .filter((t) => t.album === albumName)
+      .filter((t) => trackAlbumKey(t) === albumKeyValue)
       .slice()
-      .sort(
-        (a, b) =>
-          (a.track_number ?? 9999) - (b.track_number ?? 9999) ||
-          a.title.localeCompare(b.title),
-      );
+      .sort(compareAlbumTracks);
 
-  const playAlbum = (albumName: string) => {
-    const tracks = tracksForAlbum(albumName);
-    void playQueue(tracks, `Playing album · ${albumName}`);
+  const playAlbum = (albumKeyValue: string) => {
+    const tracks = tracksForAlbum(albumKeyValue);
+    void playQueue(tracks, `Playing album · ${albumTitleFromKey(albumKeyValue)}`);
   };
 
-  const playAlbumFromTrack = (albumName: string, track: Track) => {
-    const tracks = tracksForAlbum(albumName);
+  const playAlbumFromTrack = (albumKeyValue: string, track: Track) => {
+    const tracks = tracksForAlbum(albumKeyValue);
     const startIndex = tracks.findIndex((t) => t.path === track.path);
     const queue = startIndex >= 0 ? tracks.slice(startIndex) : [track];
-    void playQueue(queue, `Playing album · ${albumName}`);
+    void playQueue(queue, `Playing album · ${albumTitleFromKey(albumKeyValue)}`);
   };
 
   const playArtist = (artistName: string) => {
@@ -914,13 +932,13 @@ function App() {
             title={
               selectedPlaylist
                 ? selectedPlaylist.name
-                : (selectedAlbum ?? selectedArtist ?? 'All tracks')
+                : (selectedAlbumSummary?.album ?? selectedArtist ?? 'All tracks')
             }
             subtitle={
               selectedPlaylist
                 ? selectedPlaylist.description
                 : selectedAlbum
-                  ? 'Album'
+                  ? (selectedAlbumSummary?.artist ? `Album · ${selectedAlbumSummary.artist}` : 'Album')
                   : selectedArtist
                     ? 'Artist'
                     : `${lib.track_count} tracks in your library`
@@ -941,20 +959,22 @@ function App() {
           <AlbumsView albums={albums} onSelect={openAlbum} />
         )}
 
-        {view === 'album' && selectedAlbum && (
+        {view === 'album' && selectedAlbum && selectedAlbumSummary && (
           <AlbumDetailView
-            album={selectedAlbum}
+            album={selectedAlbumSummary.album}
+            albumKey={selectedAlbum}
+            albumArtist={selectedAlbumSummary.artist}
             tracks={allTracks}
             currentPath={currentPath}
             isPlaying={isPlaying}
-            isCurrentAlbumCurrent={currentTrack?.album === selectedAlbum}
+            isCurrentAlbumCurrent={currentAlbumKey === selectedAlbum}
             onBack={() => {
               setSelectedAlbum(null);
               setView(albumReturnView.current);
             }}
             onPlayTrack={(track) => playAlbumFromTrack(selectedAlbum, track)}
             onPlayAlbum={() => {
-              if (currentTrack?.album === selectedAlbum) {
+              if (currentAlbumKey === selectedAlbum) {
                 if (isPlaying) {
                   void pausePlayback().then(() => setIsPlaying(false)).catch((error) => {
                     setStatus(error instanceof Error ? error.message : String(error));
@@ -975,7 +995,7 @@ function App() {
                 const j = Math.floor(Math.random() * (i + 1));
                 [list[i], list[j]] = [list[j], list[i]];
               }
-              void playQueue(list, `Shuffling · ${selectedAlbum}`);
+              void playQueue(list, `Shuffling · ${selectedAlbumSummary.album}`);
             }}
             onOpenArtist={(artist) => {
               setSelectedArtist(artist);
@@ -1010,7 +1030,9 @@ function App() {
         {currentAlbum ? (
           <button
             className="player-now player-now-button"
-            onClick={() => openAlbum(currentAlbum)}
+            onClick={() => {
+              if (currentAlbumKey) openAlbum(currentAlbumKey);
+            }}
             title={`Open album · ${currentAlbum}`}
           >
             <Cover
@@ -1246,6 +1268,8 @@ function TracksView({
 
 interface AlbumDetailViewProps {
   album: string;
+  albumKey: string;
+  albumArtist: string | null;
   tracks: Track[];
   currentPath: string | null;
   isPlaying: boolean;
@@ -1259,6 +1283,8 @@ interface AlbumDetailViewProps {
 
 function AlbumDetailView({
   album,
+  albumKey,
+  albumArtist,
   tracks,
   currentPath,
   isPlaying,
@@ -1272,15 +1298,27 @@ function AlbumDetailView({
   const albumTracks = useMemo(
     () =>
       tracks
-        .filter((t) => t.album === album)
+        .filter((t) => trackAlbumKey(t) === albumKey)
         .slice()
-        .sort(
-          (a, b) =>
-            (a.track_number ?? 9999) - (b.track_number ?? 9999) ||
-            a.title.localeCompare(b.title),
-        ),
-    [tracks, album],
+        .sort(compareAlbumTracks),
+    [tracks, albumKey],
   );
+  const discGroups = useMemo(() => {
+    const groups = new Map<number, Track[]>();
+    for (const track of albumTracks) {
+      const disc = track.disc_number ?? 1;
+      const existing = groups.get(disc);
+      if (existing) {
+        existing.push(track);
+      } else {
+        groups.set(disc, [track]);
+      }
+    }
+    return Array.from(groups.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([disc, tracks]) => ({ disc, tracks }));
+  }, [albumTracks]);
+  const hasMultipleDiscs = discGroups.length > 1;
 
   const primaryArtist = useMemo(() => {
     const counts = new Map<string, number>();
@@ -1288,9 +1326,10 @@ function AlbumDetailView({
       if (!t.artist) continue;
       counts.set(t.artist, (counts.get(t.artist) ?? 0) + 1);
     }
+    if (albumArtist) return albumArtist;
     if (counts.size === 0) return null;
     return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0][0];
-  }, [albumTracks]);
+  }, [albumArtist, albumTracks]);
 
   const variousArtists = useMemo(() => {
     const distinct = new Set(albumTracks.map((t) => t.artist).filter(Boolean));
@@ -1431,45 +1470,44 @@ function AlbumDetailView({
 
       <section className="album-tracks">
         <h2 className="section-title">Tracks</h2>
-        <div className="album-track-list">
-          {albumTracks.map((t) => {
-            const isCurrent = currentPath === t.path;
-            return (
-              <button
-                key={t.id}
-                className={`album-track-row ${isCurrent ? 'playing' : ''}`}
-                onClick={() => onPlayTrack(t)}
-              >
-                <span className="album-track-num">
-                  {isCurrent ? <PlayingIndicator /> : (t.track_number ?? '—')}
-                </span>
-                <span className="album-track-title">{t.title}</span>
-                <span className="album-track-meta muted">
-                  {formatQuality(t)}
-                </span>
-                <span className="album-track-duration">
-                  {formatDuration(t.duration_seconds)}
-                </span>
-              </button>
-            );
-          })}
+        <div className="album-track-groups">
+          {discGroups.map(({ disc, tracks }) => (
+            <section key={disc} className="album-disc-group">
+              {hasMultipleDiscs && <div className="album-disc-heading">{`Disc ${disc}`}</div>}
+              <div className="album-track-list">
+                {tracks.map((t) => {
+                  const isCurrent = currentPath === t.path;
+                  return (
+                    <button
+                      key={t.id}
+                      className={`album-track-row ${isCurrent ? 'playing' : ''}`}
+                      onClick={() => onPlayTrack(t)}
+                    >
+                      <span className="album-track-num">
+                        {isCurrent ? <PlayingIndicator /> : (t.track_number ?? '—')}
+                      </span>
+                      <span className="album-track-title">{t.title}</span>
+                      <span className="album-track-meta muted">
+                        {formatQuality(t)}
+                      </span>
+                      <span className="album-track-duration">
+                        {formatDuration(t.duration_seconds)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
         </div>
       </section>
     </div>
   );
 }
 
-type AlbumSummary = {
-  album: string;
-  artist: string | null;
-  count: number;
-  samplePath: string;
-  addedAt: string | null;
-};
-
 interface AlbumsViewProps {
   albums: AlbumSummary[];
-  onSelect: (album: string) => void;
+  onSelect: (albumKey: string) => void;
 }
 
 function AlbumsView({ albums, onSelect }: AlbumsViewProps) {
@@ -1489,7 +1527,7 @@ function AlbumsView({ albums, onSelect }: AlbumsViewProps) {
       ) : (
         <div className="card-grid">
           {albums.map((a) => (
-            <button key={a.album} className="card" onClick={() => onSelect(a.album)}>
+            <button key={a.key} className="card" onClick={() => onSelect(a.key)}>
               <Cover
                 trackPath={a.samplePath}
                 fallback={a.album[0]?.toUpperCase() ?? '◉'}
@@ -1680,11 +1718,11 @@ interface DashboardViewProps {
   onAddFolder: () => void;
   onMaintenance: () => void;
   onShuffleFeatured: () => void;
-  onOpenAlbum: (album: string) => void;
+  onOpenAlbum: (albumKey: string) => void;
   onOpenArtist: (artist: string) => void;
   onOpenPlaylist: (playlist: AutoPlaylist) => void;
   onPlayPlaylist: (playlist: AutoPlaylist) => void;
-  onPlayAlbum: (album: string) => void;
+  onPlayAlbum: (albumKey: string) => void;
   onPlayArtist: (artist: string) => void;
   onPlayQueue: (tracks: Track[]) => void;
   onOpenView: (view: View) => void;
@@ -1811,8 +1849,8 @@ function DashboardView({
           </div>
           <div className="card-grid">
             {recentAlbums.map((a) => (
-              <div key={a.album} className="card-wrap">
-                <button className="card" onClick={() => onOpenAlbum(a.album)}>
+              <div key={a.key} className="card-wrap">
+                <button className="card" onClick={() => onOpenAlbum(a.key)}>
                   <Cover
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
@@ -1824,7 +1862,7 @@ function DashboardView({
                 </button>
                 <button
                   className="card-play"
-                  onClick={() => onPlayAlbum(a.album)}
+                  onClick={() => onPlayAlbum(a.key)}
                   title={`Play ${a.album}`}
                 >
                   ▶
@@ -1885,8 +1923,8 @@ function DashboardView({
           </div>
           <div className="card-grid">
             {featured.map((a) => (
-              <div key={a.album} className="card-wrap">
-                <button className="card" onClick={() => onOpenAlbum(a.album)}>
+              <div key={a.key} className="card-wrap">
+                <button className="card" onClick={() => onOpenAlbum(a.key)}>
                   <Cover
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
@@ -1898,7 +1936,7 @@ function DashboardView({
                 </button>
                 <button
                   className="card-play"
-                  onClick={() => onPlayAlbum(a.album)}
+                  onClick={() => onPlayAlbum(a.key)}
                   title={`Play ${a.album}`}
                 >
                   ▶
