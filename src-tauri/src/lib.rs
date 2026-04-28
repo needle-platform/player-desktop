@@ -100,6 +100,15 @@ fn stop_playback(state: tauri::State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn seek_playback(position_seconds: f64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player.seek_to(position_seconds).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn run_maintenance(state: tauri::State<'_, AppState>) -> Result<BootstrapPayload, String> {
     let roots = db::list_library_roots(&state.db_path).map_err(|error| error.to_string())?;
 
@@ -263,6 +272,7 @@ pub fn run() {
             pause_playback,
             resume_playback,
             stop_playback,
+            seek_playback,
             run_maintenance,
             remove_library_root,
             get_cover_art,

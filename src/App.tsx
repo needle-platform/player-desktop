@@ -12,6 +12,7 @@ import {
   runMaintenance,
   saveSettings,
   scanLibrary,
+  seekPlayback,
   stopPlayback,
 } from './lib/tauri';
 import type {
@@ -112,10 +113,14 @@ function App() {
   const [selectedPlaylist, setSelectedPlaylist] = useState<AutoPlaylist | null>(null);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackPosition, setPlaybackPosition] = useState(0);
+  const [playbackDuration, setPlaybackDuration] = useState(0);
+  const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
   const lastRecordedPath = useRef<string | null>(null);
+  const scrubPositionRef = useRef<number | null>(null);
   const albumReturnView = useRef<View>('albums');
 
   const openAlbum = (album: string) => {
@@ -137,10 +142,17 @@ function App() {
             const path = typeof data === 'string' ? data : null;
             setCurrentPath(path);
             if (!path) {
+              scrubPositionRef.current = null;
+              setScrubPosition(null);
+              setPlaybackPosition(0);
+              setPlaybackDuration(0);
               setIsPlaying(false);
               setStatus('');
               return;
             }
+            scrubPositionRef.current = null;
+            setScrubPosition(null);
+            setPlaybackPosition(0);
             if (lastRecordedPath.current !== path) {
               lastRecordedPath.current = path;
               const nowIso = new Date().toISOString();
@@ -168,6 +180,12 @@ function App() {
           } else if (name === 'pause') {
             const paused = data === true;
             setIsPlaying(!paused);
+          } else if (name === 'time-pos') {
+            if (scrubPositionRef.current == null) {
+              setPlaybackPosition(typeof data === 'number' ? data : 0);
+            }
+          } else if (name === 'duration') {
+            setPlaybackDuration(typeof data === 'number' ? data : 0);
           }
         },
       );
@@ -280,6 +298,39 @@ function App() {
     () => allTracks.find((t) => t.path === currentPath) ?? null,
     [allTracks, currentPath],
   );
+
+  const currentAlbum = currentTrack?.album ?? null;
+  const effectiveDuration = playbackDuration > 0 ? playbackDuration : (currentTrack?.duration_seconds ?? 0);
+  const shownPosition = scrubPosition ?? playbackPosition;
+  const clampedPosition = effectiveDuration > 0 ? Math.min(shownPosition, effectiveDuration) : shownPosition;
+  const remainingSeconds = effectiveDuration > 0 ? Math.max(effectiveDuration - clampedPosition, 0) : null;
+  const progressMax = effectiveDuration > 0 ? effectiveDuration : 1;
+  const progressPercent = effectiveDuration > 0 ? Math.min((clampedPosition / effectiveDuration) * 100, 100) : 0;
+  const progressStyle = {
+    background: `linear-gradient(to right, var(--accent) 0%, var(--accent) ${progressPercent}%, var(--border) ${progressPercent}%, var(--border) 100%)`,
+  };
+
+  const commitSeek = async (position: number | null) => {
+    const next = position == null ? null : Math.max(0, Math.min(position, progressMax));
+    scrubPositionRef.current = null;
+    setScrubPosition(null);
+
+    if (next == null || !currentTrack || effectiveDuration <= 0) {
+      return;
+    }
+
+    try {
+      await seekPlayback(next);
+      setPlaybackPosition(next);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const updateScrubPosition = (next: number) => {
+    scrubPositionRef.current = next;
+    setScrubPosition(next);
+  };
 
   const updateSettings = async (next: AppSettings) => {
     if (!data) return;
@@ -659,19 +710,73 @@ function App() {
       </main>
 
       <footer className="player-bar">
-        <div className="player-now">
-          <Cover
-            trackPath={currentTrack?.path ?? null}
-            fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
-            size="md"
-          />
-          <div className="player-meta">
-            <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
-            <div className="player-sub">
-              {currentTrack
-                ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
-                : 'Pick a track from your library'}
+        {currentAlbum ? (
+          <button
+            className="player-now player-now-button"
+            onClick={() => openAlbum(currentAlbum)}
+            title={`Open album · ${currentAlbum}`}
+          >
+            <Cover
+              trackPath={currentTrack?.path ?? null}
+              fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
+              size="md"
+            />
+            <div className="player-meta">
+              <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
+              <div className="player-sub">
+                {currentTrack
+                  ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
+                  : 'Pick a track from your library'}
+              </div>
             </div>
+          </button>
+        ) : (
+          <div className="player-now">
+            <Cover
+              trackPath={currentTrack?.path ?? null}
+              fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
+              size="md"
+            />
+            <div className="player-meta">
+              <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
+              <div className="player-sub">
+                {currentTrack
+                  ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
+                  : 'Pick a track from your library'}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="player-progress-wrap">
+          <div className="player-progress">
+            <span className="player-time">{currentTrack ? formatDuration(clampedPosition) : '—'}</span>
+            <input
+              className="player-progress-input"
+              type="range"
+              min={0}
+              max={progressMax}
+              step={0.1}
+              value={currentTrack ? clampedPosition : 0}
+              disabled={!currentTrack || effectiveDuration <= 0}
+              onChange={(event) => updateScrubPosition(Number(event.currentTarget.value))}
+              onMouseUp={() => void commitSeek(scrubPositionRef.current)}
+              onTouchEnd={() => void commitSeek(scrubPositionRef.current)}
+              onKeyUp={(event) => {
+                if (
+                  ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(
+                    event.key,
+                  )
+                ) {
+                  void commitSeek(scrubPositionRef.current);
+                }
+              }}
+              onBlur={() => void commitSeek(scrubPositionRef.current)}
+              style={progressStyle}
+            />
+            <span className="player-time">
+              {currentTrack && remainingSeconds != null ? `-${formatDuration(remainingSeconds)}` : '—'}
+            </span>
           </div>
         </div>
 
@@ -694,7 +799,6 @@ function App() {
           {currentTrack && (
             <>
               <span className="player-quality">{formatQuality(currentTrack)}</span>
-              <span className="player-duration">{formatDuration(currentTrack.duration_seconds)}</span>
             </>
           )}
         </div>

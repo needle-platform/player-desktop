@@ -19,6 +19,9 @@ export const resumePlayback = () => invoke<void>('resume_playback');
 
 export const stopPlayback = () => invoke<void>('stop_playback');
 
+export const seekPlayback = (positionSeconds: number) =>
+  invoke<void>('seek_playback', { positionSeconds });
+
 export const runMaintenance = () => invoke<BootstrapPayload>('run_maintenance');
 
 export const removeLibraryRoot = (folder: string) =>

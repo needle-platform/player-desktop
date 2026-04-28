@@ -119,6 +119,12 @@ impl MpvController {
         self.send(&mut stream, json!({ "command": ["stop"] }))
     }
 
+    pub fn seek_to(&mut self, position_seconds: f64) -> Result<()> {
+        let mut stream = self.connect_existing()?;
+        let clamped = position_seconds.max(0.0);
+        self.send(&mut stream, json!({ "command": ["seek", clamped, "absolute+exact"] }))
+    }
+
     fn connect_or_spawn(&mut self) -> Result<UnixStream> {
         self.refresh_child_state()?;
 
@@ -270,6 +276,16 @@ fn run_property_listener(socket_path: PathBuf, app: AppHandle) {
         writer,
         "{}",
         json!({"command": ["observe_property", 2, "pause"]})
+    );
+    let _ = writeln!(
+        writer,
+        "{}",
+        json!({"command": ["observe_property", 3, "time-pos"]})
+    );
+    let _ = writeln!(
+        writer,
+        "{}",
+        json!({"command": ["observe_property", 4, "duration"]})
     );
     let _ = writer.flush();
 
