@@ -11,6 +11,8 @@ export const saveSettings = (settings: AppSettings) =>
 
 export const playTrack = (path: string) => invoke<void>('play_track', { path });
 
+export const playQueue = (paths: string[]) => invoke<void>('play_queue', { paths });
+
 export const pausePlayback = () => invoke<void>('pause_playback');
 
 export const resumePlayback = () => invoke<void>('resume_playback');

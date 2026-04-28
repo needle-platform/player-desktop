@@ -55,6 +55,23 @@ fn play_track(path: String, state: tauri::State<'_, AppState>) -> Result<(), Str
 }
 
 #[tauri::command]
+fn play_queue(paths: Vec<String>, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let existing: Vec<String> = paths
+        .into_iter()
+        .filter(|path| Path::new(path).exists())
+        .collect();
+    if existing.is_empty() {
+        return Err("None of the requested files exist".to_string());
+    }
+
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player.play_queue(&existing).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn pause_playback(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut player = state
         .player
@@ -156,6 +173,14 @@ fn get_cover_art(track_path: String) -> Result<Option<cover::CoverArt>, String> 
 }
 
 pub fn run() {
+    // Catch SIGINT / SIGTERM / SIGHUP so we always reap mpv child processes,
+    // even when the OS bypasses Drop / RunEvent::Exit (Cmd-Q on macOS, Ctrl-C
+    // in the dev terminal, parent shell hangup, etc.).
+    let _ = ctrlc::set_handler(|| {
+        mpv::kill_all_mpv();
+        std::process::exit(0);
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -169,9 +194,11 @@ pub fn run() {
             db::init_database(&db_path).expect("Unable to initialize SQLite database");
 
             let socket_path = app_data_dir.join("mpv.sock");
+            let mut player = MpvController::new(socket_path);
+            player.set_app_handle(app.handle().clone());
             app.manage(AppState {
                 db_path,
-                player: Mutex::new(MpvController::new(socket_path)),
+                player: Mutex::new(player),
             });
             Ok(())
         })
@@ -180,6 +207,7 @@ pub fn run() {
             scan_library,
             save_settings,
             play_track,
+            play_queue,
             pause_playback,
             resume_playback,
             stop_playback,
@@ -189,6 +217,17 @@ pub fn run() {
             record_play,
             get_artist_image
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    if let Ok(mut player) = state.player.lock() {
+                        player.shutdown();
+                    }
+                }
+                // Belt-and-suspenders: kill any mpv pid still tracked.
+                mpv::kill_all_mpv();
+            }
+        });
 }

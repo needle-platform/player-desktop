@@ -342,6 +342,43 @@ input, select {
   gap: 18px;
 }
 
+.card-wrap {
+  position: relative;
+}
+
+.card-wrap .card {
+  width: 100%;
+}
+
+.card-play {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-size: 14px;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 140ms ease, transform 140ms ease, background 120ms ease;
+  pointer-events: none;
+}
+.card-wrap:hover .card-play,
+.card-wrap:focus-within .card-play {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.card-play:hover {
+  background: var(--accent-2, var(--accent));
+  transform: scale(1.06);
+}
+
 .card {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -683,6 +720,42 @@ input, select {
   transition: border-color 120ms ease, transform 120ms ease;
 }
 .artist-tile:hover { border-color: var(--accent); transform: translateY(-2px); }
+
+.artist-tile-wrap {
+  position: relative;
+}
+.artist-tile-wrap .artist-tile {
+  width: 100%;
+}
+.artist-tile-play {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-size: 13px;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 140ms ease, transform 140ms ease, background 120ms ease;
+  pointer-events: none;
+}
+.artist-tile-wrap:hover .artist-tile-play,
+.artist-tile-wrap:focus-within .artist-tile-play {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.artist-tile-play:hover {
+  background: var(--accent-2, var(--accent));
+  transform: scale(1.06);
+}
+
 .avatar-lg {
   width: 92px;
   height: 92px;

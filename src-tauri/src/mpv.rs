@@ -1,15 +1,60 @@
 use std::{
     fs,
-    io::Write,
+    io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context, Result};
 use serde_json::json;
+use tauri::{AppHandle, Emitter};
+
+// Global registry of mpv child PIDs so any code path (signal handler,
+// graceful shutdown, Drop) can reliably terminate them.
+fn mpv_pids() -> &'static Mutex<Vec<u32>> {
+    static PIDS: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
+    PIDS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub fn register_mpv_pid(pid: u32) {
+    if let Ok(mut guard) = mpv_pids().lock() {
+        guard.push(pid);
+    }
+}
+
+pub fn unregister_mpv_pid(pid: u32) {
+    if let Ok(mut guard) = mpv_pids().lock() {
+        guard.retain(|&p| p != pid);
+    }
+}
+
+pub fn kill_all_mpv() {
+    let pids: Vec<u32> = mpv_pids()
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    for pid in pids {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    if let Ok(mut guard) = mpv_pids().lock() {
+        guard.clear();
+    }
+
+    // Nuclear option: shell out to pkill so we catch any mpv we spawned this
+    // session that may have been forgotten (e.g. lost across hot reloads in
+    // dev). Pattern matches our exact spawn arguments so we don't kill an
+    // unrelated mpv the user might be running.
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "mpv --idle=yes --force-window=no --no-video"])
+        .status();
+}
 
 const MPV_CANDIDATES: &[&str] = &[
     "/opt/homebrew/bin/mpv",
@@ -22,6 +67,10 @@ const MPV_CANDIDATES: &[&str] = &[
 pub struct MpvController {
     socket_path: PathBuf,
     child: Option<Child>,
+    #[allow(dead_code)]
+    app_handle: Option<AppHandle>,
+    #[allow(dead_code)]
+    listener_active: Arc<AtomicBool>,
 }
 
 impl MpvController {
@@ -29,12 +78,36 @@ impl MpvController {
         Self {
             socket_path,
             child: None,
+            app_handle: None,
+            listener_active: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn set_app_handle(&mut self, handle: AppHandle) {
+        self.app_handle = Some(handle);
     }
 
     pub fn play(&mut self, path: &str) -> Result<()> {
         let mut stream = self.connect_or_spawn()?;
         self.send(&mut stream, json!({ "command": ["loadfile", path, "replace"] }))
+    }
+
+    pub fn play_queue(&mut self, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut stream = self.connect_or_spawn()?;
+        self.send(
+            &mut stream,
+            json!({ "command": ["loadfile", paths[0], "replace"] }),
+        )?;
+        for path in paths.iter().skip(1) {
+            self.send(
+                &mut stream,
+                json!({ "command": ["loadfile", path, "append"] }),
+            )?;
+        }
+        Ok(())
     }
 
     pub fn pause(&mut self) -> Result<()> {
@@ -102,6 +175,7 @@ impl MpvController {
             .spawn()
             .with_context(|| format!("Failed to launch mpv at {}", binary.display()))?;
 
+        register_mpv_pid(child.id());
         self.child = Some(child);
 
         let start = Instant::now();
@@ -112,7 +186,40 @@ impl MpvController {
             thread::sleep(Duration::from_millis(50));
         }
 
+        // NOTE: listener disabled while we debug a playback regression.
+        // self.start_listener();
+
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn start_listener(&mut self) {
+        if self.listener_active.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(handle) = self.app_handle.clone() else {
+            self.listener_active.store(false, Ordering::SeqCst);
+            return;
+        };
+        let socket = self.socket_path.clone();
+        let active = self.listener_active.clone();
+
+        thread::spawn(move || {
+            run_property_listener(socket, handle);
+            active.store(false, Ordering::SeqCst);
+        });
+    }
+
+    pub fn shutdown(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let pid = child.id();
+            let _ = child.kill();
+            let _ = child.wait();
+            unregister_mpv_pid(pid);
+        }
+        if self.socket_path.exists() {
+            let _ = fs::remove_file(&self.socket_path);
+        }
     }
 
     fn refresh_child_state(&mut self) -> Result<()> {
@@ -126,6 +233,54 @@ impl MpvController {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for MpvController {
+    fn drop(&mut self) {
+        self.shutdown();
+        kill_all_mpv();
+    }
+}
+
+#[allow(dead_code)]
+fn run_property_listener(socket_path: PathBuf, app: AppHandle) {
+    let stream = match UnixStream::connect(&socket_path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let writer_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut writer = writer_stream;
+
+    let _ = writeln!(
+        writer,
+        "{}",
+        json!({"command": ["observe_property", 1, "path"]})
+    );
+    let _ = writeln!(
+        writer,
+        "{}",
+        json!({"command": ["observe_property", 2, "pause"]})
+    );
+    let _ = writer.flush();
+
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("event").and_then(|v| v.as_str()) == Some("property-change") {
+            let name = value.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let data = value.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            let _ = app.emit(
+                "mpv-property",
+                serde_json::json!({ "name": name, "data": data }),
+            );
+        }
     }
 }
 

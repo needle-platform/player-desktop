@@ -31,8 +31,11 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 
 ### Playback
 - **mpv backend** for bit-perfect lossless playback through JSON IPC
+- **Real playlist queues**: play album · shuffle artist · play all Quick picks · shuffle a Made-for-you playlist — mpv auto-advances through the queue
+- **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
 - **Now-playing bar** with cover, metadata, transport controls, and audio quality readout
+- **Robust shutdown**: mpv is killed whenever the app exits via Drop, Tauri's exit event, *and* a SIGINT/SIGTERM/SIGHUP handler — with a `pkill` fallback so playback can never outlive the app
 - Album art
   - sidecar files first: `cover.{jpg,png,webp}`, `folder.*`, `front.*`, `album.*`, `albumart.*`, `artwork.*`
   - falls back to embedded artwork via `lofty`

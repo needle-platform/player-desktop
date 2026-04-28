@@ -1,8 +1,10 @@
 import { open } from '@tauri-apps/plugin-dialog';
-import { useEffect, useMemo, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   bootstrapApp,
   pausePlayback,
+  playQueue as tauriPlayQueue,
   playTrack,
   recordPlay,
   removeLibraryRoot,
@@ -102,6 +104,59 @@ function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
+  const lastRecordedPath = useRef<string | null>(null);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      const dispose = await listen<{ name: string; data: unknown }>(
+        'mpv-property',
+        (event) => {
+          const { name, data } = event.payload;
+          if (name === 'path') {
+            const path = typeof data === 'string' ? data : null;
+            setCurrentPath(path);
+            if (!path) {
+              setIsPlaying(false);
+              setStatus('');
+              return;
+            }
+            if (lastRecordedPath.current !== path) {
+              lastRecordedPath.current = path;
+              const nowIso = new Date().toISOString();
+              setData((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      library: {
+                        ...prev.library,
+                        tracks: prev.library.tracks.map((t) =>
+                          t.path === path
+                            ? {
+                                ...t,
+                                play_count: (t.play_count ?? 0) + 1,
+                                last_played_at: nowIso,
+                              }
+                            : t,
+                        ),
+                      },
+                    }
+                  : prev,
+              );
+              void recordPlay(path).catch(() => {});
+            }
+          } else if (name === 'pause') {
+            const paused = data === true;
+            setIsPlaying(!paused);
+          }
+        },
+      );
+      unlisten = dispose;
+    })();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -264,27 +319,44 @@ function App() {
       setCurrentPath(track.path);
       setIsPlaying(true);
       setStatus(`Playing ${track.title}`);
-
-      const nowIso = new Date().toISOString();
-      setData((prev) =>
-        prev
-          ? {
-              ...prev,
-              library: {
-                ...prev.library,
-                tracks: prev.library.tracks.map((t) =>
-                  t.path === track.path
-                    ? { ...t, play_count: (t.play_count ?? 0) + 1, last_played_at: nowIso }
-                    : t,
-                ),
-              },
-            }
-          : prev,
-      );
-      void recordPlay(track.path).catch(() => {});
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const playQueue = async (queue: Track[], label?: string) => {
+    if (queue.length === 0) return;
+    const first = queue[0];
+    try {
+      await tauriPlayQueue(queue.map((t) => t.path));
+      setCurrentPath(first.path);
+      setIsPlaying(true);
+      setStatus(label ?? `Playing ${first.title}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const playAlbum = (albumName: string) => {
+    const tracks = allTracks
+      .filter((t) => t.album === albumName)
+      .slice()
+      .sort(
+        (a, b) =>
+          (a.track_number ?? 9999) - (b.track_number ?? 9999) ||
+          a.title.localeCompare(b.title),
+      );
+    void playQueue(tracks, `Playing album · ${albumName}`);
+  };
+
+  const playArtist = (artistName: string) => {
+    const pool = allTracks.filter((t) => t.artist === artistName);
+    const shuffled = pool.slice();
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    void playQueue(shuffled.slice(0, 50), `Artist mix · ${artistName}`);
   };
 
   const togglePlayPause = async () => {
@@ -458,9 +530,16 @@ function App() {
             }}
             onPlayPlaylist={(pl) => {
               if (pl.tracks.length === 0) return;
-              const pick = pl.tracks[Math.floor(Math.random() * pl.tracks.length)];
-              void play(pick);
+              const shuffled = pl.tracks.slice();
+              for (let i = shuffled.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+              }
+              void playQueue(shuffled, `Playlist · ${pl.name}`);
             }}
+            onPlayAlbum={playAlbum}
+            onPlayArtist={playArtist}
+            onPlayQueue={(tracks) => void playQueue(tracks, 'Quick picks')}
             onOpenView={(v) => setView(v)}
             onPlay={play}
             busy={!!busy}
@@ -889,6 +968,9 @@ interface DashboardViewProps {
   onOpenArtist: (artist: string) => void;
   onOpenPlaylist: (playlist: AutoPlaylist) => void;
   onPlayPlaylist: (playlist: AutoPlaylist) => void;
+  onPlayAlbum: (album: string) => void;
+  onPlayArtist: (artist: string) => void;
+  onPlayQueue: (tracks: Track[]) => void;
   onOpenView: (view: View) => void;
   onPlay: (track: Track) => void;
   busy: boolean;
@@ -910,6 +992,9 @@ function DashboardView({
   onOpenArtist,
   onOpenPlaylist,
   onPlayPlaylist,
+  onPlayAlbum,
+  onPlayArtist,
+  onPlayQueue,
   onOpenView,
   onPlay,
   busy,
@@ -918,6 +1003,12 @@ function DashboardView({
     () => sampleN(albums, 6),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [albums, featuredSeed],
+  );
+
+  const quickPicks = useMemo(
+    () => sampleN(tracks, 10),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tracks, featuredSeed],
   );
 
   const topArtists = useMemo(
@@ -1004,16 +1095,25 @@ function DashboardView({
           </div>
           <div className="card-grid">
             {recentAlbums.map((a) => (
-              <button key={a.album} className="card" onClick={() => onOpenAlbum(a.album)}>
-                <Cover
-                  trackPath={a.samplePath}
-                  fallback={a.album[0]?.toUpperCase() ?? '◉'}
-                  size="card"
-                />
-                <div className="card-title">{a.album}</div>
-                <div className="card-sub">{a.artist ?? 'Various artists'}</div>
-                <div className="card-meta">{relativeAdded(a.addedAt)} · {a.count} tracks</div>
-              </button>
+              <div key={a.album} className="card-wrap">
+                <button className="card" onClick={() => onOpenAlbum(a.album)}>
+                  <Cover
+                    trackPath={a.samplePath}
+                    fallback={a.album[0]?.toUpperCase() ?? '◉'}
+                    size="card"
+                  />
+                  <div className="card-title">{a.album}</div>
+                  <div className="card-sub">{a.artist ?? 'Various artists'}</div>
+                  <div className="card-meta">{relativeAdded(a.addedAt)} · {a.count} tracks</div>
+                </button>
+                <button
+                  className="card-play"
+                  onClick={() => onPlayAlbum(a.album)}
+                  title={`Play ${a.album}`}
+                >
+                  ▶
+                </button>
+              </div>
             ))}
           </div>
         </section>
@@ -1069,16 +1169,25 @@ function DashboardView({
           </div>
           <div className="card-grid">
             {featured.map((a) => (
-              <button key={a.album} className="card" onClick={() => onOpenAlbum(a.album)}>
-                <Cover
-                  trackPath={a.samplePath}
-                  fallback={a.album[0]?.toUpperCase() ?? '◉'}
-                  size="card"
-                />
-                <div className="card-title">{a.album}</div>
-                <div className="card-sub">{a.artist ?? 'Various artists'}</div>
-                <div className="card-meta">{a.count} tracks</div>
-              </button>
+              <div key={a.album} className="card-wrap">
+                <button className="card" onClick={() => onOpenAlbum(a.album)}>
+                  <Cover
+                    trackPath={a.samplePath}
+                    fallback={a.album[0]?.toUpperCase() ?? '◉'}
+                    size="card"
+                  />
+                  <div className="card-title">{a.album}</div>
+                  <div className="card-sub">{a.artist ?? 'Various artists'}</div>
+                  <div className="card-meta">{a.count} tracks</div>
+                </button>
+                <button
+                  className="card-play"
+                  onClick={() => onPlayAlbum(a.album)}
+                  title={`Play ${a.album}`}
+                >
+                  ▶
+                </button>
+              </div>
             ))}
           </div>
         </section>
@@ -1094,11 +1203,23 @@ function DashboardView({
           </div>
           <div className="artist-row">
             {topArtists.map((a) => (
-              <button key={a.artist} className="artist-tile" onClick={() => onOpenArtist(a.artist)}>
-                <ArtistAvatar name={a.artist} size="lg" />
-                <div className="artist-tile-name">{a.artist}</div>
-                <div className="artist-tile-meta">{a.count} tracks</div>
-              </button>
+              <div key={a.artist} className="artist-tile-wrap">
+                <button
+                  className="artist-tile"
+                  onClick={() => onOpenArtist(a.artist)}
+                >
+                  <ArtistAvatar name={a.artist} size="lg" />
+                  <div className="artist-tile-name">{a.artist}</div>
+                  <div className="artist-tile-meta">{a.count} tracks</div>
+                </button>
+                <button
+                  className="artist-tile-play"
+                  onClick={() => onPlayArtist(a.artist)}
+                  title={`Shuffle play · ${a.artist}`}
+                >
+                  ▶
+                </button>
+              </div>
             ))}
           </div>
         </section>
@@ -1107,12 +1228,21 @@ function DashboardView({
       <section className="dashboard-section">
         <div className="section-head">
           <h2 className="section-title">Quick picks</h2>
-          <button className="ghost-button" onClick={onShuffle}>
-            ↻ Shuffle one
-          </button>
+          <div className="section-actions">
+            <button
+              className="ghost-button"
+              onClick={() => onPlayQueue(quickPicks)}
+              disabled={quickPicks.length === 0}
+            >
+              ▶ Play all
+            </button>
+            <button className="ghost-button" onClick={onShuffle}>
+              ↻ Shuffle one
+            </button>
+          </div>
         </div>
         <div className="quick-list">
-          {sampleN(tracks, 10).map((t) => (
+          {quickPicks.map((t) => (
             <button key={t.id} className="quick-item" onClick={() => onPlay(t)}>
               <Cover trackPath={t.path} fallback={t.title[0]?.toUpperCase() ?? '♪'} size="md" />
               <div className="quick-meta">
