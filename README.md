@@ -34,7 +34,8 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Real playlist queues**: play album · shuffle artist · play all Quick picks · shuffle a Made-for-you playlist — mpv auto-advances through the queue
 - **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
-- **Now-playing bar** with cover, metadata, transport controls, and audio quality readout
+- **Now-playing bar** with cover, metadata, transport controls, and audio quality readout — synced to actual mpv track changes during queue playback
+- **Animated current-track indicator** in both the main track list and the album track list
 - **Robust shutdown**: mpv is killed whenever the app exits via Drop, Tauri's exit event, *and* a SIGINT/SIGTERM/SIGHUP handler — with a `pkill` fallback so playback can never outlive the app
 - Album art
   - sidecar files first: `cover.{jpg,png,webp}`, `folder.*`, `front.*`, `album.*`, `albumart.*`, `artwork.*`
@@ -51,8 +52,14 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Dashboard** (default landing screen)
 - **Tracks** with live search and filterable by album / artist / playlist
 - **Albums** (cards with cover art)
+- **Album detail page** with hero artwork, metadata, play/shuffle actions, full track list, and background album info when available
 - **Artists** (list with track counts)
 - **Settings** with theme switcher, equalizer presets, and maintenance
+
+### Album info
+- **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
+- Cached in SQLite (`album_info`) so repeat opens are instant and we avoid repeat lookups
+- Graceful fallback when no article exists for obscure releases, compilations, or local-only metadata
 
 ### Themes & UX
 - **Themes**: System, Light, Dark
@@ -82,13 +89,15 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - `src/lib/tauri.ts` — typed wrappers around all Tauri commands
 - `src/lib/cover.ts` — cover-art hook with module-level cache
 - `src/lib/artistImage.ts` — artist portrait hook with module-level cache
+- `src/lib/albumInfo.ts` — album-info hook with module-level cache
 - `src/lib/playlists.ts` — auto-playlist generators from tags + heuristics
 - `src/styles.css` — full theming + layout
 - `src-tauri/src/lib.rs` — Tauri command surface and app setup
-- `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, artist-image cache
+- `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, artist-image cache, album-info cache
 - `src-tauri/src/library.rs` — folder scanner, dotfile filter, metadata via `lofty`
 - `src-tauri/src/cover.rs` — sidecar + embedded cover-art extraction
 - `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup
+- `src-tauri/src/album.rs` — MusicBrainz → Wikidata → Wikipedia album lookup
 - `src-tauri/src/mpv.rs` — IPC controller, spawns mpv with `--no-video --idle=yes`
 
 ## Requirements

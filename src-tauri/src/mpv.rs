@@ -66,6 +66,7 @@ const MPV_CANDIDATES: &[&str] = &[
 
 pub struct MpvController {
     socket_path: PathBuf,
+    playlist_path: PathBuf,
     child: Option<Child>,
     #[allow(dead_code)]
     app_handle: Option<AppHandle>,
@@ -76,6 +77,7 @@ pub struct MpvController {
 impl MpvController {
     pub fn new(socket_path: PathBuf) -> Self {
         Self {
+            playlist_path: socket_path.with_extension("m3u8"),
             socket_path,
             child: None,
             app_handle: None,
@@ -96,18 +98,10 @@ impl MpvController {
         if paths.is_empty() {
             return Ok(());
         }
+        self.write_playlist(paths)?;
         let mut stream = self.connect_or_spawn()?;
-        self.send(
-            &mut stream,
-            json!({ "command": ["loadfile", paths[0], "replace"] }),
-        )?;
-        for path in paths.iter().skip(1) {
-            self.send(
-                &mut stream,
-                json!({ "command": ["loadfile", path, "append"] }),
-            )?;
-        }
-        Ok(())
+        let playlist_path = self.playlist_path.to_string_lossy().to_string();
+        self.send(&mut stream, json!({ "command": ["loadlist", playlist_path, "replace"] }))
     }
 
     pub fn pause(&mut self) -> Result<()> {
@@ -156,6 +150,16 @@ impl MpvController {
         Ok(())
     }
 
+    fn write_playlist(&self, paths: &[String]) -> Result<()> {
+        let mut playlist = String::new();
+        for path in paths {
+            playlist.push_str(path);
+            playlist.push('\n');
+        }
+        fs::write(&self.playlist_path, playlist)
+            .with_context(|| format!("Failed to write playlist at {}", self.playlist_path.display()))
+    }
+
     fn spawn_mpv(&mut self) -> Result<()> {
         if self.socket_path.exists() {
             let _ = fs::remove_file(&self.socket_path);
@@ -186,8 +190,7 @@ impl MpvController {
             thread::sleep(Duration::from_millis(50));
         }
 
-        // NOTE: listener disabled while we debug a playback regression.
-        // self.start_listener();
+        self.start_listener();
 
         Ok(())
     }
@@ -219,6 +222,9 @@ impl MpvController {
         }
         if self.socket_path.exists() {
             let _ = fs::remove_file(&self.socket_path);
+        }
+        if self.playlist_path.exists() {
+            let _ = fs::remove_file(&self.playlist_path);
         }
     }
 

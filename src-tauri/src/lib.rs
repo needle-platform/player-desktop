@@ -1,3 +1,4 @@
+mod album;
 mod artist;
 mod cover;
 mod db;
@@ -164,6 +165,57 @@ async fn get_artist_image(
 }
 
 #[tauri::command]
+async fn get_album_info(
+    album: String,
+    artist: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<album::AlbumInfo>, String> {
+    let album_trim = album.trim().to_string();
+    if album_trim.is_empty() {
+        return Ok(None);
+    }
+    let artist_trim = artist
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let key = format!(
+        "{}|{}",
+        album_trim.to_lowercase(),
+        artist_trim
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase(),
+    );
+
+    if let Some(cached) = db::get_album_info(&state.db_path, &key)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(cached.map(|info| album::AlbumInfo {
+            description: info.description,
+            source_url: info.source_url,
+            source: "cache".into(),
+        }));
+    }
+
+    match album::fetch_album_info(&album_trim, artist_trim.as_deref()).await {
+        Ok(Some(info)) => {
+            let cached = db::CachedAlbumInfo {
+                description: info.description.clone(),
+                source_url: info.source_url.clone(),
+            };
+            let _ = db::cache_album_info(&state.db_path, &key, Some(&cached));
+            Ok(Some(info))
+        }
+        Ok(None) => {
+            let _ = db::cache_album_info(&state.db_path, &key, None);
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
 fn get_cover_art(track_path: String) -> Result<Option<cover::CoverArt>, String> {
     let path = Path::new(&track_path);
     if !path.exists() {
@@ -215,7 +267,8 @@ pub fn run() {
             remove_library_root,
             get_cover_art,
             record_play,
-            get_artist_image
+            get_artist_image,
+            get_album_info
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

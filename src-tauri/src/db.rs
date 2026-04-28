@@ -42,6 +42,13 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             url TEXT,
             fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS album_info (
+            key TEXT PRIMARY KEY,
+            description TEXT,
+            source_url TEXT,
+            fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         ",
     )?;
 
@@ -274,6 +281,55 @@ pub fn get_artist_image(db_path: &Path, name: &str) -> Result<Option<Option<Stri
         return Ok(Some(url));
     }
     Ok(None)
+}
+
+pub struct CachedAlbumInfo {
+    pub description: Option<String>,
+    pub source_url: Option<String>,
+}
+
+pub fn get_album_info(db_path: &Path, key: &str) -> Result<Option<Option<CachedAlbumInfo>>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "SELECT description, source_url FROM album_info
+         WHERE key = ?1
+           AND datetime(fetched_at) > datetime('now', '-90 days')",
+    )?;
+    let mut rows = stmt.query(params![key])?;
+    if let Some(row) = rows.next()? {
+        let description: Option<String> = row.get(0)?;
+        let source_url: Option<String> = row.get(1)?;
+        if description.is_none() && source_url.is_none() {
+            return Ok(Some(None));
+        }
+        return Ok(Some(Some(CachedAlbumInfo {
+            description,
+            source_url,
+        })));
+    }
+    Ok(None)
+}
+
+pub fn cache_album_info(
+    db_path: &Path,
+    key: &str,
+    info: Option<&CachedAlbumInfo>,
+) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    let (description, source_url) = match info {
+        Some(info) => (info.description.as_deref(), info.source_url.as_deref()),
+        None => (None, None),
+    };
+    connection.execute(
+        "INSERT INTO album_info (key, description, source_url, fetched_at)
+         VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+         ON CONFLICT(key) DO UPDATE SET
+            description = excluded.description,
+            source_url = excluded.source_url,
+            fetched_at = excluded.fetched_at",
+        params![key, description, source_url],
+    )?;
+    Ok(())
 }
 
 pub fn cache_artist_image(db_path: &Path, name: &str, url: Option<&str>) -> Result<()> {
