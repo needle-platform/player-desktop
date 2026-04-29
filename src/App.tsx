@@ -1650,56 +1650,91 @@ function SettingsView({ settings, onChange, onMaintenance, busy }: SettingsViewP
       </header>
 
       <div className="settings">
-        <section className="settings-card">
-          <h3>Appearance</h3>
-          <label>Theme</label>
-          <div className="seg">
-            {themeOptions.map((opt) => (
-              <button
-                key={opt.value}
-                className={`seg-btn ${settings.theme === opt.value ? 'on' : ''}`}
-                onClick={() => onChange({ ...settings, theme: opt.value })}
-              >
-                {opt.label}
-              </button>
-            ))}
+        <section className="settings-section">
+          <div className="settings-section-head">
+            <h2>Appearance</h2>
+            <p>Choose how Resonance should look while you browse and listen.</p>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <label className="settings-label">Theme</label>
+              <p className="settings-hint">Match the system or lock the app to light or dark mode.</p>
+            </div>
+            <div className="settings-row-control">
+              <div className="seg">
+                {themeOptions.map((opt) => (
+                  <button
+                    key={opt.value}
+                    className={`seg-btn ${settings.theme === opt.value ? 'on' : ''}`}
+                    onClick={() => onChange({ ...settings, theme: opt.value })}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </section>
 
-        <section className="settings-card">
-          <h3>Equalizer</h3>
-          <label>Preset</label>
-          <div className="seg">
-            {equalizerOptions.map((opt) => (
-              <button
-                key={opt.value}
-                className={`seg-btn ${settings.equalizer_preset === opt.value ? 'on' : ''}`}
-                onClick={() => onChange({ ...settings, equalizer_preset: opt.value })}
-              >
-                {opt.label}
-              </button>
-            ))}
+        <section className="settings-section">
+          <div className="settings-section-head">
+            <h2>Equalizer</h2>
+            <p>Tune the listening profile now, with mpv DSP wiring ready for the next phase.</p>
           </div>
-          <p className="hint">Equalizer presets are stored locally; DSP wiring through mpv comes next.</p>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <label className="settings-label">Preset</label>
+              <p className="settings-hint">Presets are stored locally and will map to live playback once DSP lands.</p>
+            </div>
+            <div className="settings-row-control">
+              <div className="seg">
+                {equalizerOptions.map((opt) => (
+                  <button
+                    key={opt.value}
+                    className={`seg-btn ${settings.equalizer_preset === opt.value ? 'on' : ''}`}
+                    onClick={() => onChange({ ...settings, equalizer_preset: opt.value })}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         </section>
 
-        <section className="settings-card">
-          <h3>Library</h3>
-          <p className="hint">
-            Maintenance rescans your folders for changes and removes any dotfile entries from the library. Your audio
-            files are never modified.
-          </p>
-          <button className="primary" onClick={onMaintenance} disabled={busy}>
-            ↻ Run maintenance
-          </button>
+        <section className="settings-section">
+          <div className="settings-section-head">
+            <h2>Library</h2>
+            <p>Keep your library database in sync without touching the underlying audio files.</p>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <label className="settings-label">Maintenance</label>
+              <p className="settings-hint">
+                Rescans watched folders for changes and removes dotfile entries from the library only.
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <button className="primary" onClick={onMaintenance} disabled={busy}>
+                ↻ Run maintenance
+              </button>
+            </div>
+          </div>
         </section>
 
-        <section className="settings-card">
-          <h3>Playback</h3>
-          <p className="hint">
-            Audio is played by mpv. On macOS install it with <code>brew install mpv</code> if it isn’t already
-            available.
-          </p>
+        <section className="settings-section">
+          <div className="settings-section-head">
+            <h2>Playback</h2>
+            <p>Resonance plays through mpv for local, bit-perfect playback.</p>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <label className="settings-label">Backend</label>
+              <p className="settings-hint">
+                On macOS install it with <code>brew install mpv</code> if it is not already available.
+              </p>
+            </div>
+          </div>
         </section>
       </div>
     </div>
