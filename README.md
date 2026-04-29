@@ -60,6 +60,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
 - Cached in SQLite (`album_info`) so repeat opens are instant and we avoid repeat lookups
+- **Album page genres** are derived from the imported track tags already embedded in your files; we currently do not fetch canonical album genres from Wikipedia / MusicBrainz
 - Graceful fallback when no article exists for obscure releases, compilations, or local-only metadata
 
 ### Themes & UX

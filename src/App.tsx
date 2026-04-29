@@ -1444,8 +1444,8 @@ function AlbumDetailView({
       <section className="album-about">
         <h2 className="section-title">About this album</h2>
         {info?.description ? (
-          <>
-            <p className="album-about-text">{info.description}</p>
+          <p className="album-about-text">
+            {info.description}
             {info.source_url && (
               <a
                 className="album-about-link"
@@ -1456,7 +1456,7 @@ function AlbumDetailView({
                 Read more on Wikipedia →
               </a>
             )}
-          </>
+          </p>
         ) : infoLoading ? (
           <p className="muted">Looking up album info…</p>
         ) : (

@@ -1209,10 +1209,10 @@ input, select {
 /* ------- Album detail view ------- */
 
 .album-detail {
-  padding: 28px 32px 64px;
+  padding: 8px 0 56px;
   display: flex;
   flex-direction: column;
-  gap: 32px;
+  gap: 24px;
 }
 
 .back-button {
@@ -1331,16 +1331,16 @@ input, select {
   font-size: 14px;
   line-height: 1.6;
   color: var(--text);
-  max-width: 80ch;
   white-space: pre-wrap;
 }
 
 .album-about-link {
-  display: inline-block;
-  margin-top: 10px;
+  display: inline;
+  margin-left: 8px;
   font-size: 13px;
   color: var(--accent);
   text-decoration: none;
+  white-space: nowrap;
 }
 .album-about-link:hover {
   text-decoration: underline;
