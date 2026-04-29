@@ -2,7 +2,7 @@
 
 A local-first, hi-fi music player for macOS built with **Tauri**, **React + TypeScript**, and **Rust**. Audio playback is handled by **mpv** through its JSON IPC, so lossless formats (FLAC, ALAC, WAV, AIFF) sound exactly the way they should.
 
-> Status: early scaffold — playable, browsable, and looking like a real music app, with a clear path toward queueing, gapless playback, and a working equalizer.
+> Status: actively usable local-first player — library, queue, saved playlists, playback persistence, and equalizer are all in place, with smart playlists and deeper library tooling continuing to grow.
 
 ## Features
 
@@ -13,7 +13,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Hidden files ignored** — dotfiles and dot-directories are skipped during scan
 - **Maintenance command** rescans your folders for changes and purges any dotfile entries from the library (never touches your audio files)
 - **Diff-based rescans** preserve `added_at` and play history across maintenance runs
-- **Per-folder removal** straight from the sidebar
+- **Per-folder removal** from Settings
 
 ### Dashboard
 - **Time-of-day greeting** with library summary, or a **Now spinning** hero when something's playing
@@ -31,7 +31,14 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 
 ### Playback
 - **mpv backend** for bit-perfect lossless playback through JSON IPC
-- **Real playlist queues**: play album · shuffle artist · play all Quick picks · shuffle a From-your-library playlist — mpv auto-advances through the queue
+- **Real Up Next queue** with visible current item, album covers, queue counts, and click-outside dismiss
+- **Queue actions everywhere they matter**: Play next · Add to queue · album-level Play next / Add to queue
+- **Queue editing**: reorder, remove individual items, clear upcoming tracks, direct jump to any queued track
+- **Queue-aware playback**: play album · shuffle artist · play all Quick picks · shuffle a From-your-library playlist — mpv auto-advances through the queue
+- **Playback persistence** restores queue, selected track, repeat mode, shuffle state, and last position between launches
+- **Safe relaunch behavior** restores the last session in a stopped state, never surprise-autoplays on app launch
+- **Repeat modes**: off · one · all
+- **Shuffle state** is visible and persistent
 - **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
@@ -42,6 +49,13 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
   - sidecar files first: `cover.{jpg,png,webp}`, `folder.*`, `front.*`, `album.*`, `albumart.*`, `artwork.*`
   - falls back to embedded artwork via `lofty`
   - cached in-memory on the frontend
+
+### Playlists
+- **Sidebar Playlists section** with saved playlists and smart playlists
+- **Manual playlists** stored in SQLite and editable in-app
+- **Save visible track sets** from the Tracks view or album pages as playlists
+- **Playlist management**: rename, delete, reorder tracks, remove tracks
+- **Smart playlists** surfaced as first-class library views generated from your collection and listening history
 
 ### Artist portraits
 - Pulled for free via **MusicBrainz → Wikidata → Wikimedia Commons**
@@ -55,7 +69,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Albums** (cards with cover art)
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, full track list, and background album info when available
 - **Artists** (list with track counts)
-- **Settings** with theme switcher, live equalizer presets, manual 10-band EQ, and maintenance
+- **Settings** with theme switcher, library folders, maintenance, live equalizer presets, and manual 10-band EQ
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
@@ -75,9 +89,10 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ┌──────────────────────────┐         IPC         ┌──────────────────────┐
 │ React + TS frontend      │◀──── Tauri ────────▶│ Rust backend         │
 │  - Dashboard / views     │                     │  - SQLite library    │
-│  - Auto-playlists        │                     │  - Folder scanner    │
+│  - Queue + playlists     │                     │  - Folder scanner    │
 │  - Cover art hook        │                     │  - Cover extractor   │
 │  - Player controls       │                     │  - Play history      │
+│  - Session restore       │                     │  - Playlist storage  │
 └──────────────────────────┘                     │  - mpv controller    │
                                                  └──────────┬───────────┘
                                                             │  Unix socket
@@ -97,7 +112,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - `src/lib/playlists.ts` — auto-playlist generators from tags + heuristics
 - `src/styles.css` — full theming + layout
 - `src-tauri/src/lib.rs` — Tauri command surface and app setup
-- `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, artist-image cache, album-info cache
+- `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, saved playlists, artist-image cache, album-info cache
 - `src-tauri/src/library.rs` — folder scanner, dotfile filter, metadata via `lofty`
 - `src-tauri/src/cover.rs` — sidecar + embedded cover-art extraction
 - `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup
@@ -140,7 +155,7 @@ Maintenance and remove-folder actions only touch the database — your audio fil
 
 ## Auto-playlists & metadata
 
-Needle generates dashboard recommendations from data we already have, no machine learning required:
+Needle generates dashboard recommendations and smart-playlist views from data we already have, no machine learning required:
 
 - **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
 - **Library state** (`play_count = 0`) drives Needs a first spin
@@ -152,10 +167,10 @@ Real **BPM and key analysis** would unlock proper mood detection (energy, workou
 ## Roadmap
 
 - BPM + key analysis as an opt-in background step, with cached `audio_features` table
-- Queue / now-playing list
 - Gapless playback hand-off
 - Watch folders with incremental rescans
-- User-curated playlists alongside auto-playlists
+- Add tracks/albums to existing saved playlists from more entry points
+- Custom smart-playlist rules and editor
 - Smarter sidecar handling (hidden FLAC metadata files, `.cue` sheets)
 - Proper macOS / Windows / Linux icon set
 

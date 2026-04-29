@@ -1,30 +1,46 @@
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, RefObject } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  appendQueue,
   bootstrapApp,
+  createPlaylist,
+  deletePlaylist,
   getPlaybackState,
+  insertQueueAt,
+  moveQueueIndex as tauriMoveQueueIndex,
+  movePlaylistTrack,
   pausePlayback,
+  playQueueIndex as tauriPlayQueueIndex,
   playQueue as tauriPlayQueue,
   playTrack,
   recordPlay,
+  removePlaylistTrack,
+  removeQueueIndex as tauriRemoveQueueIndex,
   removeLibraryRoot,
+  renamePlaylist,
   resumePlayback,
   runMaintenance,
   setAudioDevice as setPlaybackAudioDevice,
   setPlaybackMuted,
   setPlaybackVolume as setPlaybackVolumeLevel,
+  setRepeatMode as tauriSetRepeatMode,
   saveSettings,
+  savePlaybackSession,
   scanLibrary,
   seekPlayback,
   stopPlayback,
+  syncPlaybackSession,
 } from './lib/tauri';
 import type {
   AudioDevice,
   AppSettings,
   BootstrapPayload,
   EqualizerPreset,
+  PlaybackSession,
+  RepeatMode,
+  SavedPlaylist,
   ThemeMode,
   Track,
 } from './types';
@@ -37,6 +53,15 @@ import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'settings';
+type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: number };
+type ResolvedPlaylist = {
+  id: string;
+  kind: 'smart' | 'manual';
+  name: string;
+  description: string;
+  tracks: Track[];
+  saved?: SavedPlaylist;
+};
 type AlbumSummary = {
   key: string;
   album: string;
@@ -76,6 +101,14 @@ const sampleN = <T,>(arr: T[], n: number): T[] => {
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy.slice(0, n);
+};
+const shuffleList = <T,>(arr: T[]): T[] => {
+  const copy = arr.slice();
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
 };
 
 const equalizerOptions: Array<{ value: EqualizerPreset; label: string }> = [
@@ -120,10 +153,11 @@ const formatQuality = (track: Track) => {
   return parts.join(' · ') || '—';
 };
 
-const folderName = (path: string) => path.split('/').filter(Boolean).pop() ?? path;
 const defaultAudioDevice: AudioDevice = { name: 'auto', description: 'System default' };
 
 const clampVolume = (value: number) => Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+const clampIndex = (index: number, length: number) =>
+  length <= 0 ? 0 : Math.max(0, Math.min(index, length - 1));
 const audioDeviceKey = (description: string) => description.trim().toLowerCase();
 const albumIdentitySeparator = '\u0000';
 const albumArtistForTrack = (track: Pick<Track, 'album_artist' | 'artist'>) =>
@@ -152,6 +186,37 @@ const displayedEqualizerBands = (settings: AppSettings) =>
   settings.equalizer_preset === 'manual'
     ? normalizeEqualizerBands(settings.equalizer_bands)
     : equalizerPresetBands[settings.equalizer_preset] ?? defaultEqualizerBands;
+const normalizeSession = (session?: Partial<PlaybackSession> | null): PlaybackSession => {
+  const queuePaths = Array.isArray(session?.queue_paths) ? session.queue_paths.filter(Boolean) : [];
+  const baseQueuePaths = Array.isArray(session?.base_queue_paths)
+    ? session.base_queue_paths.filter(Boolean)
+    : queuePaths.slice();
+  const currentIndex = clampIndex(
+    typeof session?.current_index === 'number' ? session.current_index : 0,
+    queuePaths.length,
+  );
+
+  return {
+    queue_paths: queuePaths,
+    base_queue_paths: baseQueuePaths.length > 0 ? baseQueuePaths : queuePaths.slice(),
+    current_index: currentIndex,
+    position_seconds:
+      typeof session?.position_seconds === 'number' && Number.isFinite(session.position_seconds)
+        ? Math.max(0, session.position_seconds)
+        : 0,
+    paused: session?.paused ?? true,
+    repeat_mode: session?.repeat_mode ?? 'off',
+    shuffle_enabled: session?.shuffle_enabled ?? false,
+  };
+};
+const shuffleQueueKeepingCurrent = (paths: string[], currentIndex: number) => {
+  if (paths.length <= 1) return paths.slice();
+  const safeIndex = clampIndex(currentIndex, paths.length);
+  const before = paths.slice(0, safeIndex);
+  const current = paths[safeIndex];
+  const after = shuffleList(paths.slice(safeIndex + 1));
+  return [...before, current, ...after];
+};
 
 const normalizeAudioDevices = (data: unknown): AudioDevice[] => {
   if (!Array.isArray(data)) return [];
@@ -271,6 +336,44 @@ function OutputDeviceIcon() {
   );
 }
 
+function QueueIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h10" />
+      <path d="M4 12h10" />
+      <path d="M4 17h6" />
+      <path d="m16 14 4 3-4 3z" />
+    </svg>
+  );
+}
+
+function ShuffleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h4l10 10h2" />
+      <path d="M18 7h2v2" />
+      <path d="m16 9 4-2-2-4" />
+      <path d="M4 17h4l3-3" />
+      <path d="m16 15 4 2-2 4" />
+      <path d="M18 17h2v-2" />
+    </svg>
+  );
+}
+
+function RepeatIcon({ mode }: { mode: RepeatMode }) {
+  return (
+    <span className="repeat-icon-wrap">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M17 2l4 4-4 4" />
+        <path d="M3 11V9a3 3 0 0 1 3-3h15" />
+        <path d="M7 22l-4-4 4-4" />
+        <path d="M21 13v2a3 3 0 0 1-3 3H3" />
+      </svg>
+      {mode === 'one' && <span className="repeat-icon-badge">1</span>}
+    </span>
+  );
+}
+
 function App() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
   const [view, setView] = useState<View>('dashboard');
@@ -278,7 +381,14 @@ function App() {
   const [search, setSearch] = useState('');
   const [selectedAlbum, setSelectedAlbum] = useState<string | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
-  const [selectedPlaylist, setSelectedPlaylist] = useState<AutoPlaylist | null>(null);
+  const [selectedPlaylist, setSelectedPlaylist] = useState<PlaylistSelection | null>(null);
+  const [queuePaths, setQueuePaths] = useState<string[]>([]);
+  const [baseQueuePaths, setBaseQueuePaths] = useState<string[]>([]);
+  const [currentQueueIndex, setCurrentQueueIndex] = useState(0);
+  const [repeatMode, setRepeatMode] = useState<RepeatMode>('off');
+  const [shuffleEnabled, setShuffleEnabled] = useState(false);
+  const [isQueueOpen, setIsQueueOpen] = useState(false);
+  const [isBackendPlaybackLoaded, setIsBackendPlaybackLoaded] = useState(false);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackPosition, setPlaybackPosition] = useState(0);
@@ -294,9 +404,21 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light');
   const lastRecordedPath = useRef<string | null>(null);
+  const suppressRecordPathRef = useRef<string | null>(null);
+  const sessionHydratedRef = useRef(false);
   const scrubPositionRef = useRef<number | null>(null);
+  const backendPathRef = useRef<string | null>(null);
+  const backendPausedRef = useRef(true);
+  const backendIdleRef = useRef(true);
   const albumReturnView = useRef<View>('albums');
   const deviceMenuRef = useRef<HTMLDivElement | null>(null);
+  const queueDrawerRef = useRef<HTMLElement | null>(null);
+
+  const syncConfirmedPlaybackState = () => {
+    setIsPlaying(
+      Boolean(backendPathRef.current) && !backendPausedRef.current && !backendIdleRef.current,
+    );
+  };
 
   const openAlbum = (album: string) => {
     albumReturnView.current = view === 'tracks' ? 'albums' : view;
@@ -304,6 +426,12 @@ function App() {
     setSelectedArtist(null);
     setSelectedPlaylist(null);
     setView('album');
+  };
+
+  const clearBrowsingFilters = () => {
+    setSelectedAlbum(null);
+    setSelectedArtist(null);
+    setSelectedPlaylist(null);
   };
 
   useEffect(() => {
@@ -315,22 +443,31 @@ function App() {
           const { name, data } = event.payload;
           if (name === 'path') {
             const path = typeof data === 'string' ? data : null;
+            backendPathRef.current = path;
             setCurrentPath(path);
             if (!path) {
               scrubPositionRef.current = null;
               setScrubPosition(null);
               setPlaybackPosition(0);
               setPlaybackDuration(0);
-              setIsPlaying(false);
+              syncConfirmedPlaybackState();
               setStatus('');
               return;
             }
-            // Queue transitions can briefly clear `path`; mark the next loaded
-            // track as active immediately and let a later pause event override.
-            setIsPlaying(true);
+            setIsBackendPlaybackLoaded(true);
+            const queueIndex = queuePaths.indexOf(path);
+            if (queueIndex >= 0) {
+              setCurrentQueueIndex(queueIndex);
+            }
             scrubPositionRef.current = null;
             setScrubPosition(null);
             setPlaybackPosition(0);
+            syncConfirmedPlaybackState();
+            if (suppressRecordPathRef.current === path) {
+              suppressRecordPathRef.current = null;
+              lastRecordedPath.current = path;
+              return;
+            }
             if (lastRecordedPath.current !== path) {
               lastRecordedPath.current = path;
               const nowIso = new Date().toISOString();
@@ -356,12 +493,12 @@ function App() {
               void recordPlay(path).catch(() => {});
             }
           } else if (name === 'pause') {
-            const paused = data === true;
-            setIsPlaying(!paused);
+            backendPausedRef.current = data === true;
+            syncConfirmedPlaybackState();
+          } else if (name === 'idle-active') {
+            backendIdleRef.current = data === true;
+            syncConfirmedPlaybackState();
           } else if (name === 'time-pos') {
-            if (typeof data === 'number') {
-              setIsPlaying(true);
-            }
             if (scrubPositionRef.current == null) {
               setPlaybackPosition(typeof data === 'number' ? data : 0);
             }
@@ -388,7 +525,7 @@ function App() {
     return () => {
       if (unlisten) unlisten();
     };
-  }, []);
+  }, [queuePaths]);
 
   useEffect(() => {
     void (async () => {
@@ -461,10 +598,205 @@ function App() {
     };
   }, [isDeviceMenuOpen]);
 
+  useEffect(() => {
+    if (!isQueueOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!queueDrawerRef.current?.contains(event.target as Node)) {
+        setIsQueueOpen(false);
+      }
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsQueueOpen(false);
+      }
+    };
+
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isQueueOpen]);
+
   const allTracks = data?.library.tracks ?? [];
+  const trackByPath = useMemo(() => new Map(allTracks.map((track) => [track.path, track])), [allTracks]);
+
+  const restoreSession = async (
+    session: PlaybackSession,
+    options?: { forcePaused?: boolean; deferBackendLoad?: boolean },
+  ) => {
+    const filteredQueue = session.queue_paths.filter((path) => trackByPath.has(path));
+    const filteredBase = (session.base_queue_paths.length > 0 ? session.base_queue_paths : session.queue_paths).filter(
+      (path) => trackByPath.has(path),
+    );
+    const nextIndex = clampIndex(session.current_index, filteredQueue.length);
+    const normalizedBase = filteredBase.length > 0 ? filteredBase : filteredQueue.slice();
+    const normalizedSession: PlaybackSession = {
+      ...session,
+      queue_paths: filteredQueue,
+      base_queue_paths: normalizedBase,
+      current_index: nextIndex,
+      paused: options?.forcePaused ?? session.paused,
+    };
+
+    setQueuePaths(normalizedSession.queue_paths);
+    setBaseQueuePaths(normalizedSession.base_queue_paths);
+    setCurrentQueueIndex(normalizedSession.current_index);
+    setRepeatMode(normalizedSession.repeat_mode);
+    setShuffleEnabled(normalizedSession.shuffle_enabled);
+    setIsBackendPlaybackLoaded(!options?.deferBackendLoad && normalizedSession.queue_paths.length > 0);
+    setCurrentPath(
+      options?.deferBackendLoad ? null : (normalizedSession.queue_paths[normalizedSession.current_index] ?? null),
+    );
+    setPlaybackPosition(normalizedSession.position_seconds);
+    setPlaybackDuration(0);
+    setIsPlaying(!normalizedSession.paused);
+
+    if (normalizedSession.queue_paths.length === 0 || options?.deferBackendLoad) {
+      backendPathRef.current = null;
+      backendPausedRef.current = true;
+      backendIdleRef.current = true;
+      return;
+    }
+
+    suppressRecordPathRef.current = normalizedSession.queue_paths[normalizedSession.current_index] ?? null;
+    await syncPlaybackSession(normalizedSession);
+  };
+
+  const persistSession = async (session: PlaybackSession) => {
+    try {
+      await savePlaybackSession(session);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  useEffect(() => {
+    if (!data || sessionHydratedRef.current) return;
+    sessionHydratedRef.current = true;
+
+    const session = normalizeSession(data.playback_session);
+    void restoreSession(session, { forcePaused: true, deferBackendLoad: true }).catch((error) => {
+      setStatus(error instanceof Error ? error.message : String(error));
+    });
+  }, [data, trackByPath]);
+
+  useEffect(() => {
+    if (!sessionHydratedRef.current) return;
+
+    const normalizedQueue = queuePaths.filter((path) => trackByPath.has(path));
+    const normalizedBase = baseQueuePaths.filter((path) => trackByPath.has(path));
+    if (
+      normalizedQueue.length !== queuePaths.length ||
+      normalizedBase.length !== baseQueuePaths.length
+    ) {
+      setQueuePaths(normalizedQueue);
+      setBaseQueuePaths(normalizedBase.length > 0 ? normalizedBase : normalizedQueue);
+      setCurrentQueueIndex((prev) => clampIndex(prev, normalizedQueue.length));
+      if (normalizedQueue.length === 0) {
+        backendPathRef.current = null;
+        backendPausedRef.current = true;
+        backendIdleRef.current = true;
+        setCurrentPath(null);
+        setIsPlaying(false);
+      } else if (currentPath && !normalizedQueue.includes(currentPath)) {
+        const fallbackPath = normalizedQueue[clampIndex(currentQueueIndex, normalizedQueue.length)];
+        setCurrentPath(fallbackPath ?? null);
+      }
+    }
+  }, [baseQueuePaths, currentPath, currentQueueIndex, queuePaths, trackByPath]);
+
+  const queueTracks = useMemo(
+    () => queuePaths.map((path) => trackByPath.get(path)).filter((track): track is Track => Boolean(track)),
+    [queuePaths, trackByPath],
+  );
+  const baseQueueTracks = useMemo(
+    () => baseQueuePaths.map((path) => trackByPath.get(path)).filter((track): track is Track => Boolean(track)),
+    [baseQueuePaths, trackByPath],
+  );
+  const currentQueueTrack = queueTracks[currentQueueIndex] ?? null;
+
+  const playbackSession = useMemo<PlaybackSession>(
+    () => ({
+      queue_paths: queueTracks.map((track) => track.path),
+      base_queue_paths:
+        baseQueueTracks.length > 0
+          ? baseQueueTracks.map((track) => track.path)
+          : queueTracks.map((track) => track.path),
+      current_index: clampIndex(
+        currentPath ? queueTracks.findIndex((track) => track.path === currentPath) : currentQueueIndex,
+        queueTracks.length,
+      ),
+      position_seconds: currentPath || currentQueueTrack ? playbackPosition : 0,
+      paused: !isPlaying,
+      repeat_mode: repeatMode,
+      shuffle_enabled: shuffleEnabled,
+    }),
+    [
+      baseQueueTracks,
+      currentPath,
+      currentQueueIndex,
+      currentQueueTrack,
+      isPlaying,
+      playbackPosition,
+      queueTracks,
+      repeatMode,
+      shuffleEnabled,
+    ],
+  );
+
+  useEffect(() => {
+    if (!sessionHydratedRef.current) return;
+
+    const timeout = window.setTimeout(() => {
+      void persistSession(playbackSession);
+    }, currentPath ? 900 : 150);
+
+    return () => window.clearTimeout(timeout);
+  }, [currentPath, playbackSession]);
+
+  const smartPlaylists = useMemo(
+    () => generateAutoPlaylists(allTracks),
+    // featuredSeed reroll also rerolls playlist sampling
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allTracks, featuredSeed],
+  );
+
+  const manualPlaylists = data?.playlists ?? [];
+  const selectedPlaylistData = useMemo<ResolvedPlaylist | null>(() => {
+    if (!selectedPlaylist) return null;
+    if (selectedPlaylist.kind === 'smart') {
+      const playlist = smartPlaylists.find((entry) => entry.id === selectedPlaylist.id);
+      if (!playlist) return null;
+      return {
+        id: playlist.id,
+        kind: 'smart',
+        name: playlist.name,
+        description: playlist.description,
+        tracks: playlist.tracks,
+      };
+    }
+
+    const playlist = manualPlaylists.find((entry) => entry.id === selectedPlaylist.id);
+    if (!playlist) return null;
+    const tracks = playlist.track_paths
+      .map((path) => trackByPath.get(path))
+      .filter((track): track is Track => Boolean(track));
+    return {
+      id: `manual:${playlist.id}`,
+      kind: 'manual',
+      name: playlist.name,
+      description: `${tracks.length} saved track${tracks.length === 1 ? '' : 's'}`,
+      tracks,
+      saved: playlist,
+    };
+  }, [manualPlaylists, selectedPlaylist, smartPlaylists, trackByPath]);
 
   const filteredTracks = useMemo(() => {
-    let list: Track[] = selectedPlaylist ? selectedPlaylist.tracks : allTracks;
+    let list: Track[] = selectedPlaylistData ? selectedPlaylistData.tracks : allTracks;
     if (selectedAlbum) list = list.filter((t) => trackAlbumKey(t) === selectedAlbum);
     if (selectedArtist) list = list.filter((t) => t.artist === selectedArtist);
     if (search.trim()) {
@@ -477,14 +809,21 @@ function App() {
       );
     }
     return list;
-  }, [allTracks, search, selectedAlbum, selectedArtist, selectedPlaylist]);
+  }, [allTracks, search, selectedAlbum, selectedArtist, selectedPlaylistData]);
 
-  const playlists = useMemo(
-    () => generateAutoPlaylists(allTracks),
-    // featuredSeed reroll also rerolls playlist sampling
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [allTracks, featuredSeed],
-  );
+  useEffect(() => {
+    if (!selectedPlaylist) return;
+    if (selectedPlaylist.kind === 'smart') {
+      if (!smartPlaylists.some((playlist) => playlist.id === selectedPlaylist.id)) {
+        setSelectedPlaylist(null);
+      }
+      return;
+    }
+
+    if (!manualPlaylists.some((playlist) => playlist.id === selectedPlaylist.id)) {
+      setSelectedPlaylist(null);
+    }
+  }, [manualPlaylists, selectedPlaylist, smartPlaylists]);
 
   const albums = useMemo(() => {
     const map = new Map<string, AlbumSummary>();
@@ -531,9 +870,11 @@ function App() {
   }, [allTracks]);
 
   const currentTrack = useMemo(
-    () => allTracks.find((t) => t.path === currentPath) ?? null,
-    [allTracks, currentPath],
+    () => (currentPath ? trackByPath.get(currentPath) ?? null : currentQueueTrack),
+    [currentPath, currentQueueTrack, trackByPath],
   );
+  const selectedManualPlaylist =
+    selectedPlaylistData?.kind === 'manual' ? selectedPlaylistData.saved ?? null : null;
   const selectedAlbumSummary = useMemo(
     () => albums.find((album) => album.key === selectedAlbum) ?? null,
     [albums, selectedAlbum],
@@ -668,28 +1009,294 @@ function App() {
     }
   };
 
-  const play = async (track: Track) => {
+  const promptPlaylistName = (initialValue: string) => {
+    const value = window.prompt('Playlist name', initialValue)?.trim();
+    return value ? value : null;
+  };
+
+  const createManualPlaylist = async (trackPaths: string[], suggestedName: string) => {
+    const name = promptPlaylistName(suggestedName);
+    if (!name) return;
+
     try {
-      await playTrack(track.path);
-      setCurrentPath(track.path);
-      setIsPlaying(true);
-      setStatus(`Playing ${track.title}`);
+      setBusy('Saving playlist…');
+      const next = await createPlaylist(name, trackPaths);
+      setData(next);
+      const created = next.playlists
+        .filter((playlist) => playlist.name === name)
+        .sort((a, b) => b.id - a.id)[0];
+      if (created) {
+        setSelectedPlaylist({ kind: 'manual', id: created.id });
+        setView('tracks');
+      }
+      setStatus(`Saved playlist · ${name}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const renameManualPlaylist = async (playlist: SavedPlaylist) => {
+    const name = promptPlaylistName(playlist.name);
+    if (!name || name === playlist.name) return;
+
+    try {
+      setBusy('Renaming playlist…');
+      const next = await renamePlaylist(playlist.id, name);
+      setData(next);
+      setStatus(`Renamed playlist · ${name}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const deleteManualPlaylistById = async (playlist: SavedPlaylist) => {
+    if (!window.confirm(`Delete "${playlist.name}"?`)) return;
+
+    try {
+      setBusy('Deleting playlist…');
+      const next = await deletePlaylist(playlist.id);
+      setData(next);
+      if (selectedPlaylist?.kind === 'manual' && selectedPlaylist.id === playlist.id) {
+        setSelectedPlaylist(null);
+      }
+      setStatus(`Deleted playlist · ${playlist.name}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveVisibleTracksAsPlaylist = async (tracks: Track[], suggestedName: string) => {
+    const paths = tracks.map((track) => track.path);
+    if (paths.length === 0) return;
+    await createManualPlaylist(paths, suggestedName);
+  };
+
+  const moveManualPlaylistTrack = async (playlistId: number, fromIndex: number, toIndex: number) => {
+    try {
+      const next = await movePlaylistTrack(playlistId, fromIndex, toIndex);
+      setData(next);
+      setStatus('Playlist reordered');
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
   };
 
-  const playQueue = async (queue: Track[], label?: string) => {
-    if (queue.length === 0) return;
-    const first = queue[0];
+  const removeManualPlaylistTrack = async (playlistId: number, index: number) => {
     try {
-      await tauriPlayQueue(queue.map((t) => t.path));
-      setCurrentPath(first.path);
-      setIsPlaying(true);
-      setStatus(label ?? `Playing ${first.title}`);
+      const next = await removePlaylistTrack(playlistId, index);
+      setData(next);
+      setStatus('Removed from playlist');
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const applySessionLocally = (session: PlaybackSession) => {
+    const normalized = normalizeSession(session);
+    setQueuePaths(normalized.queue_paths);
+    setBaseQueuePaths(
+      normalized.base_queue_paths.length > 0 ? normalized.base_queue_paths : normalized.queue_paths,
+    );
+    setCurrentQueueIndex(normalized.current_index);
+    setCurrentPath(normalized.queue_paths[normalized.current_index] ?? null);
+    setPlaybackPosition(normalized.position_seconds);
+    setPlaybackDuration(0);
+    if (normalized.paused || normalized.queue_paths.length === 0) {
+      backendPausedRef.current = true;
+      setIsPlaying(false);
+    }
+    setRepeatMode(normalized.repeat_mode);
+    setShuffleEnabled(normalized.shuffle_enabled);
+  };
+
+  const syncSession = async (
+    session: PlaybackSession,
+    options?: { label?: string; suppressRecordPath?: string | null },
+  ) => {
+    const normalized = normalizeSession(session);
+    if (options?.suppressRecordPath) {
+      suppressRecordPathRef.current = options.suppressRecordPath;
+    }
+    await syncPlaybackSession(normalized);
+    setIsBackendPlaybackLoaded(normalized.queue_paths.length > 0);
+    applySessionLocally(normalized);
+    if (options?.label) {
+      setStatus(options.label);
+    }
+  };
+
+  const applyQueueLocally = (
+    nextQueuePaths: string[],
+    nextBasePaths: string[],
+    options?: { keepCurrentPath?: string | null },
+  ) => {
+    const filteredQueue = nextQueuePaths.filter((path) => trackByPath.has(path));
+    const filteredBase = nextBasePaths.filter((path) => trackByPath.has(path));
+    const keepCurrentPath = options?.keepCurrentPath ?? currentPath;
+    const nextCurrentIndex = keepCurrentPath ? filteredQueue.indexOf(keepCurrentPath) : -1;
+
+    setQueuePaths(filteredQueue);
+    setBaseQueuePaths(filteredBase.length > 0 ? filteredBase : filteredQueue);
+    if (nextCurrentIndex >= 0) {
+      setCurrentQueueIndex(nextCurrentIndex);
+    } else {
+      setCurrentQueueIndex((prev) => clampIndex(prev, filteredQueue.length));
+    }
+  };
+
+  const jumpToQueueIndex = async (index: number, label?: string) => {
+    const targetTrack = queueTracks[index];
+    if (!targetTrack) return;
+
+    if (!isBackendPlaybackLoaded) {
+      setCurrentQueueIndex(index);
+      setPlaybackPosition(0);
+      if (label) {
+        setStatus(label.replace(/^Playing\b/, 'Selected'));
+      }
+      return;
+    }
+
+    try {
+      await tauriPlayQueueIndex(index);
+      setIsBackendPlaybackLoaded(true);
+      if (label) {
+        setStatus(label);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const startQueue = async (
+    tracks: Track[],
+    label?: string,
+    options?: {
+      baseTracks?: Track[];
+      currentPath?: string;
+      shuffle?: boolean;
+      paused?: boolean;
+    },
+  ) => {
+    if (tracks.length === 0) return;
+
+    const actualPaths = tracks.map((track) => track.path);
+    const basePaths = (options?.baseTracks ?? tracks).map((track) => track.path);
+    const targetPath = options?.currentPath ?? actualPaths[0];
+    const session = normalizeSession({
+      queue_paths: actualPaths,
+      base_queue_paths: basePaths,
+      current_index: Math.max(actualPaths.indexOf(targetPath), 0),
+      position_seconds: 0,
+      paused: options?.paused ?? false,
+      repeat_mode: repeatMode,
+      shuffle_enabled: options?.shuffle ?? false,
+    });
+
+    try {
+      if (session.position_seconds === 0 && !session.paused) {
+        if (actualPaths.length === 1) {
+          await playTrack(actualPaths[0]);
+        } else {
+          await tauriPlayQueue(actualPaths);
+          if (session.current_index > 0) {
+            await tauriPlayQueueIndex(session.current_index);
+          }
+        }
+        await tauriSetRepeatMode(session.repeat_mode);
+        setIsBackendPlaybackLoaded(true);
+        applySessionLocally(session);
+        setStatus(label ?? `Playing ${tracks[session.current_index]?.title ?? tracks[0].title}`);
+        return;
+      }
+
+      await syncSession(session, {
+        label: label ?? `Playing ${tracks[session.current_index]?.title ?? tracks[0].title}`,
+      });
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const syncUpdatedQueue = async (
+    nextQueuePaths: string[],
+    nextBasePaths: string[],
+    options?: {
+      currentPath?: string | null;
+      paused?: boolean;
+      positionSeconds?: number;
+      label?: string;
+      suppressRecordPath?: string | null;
+    },
+  ) => {
+    const filteredQueue = nextQueuePaths.filter((path) => trackByPath.has(path));
+    const filteredBase = nextBasePaths.filter((path) => trackByPath.has(path));
+
+    if (filteredQueue.length === 0) {
+      try {
+        await syncSession(
+          {
+            queue_paths: [],
+            base_queue_paths: [],
+            current_index: 0,
+            position_seconds: 0,
+            paused: true,
+            repeat_mode: repeatMode,
+            shuffle_enabled: shuffleEnabled,
+          },
+          { label: options?.label },
+        );
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+
+    const preferredPath = options?.currentPath ?? currentPath ?? filteredQueue[0];
+    const nextIndex = Math.max(filteredQueue.indexOf(preferredPath ?? ''), 0);
+    const sameCurrent = preferredPath != null && preferredPath === currentPath;
+    const session = normalizeSession({
+      queue_paths: filteredQueue,
+      base_queue_paths: filteredBase.length > 0 ? filteredBase : filteredQueue,
+      current_index: nextIndex,
+      position_seconds: sameCurrent ? (options?.positionSeconds ?? clampedPosition) : 0,
+      paused: options?.paused ?? !isPlaying,
+      repeat_mode: repeatMode,
+      shuffle_enabled: shuffleEnabled,
+    });
+
+    try {
+      await syncSession(session, {
+        label: options?.label,
+        suppressRecordPath:
+          options?.suppressRecordPath ?? (sameCurrent ? preferredPath : null),
+      });
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const play = async (track: Track) => {
+    await startQueue([track], `Playing ${track.title}`);
+  };
+
+  const playQueue = async (
+    queue: Track[],
+    label?: string,
+    options?: {
+      baseTracks?: Track[];
+      currentPath?: string;
+      shuffle?: boolean;
+      paused?: boolean;
+    },
+  ) => {
+    await startQueue(queue, label, options);
   };
 
   const tracksForAlbum = (albumKeyValue: string) =>
@@ -700,39 +1307,75 @@ function App() {
 
   const playAlbum = (albumKeyValue: string) => {
     const tracks = tracksForAlbum(albumKeyValue);
-    void playQueue(tracks, `Playing album · ${albumTitleFromKey(albumKeyValue)}`);
+    const actualTracks = shuffleEnabled ? shuffleList(tracks) : tracks;
+    void playQueue(actualTracks, `Playing album · ${albumTitleFromKey(albumKeyValue)}`, {
+      baseTracks: tracks,
+      shuffle: shuffleEnabled,
+    });
   };
 
   const playAlbumFromTrack = (albumKeyValue: string, track: Track) => {
     const tracks = tracksForAlbum(albumKeyValue);
     const startIndex = tracks.findIndex((t) => t.path === track.path);
-    const queue = startIndex >= 0 ? tracks.slice(startIndex) : [track];
-    void playQueue(queue, `Playing album · ${albumTitleFromKey(albumKeyValue)}`);
+    const baseTracks = startIndex >= 0 ? tracks.slice(startIndex) : [track];
+    const queue = shuffleEnabled
+      ? [track, ...shuffleList(baseTracks.filter((item) => item.path !== track.path))]
+      : baseTracks;
+    void playQueue(queue, `Playing album · ${albumTitleFromKey(albumKeyValue)}`, {
+      baseTracks,
+      currentPath: track.path,
+      shuffle: shuffleEnabled,
+    });
   };
 
   const playArtist = (artistName: string) => {
     const pool = allTracks.filter((t) => t.artist === artistName);
-    const shuffled = pool.slice();
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-    void playQueue(shuffled.slice(0, 50), `Artist mix · ${artistName}`);
+    const shuffled = shuffleList(pool).slice(0, 50);
+    const selected = new Set(shuffled.map((track) => track.path));
+    void playQueue(shuffled, `Artist mix · ${artistName}`, {
+      baseTracks: pool.filter((track) => selected.has(track.path)),
+      shuffle: true,
+    });
   };
 
   const togglePlayPause = async () => {
     if (!currentTrack) {
-      const first = filteredTracks[0];
-      if (first) await play(first);
+      const first = queueTracks[0] ?? filteredTracks[0];
+      if (first) {
+        if (queueTracks.length > 0) {
+          await syncSession(
+            {
+              ...playbackSession,
+              current_index: Math.max(queueTracks.findIndex((track) => track.path === first.path), 0),
+              position_seconds: 0,
+              paused: false,
+            },
+            { label: `Playing ${first.title}` },
+          );
+        } else {
+          await play(first);
+        }
+      }
       return;
     }
     try {
+      if (!isBackendPlaybackLoaded) {
+        await syncSession(
+          {
+            ...playbackSession,
+            current_index: currentQueueIndex,
+            position_seconds: 0,
+            paused: false,
+          },
+          { label: `Playing ${currentTrack.title}` },
+        );
+        return;
+      }
+
       if (isPlaying) {
         await pausePlayback();
-        setIsPlaying(false);
       } else {
         await resumePlayback();
-        setIsPlaying(true);
       }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -741,23 +1384,357 @@ function App() {
 
   const shufflePlay = async () => {
     if (allTracks.length === 0) return;
-    const pick = allTracks[Math.floor(Math.random() * allTracks.length)];
-    await play(pick);
+    const shuffled = shuffleList(allTracks);
+    await playQueue(shuffled, `Shuffle play · ${shuffled[0]?.title ?? 'library'}`, {
+      baseTracks: allTracks,
+      shuffle: true,
+    });
   };
 
   const skip = async (delta: 1 | -1) => {
-    if (!currentTrack) return;
-    const idx = filteredTracks.findIndex((t) => t.path === currentTrack.path);
-    if (idx === -1) return;
-    const next = filteredTracks[idx + delta];
-    if (next) await play(next);
+    if (queueTracks.length === 0) return;
+    const activeIndex = currentPath
+      ? Math.max(queueTracks.findIndex((track) => track.path === currentPath), currentQueueIndex)
+      : currentQueueIndex;
+    const lastIndex = queueTracks.length - 1;
+    let nextIndex = activeIndex + delta;
+
+    if (delta === -1 && clampedPosition > 3 && currentTrack) {
+      void commitSeek(0);
+      return;
+    }
+
+    if (repeatMode === 'all') {
+      if (nextIndex < 0) nextIndex = lastIndex;
+      if (nextIndex > lastIndex) nextIndex = 0;
+    }
+
+    if (nextIndex < 0 || nextIndex > lastIndex) {
+      if (repeatMode === 'one' && currentTrack) {
+        await jumpToQueueIndex(activeIndex, `Playing ${currentTrack.title}`);
+        await seekPlayback(0);
+        setPlaybackPosition(0);
+      }
+      return;
+    }
+
+    const nextTrack = queueTracks[nextIndex];
+    if (!nextTrack) return;
+    await jumpToQueueIndex(nextIndex, `Playing ${nextTrack.title}`);
   };
 
   const stop = async () => {
     try {
       await stopPlayback();
+      backendPathRef.current = null;
+      backendPausedRef.current = true;
+      backendIdleRef.current = true;
+      setIsBackendPlaybackLoaded(false);
       setIsPlaying(false);
       setCurrentPath(null);
+      setPlaybackPosition(0);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const addToQueue = async (track: Track) => {
+    if (currentTrack && track.path === currentTrack.path) {
+      setStatus('That track is already playing');
+      return;
+    }
+
+    const nextQueue = queueTracks.map((item) => item.path).filter((path) => path !== track.path);
+    const nextBase = baseQueueTracks.map((item) => item.path).filter((path) => path !== track.path);
+    nextQueue.push(track.path);
+    nextBase.push(track.path);
+
+    if (!currentTrack) {
+      await playQueue([track], `Queued ${track.title}`);
+      return;
+    }
+
+    if (!isBackendPlaybackLoaded) {
+      applyQueueLocally(nextQueue, nextBase, { keepCurrentPath: null });
+      setStatus(`Added to queue · ${track.title}`);
+      return;
+    }
+
+    try {
+      const existingIndex = queueTracks.findIndex((item) => item.path === track.path);
+      if (existingIndex >= 0) {
+        await tauriRemoveQueueIndex(existingIndex);
+      }
+      await appendQueue([track.path]);
+      applyQueueLocally(nextQueue, nextBase, { keepCurrentPath: currentTrack.path });
+      setStatus(`Added to queue · ${track.title}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const playNext = async (track: Track) => {
+    if (!currentTrack) {
+      await playQueue([track], `Playing ${track.title}`);
+      return;
+    }
+
+    if (track.path === currentTrack.path) {
+      setStatus('That track is already playing');
+      return;
+    }
+
+    const activePath = currentTrack.path;
+    const activeIndex = Math.max(queuePaths.indexOf(activePath), 0);
+    const strippedQueue = queueTracks.map((item) => item.path).filter((path) => path !== track.path);
+    const strippedBase = baseQueueTracks.map((item) => item.path).filter((path) => path !== track.path);
+    strippedQueue.splice(activeIndex + 1, 0, track.path);
+    strippedBase.splice(activeIndex + 1, 0, track.path);
+
+    if (!isBackendPlaybackLoaded) {
+      applyQueueLocally(strippedQueue, strippedBase, { keepCurrentPath: null });
+      setStatus(`Plays next · ${track.title}`);
+      return;
+    }
+
+    try {
+      const existingIndex = queueTracks.findIndex((item) => item.path === track.path);
+      if (existingIndex >= 0) {
+        await tauriRemoveQueueIndex(existingIndex);
+      }
+      await insertQueueAt([track.path], activeIndex + 1);
+      applyQueueLocally(strippedQueue, strippedBase, { keepCurrentPath: activePath });
+      setStatus(`Plays next · ${track.title}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const moveQueueItem = async (index: number, delta: -1 | 1) => {
+    const target = index + delta;
+    if (index < 0 || target < 0 || index >= queueTracks.length || target >= queueTracks.length) return;
+    const nextQueue = queueTracks.map((track) => track.path);
+    [nextQueue[index], nextQueue[target]] = [nextQueue[target], nextQueue[index]];
+    if (!isBackendPlaybackLoaded) {
+      applyQueueLocally(nextQueue, nextQueue, { keepCurrentPath: null });
+      setStatus('Queue reordered');
+      return;
+    }
+    try {
+      await tauriMoveQueueIndex(index, target);
+      applyQueueLocally(nextQueue, nextQueue, { keepCurrentPath: currentPath });
+      setStatus('Queue reordered');
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const removeQueueItem = async (index: number) => {
+    if (index < 0 || index >= queueTracks.length) return;
+    const removedPath = queueTracks[index]?.path;
+    if (!removedPath) return;
+    const nextQueue = queueTracks.map((track) => track.path).filter((path) => path !== removedPath);
+    const nextBase = baseQueueTracks.map((track) => track.path).filter((path) => path !== removedPath);
+
+    if (!isBackendPlaybackLoaded) {
+      applyQueueLocally(nextQueue, nextBase, { keepCurrentPath: null });
+      setStatus('Removed from queue');
+      return;
+    }
+
+    try {
+      await tauriRemoveQueueIndex(index);
+      applyQueueLocally(nextQueue, nextBase, {
+        keepCurrentPath: removedPath === currentPath ? null : currentPath,
+      });
+      if (removedPath === currentPath) {
+        setCurrentPath(null);
+      }
+      setStatus('Removed from queue');
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const clearQueue = async () => {
+    if (currentTrack) {
+      if (!isBackendPlaybackLoaded) {
+        applyQueueLocally([currentTrack.path], [currentTrack.path], { keepCurrentPath: null });
+        setStatus('Cleared Up Next');
+        return;
+      }
+      try {
+        const indicesToRemove = queueTracks
+          .map((track, index) => (track.path === currentTrack.path ? -1 : index))
+          .filter((index) => index >= 0)
+          .sort((a, b) => b - a);
+        for (const index of indicesToRemove) {
+          await tauriRemoveQueueIndex(index);
+        }
+        applyQueueLocally([currentTrack.path], [currentTrack.path], { keepCurrentPath: currentTrack.path });
+        setStatus('Cleared Up Next');
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+
+    await syncUpdatedQueue([], [], { label: 'Queue cleared' });
+  };
+
+  const addAlbumToQueue = async (albumKeyValue: string) => {
+    const albumTracks = tracksForAlbum(albumKeyValue);
+    if (albumTracks.length === 0) return;
+
+    if (!currentTrack) {
+      await playQueue(albumTracks, `Playing album · ${albumTitleFromKey(albumKeyValue)}`, {
+        baseTracks: albumTracks,
+      });
+      return;
+    }
+
+    const albumPaths = albumTracks
+      .map((track) => track.path)
+      .filter((path) => path !== currentTrack.path);
+    if (albumPaths.length === 0) {
+      setStatus('That album is already playing');
+      return;
+    }
+    const nextQueue = queueTracks
+      .map((track) => track.path)
+      .filter((path) => !albumPaths.includes(path))
+      .concat(albumPaths);
+    const nextBase = baseQueueTracks
+      .map((track) => track.path)
+      .filter((path) => !albumPaths.includes(path))
+      .concat(albumPaths);
+
+    if (!isBackendPlaybackLoaded) {
+      applyQueueLocally(nextQueue, nextBase, { keepCurrentPath: null });
+      setStatus(`Added album to queue · ${albumTitleFromKey(albumKeyValue)}`);
+      return;
+    }
+
+    try {
+      const existingIndices = queueTracks
+        .map((track, index) => (albumPaths.includes(track.path) ? index : -1))
+        .filter((index) => index >= 0)
+        .sort((a, b) => b - a);
+      for (const index of existingIndices) {
+        await tauriRemoveQueueIndex(index);
+      }
+      await appendQueue(albumPaths);
+      applyQueueLocally(nextQueue, nextBase, { keepCurrentPath: currentTrack.path });
+      setStatus(`Added album to queue · ${albumTitleFromKey(albumKeyValue)}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const playAlbumNext = async (albumKeyValue: string) => {
+    const albumTracks = tracksForAlbum(albumKeyValue);
+    if (albumTracks.length === 0) return;
+
+    if (!currentTrack) {
+      await playQueue(albumTracks, `Playing album · ${albumTitleFromKey(albumKeyValue)}`, {
+        baseTracks: albumTracks,
+      });
+      return;
+    }
+
+    const albumPaths = albumTracks
+      .map((track) => track.path)
+      .filter((path) => path !== currentTrack.path);
+    if (albumPaths.length === 0) {
+      setStatus('That album is already playing');
+      return;
+    }
+    const activePath = currentTrack.path;
+    const activeIndex = Math.max(queuePaths.indexOf(activePath), 0);
+    const nextQueue = queueTracks
+      .map((track) => track.path)
+      .filter((path) => !albumPaths.includes(path));
+    const nextBase = baseQueueTracks
+      .map((track) => track.path)
+      .filter((path) => !albumPaths.includes(path));
+
+    nextQueue.splice(activeIndex + 1, 0, ...albumPaths);
+    nextBase.splice(activeIndex + 1, 0, ...albumPaths);
+
+    if (!isBackendPlaybackLoaded) {
+      applyQueueLocally(nextQueue, nextBase, { keepCurrentPath: null });
+      setStatus(`Album plays next · ${albumTitleFromKey(albumKeyValue)}`);
+      return;
+    }
+
+    try {
+      const existingIndices = queueTracks
+        .map((track, index) => (albumPaths.includes(track.path) ? index : -1))
+        .filter((index) => index >= 0)
+        .sort((a, b) => b - a);
+      for (const index of existingIndices) {
+        await tauriRemoveQueueIndex(index);
+      }
+      await insertQueueAt(albumPaths, activeIndex + 1);
+      applyQueueLocally(nextQueue, nextBase, { keepCurrentPath: activePath });
+      setStatus(`Album plays next · ${albumTitleFromKey(albumKeyValue)}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const toggleRepeat = async () => {
+    const nextMode: RepeatMode =
+      repeatMode === 'off' ? 'all' : repeatMode === 'all' ? 'one' : 'off';
+    setRepeatMode(nextMode);
+    try {
+      await tauriSetRepeatMode(nextMode);
+      setStatus(
+        nextMode === 'off'
+          ? 'Repeat off'
+          : nextMode === 'all'
+            ? 'Repeat all'
+            : 'Repeat one',
+      );
+    } catch (error) {
+      setRepeatMode(repeatMode);
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const toggleShuffle = async () => {
+    const nextShuffle = !shuffleEnabled;
+    const activePath = currentTrack?.path ?? queueTracks[currentQueueIndex]?.path ?? null;
+
+    if (queueTracks.length === 0) {
+      setShuffleEnabled(nextShuffle);
+      return;
+    }
+
+    const canonical = baseQueueTracks.map((track) => track.path);
+    const nextQueue = nextShuffle
+      ? shuffleQueueKeepingCurrent(
+          canonical,
+          activePath ? Math.max(canonical.indexOf(activePath), 0) : currentQueueIndex,
+        )
+      : canonical.slice();
+
+    const nextIndex = activePath ? Math.max(nextQueue.indexOf(activePath), 0) : currentQueueIndex;
+    const session = normalizeSession({
+      queue_paths: nextQueue,
+      base_queue_paths: canonical,
+      current_index: nextIndex,
+      position_seconds: currentTrack ? clampedPosition : 0,
+      paused: !isPlaying,
+      repeat_mode: repeatMode,
+      shuffle_enabled: nextShuffle,
+    });
+
+    try {
+      await syncSession(session, {
+        label: nextShuffle ? 'Shuffle on' : 'Shuffle off',
+        suppressRecordPath: activePath,
+      });
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -804,6 +1781,9 @@ function App() {
 
   const roundedVolume = Math.round(volumeLevel);
   const volumeLabel = isMuted ? 'Unmute' : 'Mute';
+  const repeatLabel =
+    repeatMode === 'off' ? 'Repeat off' : repeatMode === 'all' ? 'Repeat all' : 'Repeat one';
+  const upNextCount = Math.max(queueTracks.length - currentQueueIndex - 1, 0);
   const volumeIcon =
     isMuted || roundedVolume === 0 ? (
       <VolumeMutedIcon />
@@ -849,9 +1829,7 @@ function App() {
             className={`nav-item ${view === 'tracks' ? 'active' : ''}`}
             onClick={() => {
               setView('tracks');
-              setSelectedAlbum(null);
-              setSelectedArtist(null);
-              setSelectedPlaylist(null);
+              clearBrowsingFilters();
             }}
           >
             <span className="nav-icon">♪</span>Tracks
@@ -874,28 +1852,46 @@ function App() {
         </nav>
 
         <nav className="nav-section">
-          <div className="nav-label">Folders</div>
-          {data.settings.library_roots.length === 0 && (
-            <div className="nav-empty">No folders yet</div>
-          )}
-          {data.settings.library_roots.map((root) => (
-            <div className="folder-row" key={root} title={root}>
-              <span className="folder-name">{folderName(root)}</span>
-              <button
-                className="folder-remove"
-                onClick={() => removeRoot(root)}
-                title="Remove from library"
-              >
-                ×
-              </button>
-            </div>
+          <div className="nav-label">Playlists</div>
+          <div className="nav-sub-label">Saved</div>
+          {manualPlaylists.length === 0 && <div className="nav-empty">Save a track list to create one</div>}
+          {manualPlaylists.map((playlist) => (
+            <button
+              key={playlist.id}
+              className={`nav-item nav-item-compact ${
+                selectedPlaylist?.kind === 'manual' && selectedPlaylist.id === playlist.id ? 'active' : ''
+              }`}
+              onClick={() => {
+                setSelectedPlaylist({ kind: 'manual', id: playlist.id });
+                setSelectedAlbum(null);
+                setSelectedArtist(null);
+                setView('tracks');
+              }}
+            >
+              <span className="nav-icon">≣</span>
+              <span className="nav-item-copy">{playlist.name}</span>
+              <span className="nav-count">{playlist.track_paths.length}</span>
+            </button>
           ))}
-          <button className="nav-button" onClick={importFolder} disabled={!!busy}>
-            + Add folder
-          </button>
-          <button className="nav-button" onClick={maintenance} disabled={!!busy}>
-            ↻ Run maintenance
-          </button>
+          <div className="nav-sub-label">Smart</div>
+          {smartPlaylists.map((playlist) => (
+            <button
+              key={playlist.id}
+              className={`nav-item nav-item-compact ${
+                selectedPlaylist?.kind === 'smart' && selectedPlaylist.id === playlist.id ? 'active' : ''
+              }`}
+              onClick={() => {
+                setSelectedPlaylist({ kind: 'smart', id: playlist.id });
+                setSelectedAlbum(null);
+                setSelectedArtist(null);
+                setView('tracks');
+              }}
+            >
+              <span className="nav-icon">✦</span>
+              <span className="nav-item-copy">{playlist.name}</span>
+              <span className="nav-count">{playlist.tracks.length}</span>
+            </button>
+          ))}
         </nav>
 
         <nav className="nav-section">
@@ -918,13 +1914,13 @@ function App() {
             albums={albums}
             recentAlbums={recentAlbums}
             artists={artists}
-            playlists={playlists}
+            playlists={smartPlaylists}
             currentTrack={currentTrack}
             isPlaying={isPlaying}
             featuredSeed={featuredSeed}
             onShuffle={shufflePlay}
             onAddFolder={importFolder}
-            onMaintenance={maintenance}
+            onOpenSettings={() => setView('settings')}
             onShuffleFeatured={() => setFeaturedSeed((s) => s + 1)}
             onOpenAlbum={openAlbum}
             onOpenArtist={(artist) => {
@@ -934,23 +1930,28 @@ function App() {
               setView('tracks');
             }}
             onOpenPlaylist={(pl) => {
-              setSelectedPlaylist(pl);
+              setSelectedPlaylist({ kind: 'smart', id: pl.id });
               setSelectedAlbum(null);
               setSelectedArtist(null);
               setView('tracks');
             }}
             onPlayPlaylist={(pl) => {
               if (pl.tracks.length === 0) return;
-              const shuffled = pl.tracks.slice();
-              for (let i = shuffled.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-              }
-              void playQueue(shuffled, `Playlist · ${pl.name}`);
+              const shuffled = shuffleList(pl.tracks);
+              void playQueue(shuffled, `Playlist · ${pl.name}`, {
+                baseTracks: pl.tracks,
+                shuffle: true,
+              });
             }}
             onPlayAlbum={playAlbum}
+            onPlayNextAlbum={playAlbumNext}
+            onAddAlbumToQueue={addAlbumToQueue}
             onPlayArtist={playArtist}
-            onPlayQueue={(tracks) => void playQueue(tracks, 'Quick picks')}
+            onPlayQueue={(tracks) =>
+              void playQueue(shuffleEnabled ? shuffleList(tracks) : tracks, 'Quick picks', {
+                baseTracks: tracks,
+                shuffle: shuffleEnabled,
+              })}
             onOpenView={(v) => setView(v)}
             onPlay={play}
             busy={!!busy}
@@ -965,14 +1966,43 @@ function App() {
             currentPath={currentPath}
             isPlaying={isPlaying}
             onPlay={play}
+            onPlayNext={playNext}
+            onAddToQueue={addToQueue}
+            queuePaths={queueTracks.map((track) => track.path)}
+            playlistMode={selectedManualPlaylist ?? undefined}
+            onMovePlaylistTrack={
+              selectedManualPlaylist
+                ? (fromIndex, toIndex) => void moveManualPlaylistTrack(selectedManualPlaylist.id, fromIndex, toIndex)
+                : undefined
+            }
+            onRemovePlaylistTrack={
+              selectedManualPlaylist
+                ? (index) => void removeManualPlaylistTrack(selectedManualPlaylist.id, index)
+                : undefined
+            }
+            onRenamePlaylist={
+              selectedManualPlaylist ? () => void renameManualPlaylist(selectedManualPlaylist) : undefined
+            }
+            onDeletePlaylist={
+              selectedManualPlaylist ? () => void deleteManualPlaylistById(selectedManualPlaylist) : undefined
+            }
+            onSaveAsPlaylist={() =>
+              void saveVisibleTracksAsPlaylist(
+                filteredTracks,
+                selectedAlbumSummary?.album ??
+                  selectedArtist ??
+                  selectedPlaylistData?.name ??
+                  `Playlist ${new Date().toLocaleDateString()}`,
+              )
+            }
             title={
-              selectedPlaylist
-                ? selectedPlaylist.name
+              selectedPlaylistData
+                ? selectedPlaylistData.name
                 : (selectedAlbumSummary?.album ?? selectedArtist ?? 'All tracks')
             }
             subtitle={
-              selectedPlaylist
-                ? selectedPlaylist.description
+              selectedPlaylistData
+                ? selectedPlaylistData.description
                 : selectedAlbum
                   ? (selectedAlbumSummary?.artist ? `Album · ${selectedAlbumSummary.artist}` : 'Album')
                   : selectedArtist
@@ -980,19 +2010,20 @@ function App() {
                     : `${lib.track_count} tracks in your library`
             }
             onClearFilter={
-              selectedAlbum || selectedArtist || selectedPlaylist
-                ? () => {
-                    setSelectedAlbum(null);
-                    setSelectedArtist(null);
-                    setSelectedPlaylist(null);
-                  }
+              selectedAlbum || selectedArtist || selectedPlaylistData
+                ? () => clearBrowsingFilters()
                 : undefined
             }
           />
         )}
 
         {view === 'albums' && (
-          <AlbumsView albums={albums} onSelect={openAlbum} />
+          <AlbumsView
+            albums={albums}
+            onSelect={openAlbum}
+            onPlayNextAlbum={playAlbumNext}
+            onAddAlbumToQueue={addAlbumToQueue}
+          />
         )}
 
         {view === 'album' && selectedAlbum && selectedAlbumSummary && (
@@ -1004,34 +2035,36 @@ function App() {
             currentPath={currentPath}
             isPlaying={isPlaying}
             isCurrentAlbumCurrent={currentAlbumKey === selectedAlbum}
+            queuePaths={queueTracks.map((track) => track.path)}
             onBack={() => {
               setSelectedAlbum(null);
               setView(albumReturnView.current);
             }}
             onPlayTrack={(track) => playAlbumFromTrack(selectedAlbum, track)}
+            onPlayNext={playNext}
+            onAddToQueue={addToQueue}
+            onPlayAlbumNext={() => playAlbumNext(selectedAlbum)}
+            onAddAlbumToQueue={() => addAlbumToQueue(selectedAlbum)}
+            onSaveAsPlaylist={() =>
+              void saveVisibleTracksAsPlaylist(
+                tracksForAlbum(selectedAlbum),
+                selectedAlbumSummary.album,
+              )
+            }
             onPlayAlbum={() => {
-              if (currentAlbumKey === selectedAlbum) {
-                if (isPlaying) {
-                  void pausePlayback().then(() => setIsPlaying(false)).catch((error) => {
-                    setStatus(error instanceof Error ? error.message : String(error));
-                  });
-                  return;
-                }
-
-                void resumePlayback().then(() => setIsPlaying(true)).catch((error) => {
-                  setStatus(error instanceof Error ? error.message : String(error));
-                });
+      if (currentAlbumKey === selectedAlbum) {
+                void togglePlayPause();
                 return;
               }
               void playAlbum(selectedAlbum);
             }}
             onShuffleAlbum={() => {
               const list = tracksForAlbum(selectedAlbum);
-              for (let i = list.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [list[i], list[j]] = [list[j], list[i]];
-              }
-              void playQueue(list, `Shuffling · ${selectedAlbumSummary.album}`);
+              const shuffled = shuffleList(list);
+              void playQueue(shuffled, `Shuffling · ${selectedAlbumSummary.album}`, {
+                baseTracks: list,
+                shuffle: true,
+              });
             }}
             onOpenArtist={(artist) => {
               setSelectedArtist(artist);
@@ -1056,11 +2089,33 @@ function App() {
           <SettingsView
             settings={data.settings}
             onChange={updateSettings}
+            onAddFolder={importFolder}
             onMaintenance={maintenance}
+            onRemoveRoot={removeRoot}
             busy={!!busy}
           />
         )}
       </main>
+
+      {isQueueOpen && (
+        <QueueDrawer
+          drawerRef={queueDrawerRef}
+          tracks={queueTracks}
+          currentIndex={currentQueueIndex}
+          currentPath={currentPath}
+          isPlaying={isPlaying}
+          onClose={() => setIsQueueOpen(false)}
+          onPlayTrack={(track) => {
+            const index = queueTracks.findIndex((item) => item.path === track.path);
+            if (index >= 0) {
+              void jumpToQueueIndex(index, `Playing ${track.title}`);
+            }
+          }}
+          onMoveTrack={moveQueueItem}
+          onRemoveTrack={removeQueueItem}
+          onClearQueue={() => void clearQueue()}
+        />
+      )}
 
       <footer className="player-bar">
         {currentAlbum ? (
@@ -1136,6 +2191,15 @@ function App() {
         </div>
 
         <div className="player-controls">
+          <button
+            className={`ctrl ctrl-toggle ${shuffleEnabled ? 'is-active' : ''}`}
+            onClick={() => void toggleShuffle()}
+            disabled={queueTracks.length === 0}
+            title={shuffleEnabled ? 'Turn shuffle off' : 'Turn shuffle on'}
+            aria-label={shuffleEnabled ? 'Turn shuffle off' : 'Turn shuffle on'}
+          >
+            <ShuffleIcon />
+          </button>
           <button className="ctrl" onClick={() => skip(-1)} disabled={!currentTrack} title="Previous" aria-label="Previous">
             <PreviousIcon />
           </button>
@@ -1153,9 +2217,27 @@ function App() {
           <button className="ctrl" onClick={stop} disabled={!currentTrack} title="Stop" aria-label="Stop">
             <StopIcon />
           </button>
+          <button
+            className={`ctrl ctrl-toggle ${repeatMode !== 'off' ? 'is-active' : ''}`}
+            onClick={() => void toggleRepeat()}
+            title={repeatLabel}
+            aria-label={repeatLabel}
+          >
+            <RepeatIcon mode={repeatMode} />
+          </button>
         </div>
 
         <div className="player-extra">
+          <button
+            className={`ctrl ctrl-queue ${isQueueOpen ? 'is-open' : ''}`}
+            onClick={() => setIsQueueOpen((open) => !open)}
+            title={queueTracks.length === 0 ? 'Queue is empty' : `Up Next · ${upNextCount} upcoming`}
+            aria-label={queueTracks.length === 0 ? 'Queue is empty' : `Up Next · ${upNextCount} upcoming`}
+          >
+            <QueueIcon />
+            {queueTracks.length > 0 && <span className="ctrl-badge">{upNextCount}</span>}
+          </button>
+
           <div className="volume-controls">
             <button
               className={`ctrl ctrl-volume ${isMuted ? 'is-muted' : ''}`}
@@ -1215,6 +2297,111 @@ function App() {
   );
 }
 
+interface QueueDrawerProps {
+  drawerRef: RefObject<HTMLElement>;
+  tracks: Track[];
+  currentIndex: number;
+  currentPath: string | null;
+  isPlaying: boolean;
+  onClose: () => void;
+  onPlayTrack: (track: Track) => void;
+  onMoveTrack: (index: number, delta: -1 | 1) => void;
+  onRemoveTrack: (index: number) => void;
+  onClearQueue: () => void;
+}
+
+function QueueDrawer({
+  drawerRef,
+  tracks,
+  currentIndex,
+  currentPath,
+  isPlaying,
+  onClose,
+  onPlayTrack,
+  onMoveTrack,
+  onRemoveTrack,
+  onClearQueue,
+}: QueueDrawerProps) {
+  const upcoming = Math.max(tracks.length - currentIndex - 1, 0);
+
+  return (
+    <aside className="queue-drawer" ref={drawerRef}>
+      <div className="queue-drawer-head">
+        <div>
+          <div className="queue-drawer-eyebrow">Playback</div>
+          <h2 className="queue-drawer-title">Up Next</h2>
+          <p className="queue-drawer-copy">
+            {tracks.length === 0
+              ? 'Nothing queued yet.'
+              : `${tracks.length} track${tracks.length === 1 ? '' : 's'} in line · ${upcoming} still to go`}
+          </p>
+        </div>
+        <div className="queue-drawer-actions">
+          <button className="ghost-button" onClick={onClearQueue} disabled={tracks.length === 0}>
+            Clear
+          </button>
+          <button className="ghost-button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+
+      {tracks.length === 0 ? (
+        <div className="queue-empty">Start a track, album, artist mix, or playlist to build a queue.</div>
+      ) : (
+        <div className="queue-list">
+          {tracks.map((track, index) => {
+            const isCurrent = currentPath ? track.path === currentPath : index === currentIndex;
+
+            return (
+              <div key={track.path} className={`queue-row ${isCurrent ? 'is-current' : ''}`}>
+                <button className="queue-row-main" onClick={() => onPlayTrack(track)}>
+                  <span className="queue-row-index">
+                    {isCurrent ? (isPlaying ? <PlayingIndicator /> : 'Now') : index + 1}
+                  </span>
+                  <Cover
+                    trackPath={track.path}
+                    fallback={track.title[0]?.toUpperCase() ?? '♪'}
+                    size="queue"
+                  />
+                  <span className="queue-row-copy">
+                    <span className="queue-row-title">{track.title}</span>
+                    <span className="queue-row-sub">
+                      {(track.artist ?? 'Unknown artist') + ' — ' + (track.album ?? 'Unknown album')}
+                    </span>
+                  </span>
+                  <span className="queue-row-time">{formatDuration(track.duration_seconds)}</span>
+                </button>
+                <span className="queue-row-actions">
+                  <button
+                    className="row-icon-button"
+                    onClick={() => onMoveTrack(index, -1)}
+                    disabled={index === 0}
+                    title="Move up"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    className="row-icon-button"
+                    onClick={() => onMoveTrack(index, 1)}
+                    disabled={index === tracks.length - 1}
+                    title="Move down"
+                  >
+                    ↓
+                  </button>
+                  <button className="row-icon-button is-danger" onClick={() => onRemoveTrack(index)} title="Remove">
+                    ×
+                  </button>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </aside>
+  );
+}
+
 interface TracksViewProps {
   tracks: Track[];
   search: string;
@@ -1222,6 +2409,15 @@ interface TracksViewProps {
   currentPath: string | null;
   isPlaying: boolean;
   onPlay: (track: Track) => void;
+  onPlayNext: (track: Track) => void;
+  onAddToQueue: (track: Track) => void;
+  queuePaths: string[];
+  playlistMode?: SavedPlaylist;
+  onMovePlaylistTrack?: (fromIndex: number, toIndex: number) => void;
+  onRemovePlaylistTrack?: (index: number) => void;
+  onRenamePlaylist?: () => void;
+  onDeletePlaylist?: () => void;
+  onSaveAsPlaylist?: () => void;
   title: string;
   subtitle: string;
   onClearFilter?: () => void;
@@ -1234,6 +2430,15 @@ function TracksView({
   currentPath,
   isPlaying,
   onPlay,
+  onPlayNext,
+  onAddToQueue,
+  queuePaths,
+  playlistMode,
+  onMovePlaylistTrack,
+  onRemovePlaylistTrack,
+  onRenamePlaylist,
+  onDeletePlaylist,
+  onSaveAsPlaylist,
   title,
   subtitle,
   onClearFilter,
@@ -1249,6 +2454,21 @@ function TracksView({
           {onClearFilter && (
             <button className="ghost-button" onClick={onClearFilter}>
               ← All tracks
+            </button>
+          )}
+          {onSaveAsPlaylist && !playlistMode && (
+            <button className="ghost-button" onClick={onSaveAsPlaylist} disabled={tracks.length === 0}>
+              + Save as playlist
+            </button>
+          )}
+          {playlistMode && onRenamePlaylist && (
+            <button className="ghost-button" onClick={onRenamePlaylist}>
+              Rename
+            </button>
+          )}
+          {playlistMode && onDeletePlaylist && (
+            <button className="ghost-button" onClick={onDeletePlaylist}>
+              Delete
             </button>
           )}
           <input
@@ -1275,9 +2495,11 @@ function TracksView({
             <span>Album</span>
             <span className="num">Time</span>
             <span>Quality</span>
+            <span className="track-actions-head">Queue</span>
           </div>
           {tracks.map((track, index) => {
             const isCurrent = track.path === currentPath;
+            const isQueued = queuePaths.includes(track.path);
             return (
               <button
                 key={track.id}
@@ -1293,6 +2515,66 @@ function TracksView({
                 <span className="track-cell">{track.album ?? '—'}</span>
                 <span className="track-cell num">{formatDuration(track.duration_seconds)}</span>
                 <span className="track-cell muted">{formatQuality(track)}</span>
+                <span className="track-row-actions">
+                  {playlistMode ? (
+                    <>
+                      <button
+                        className="row-icon-button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onMovePlaylistTrack?.(index, Math.max(index - 1, 0));
+                        }}
+                        disabled={index === 0}
+                        title="Move up"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        className="row-icon-button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onMovePlaylistTrack?.(index, Math.min(index + 1, tracks.length - 1));
+                        }}
+                        disabled={index === tracks.length - 1}
+                        title="Move down"
+                      >
+                        ↓
+                      </button>
+                      <button
+                        className="row-icon-button is-danger"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onRemovePlaylistTrack?.(index);
+                        }}
+                        title="Remove"
+                      >
+                        ×
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      {isQueued && <span className="queue-pill">Queued</span>}
+                      <button
+                        className="row-action-button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void onPlayNext(track);
+                        }}
+                      >
+                        Play next
+                      </button>
+                      <button
+                        className="row-action-button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void onAddToQueue(track);
+                        }}
+                      >
+                        Add
+                      </button>
+                    </>
+                  )}
+                </span>
               </button>
             );
           })}
@@ -1310,8 +2592,14 @@ interface AlbumDetailViewProps {
   currentPath: string | null;
   isPlaying: boolean;
   isCurrentAlbumCurrent: boolean;
+  queuePaths: string[];
   onBack: () => void;
   onPlayTrack: (track: Track) => void;
+  onPlayNext: (track: Track) => void;
+  onAddToQueue: (track: Track) => void;
+  onPlayAlbumNext: () => void;
+  onAddAlbumToQueue: () => void;
+  onSaveAsPlaylist: () => void;
   onPlayAlbum: () => void;
   onShuffleAlbum: () => void;
   onOpenArtist: (artist: string) => void;
@@ -1325,8 +2613,14 @@ function AlbumDetailView({
   currentPath,
   isPlaying,
   isCurrentAlbumCurrent,
+  queuePaths,
   onBack,
   onPlayTrack,
+  onPlayNext,
+  onAddToQueue,
+  onPlayAlbumNext,
+  onAddAlbumToQueue,
+  onSaveAsPlaylist,
   onPlayAlbum,
   onShuffleAlbum,
   onOpenArtist,
@@ -1470,6 +2764,15 @@ function AlbumDetailView({
             <button className="primary-button" onClick={onPlayAlbum}>
               {isCurrentAlbumCurrent ? (isPlaying ? '⏸ Pause' : '▶ Resume') : '▶ Play'}
             </button>
+            <button className="ghost-button" onClick={onPlayAlbumNext}>
+              ≫ Play next
+            </button>
+            <button className="ghost-button" onClick={onAddAlbumToQueue}>
+              + Add to queue
+            </button>
+            <button className="ghost-button" onClick={onSaveAsPlaylist}>
+              + Save as playlist
+            </button>
             <button className="ghost-button" onClick={onShuffleAlbum}>
               ⤮ Shuffle
             </button>
@@ -1513,6 +2816,7 @@ function AlbumDetailView({
               <div className="album-track-list">
                 {tracks.map((t) => {
                   const isCurrent = currentPath === t.path;
+                  const isQueued = queuePaths.includes(t.path);
                   return (
                     <button
                       key={t.id}
@@ -1529,6 +2833,27 @@ function AlbumDetailView({
                       <span className="album-track-duration">
                         {formatDuration(t.duration_seconds)}
                       </span>
+                      <span className="album-track-actions">
+                        {isQueued && <span className="queue-pill">Queued</span>}
+                        <button
+                          className="row-action-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void onPlayNext(t);
+                          }}
+                        >
+                          Next
+                        </button>
+                        <button
+                          className="row-action-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void onAddToQueue(t);
+                          }}
+                        >
+                          Add
+                        </button>
+                      </span>
                     </button>
                   );
                 })}
@@ -1544,9 +2869,11 @@ function AlbumDetailView({
 interface AlbumsViewProps {
   albums: AlbumSummary[];
   onSelect: (albumKey: string) => void;
+  onPlayNextAlbum: (albumKey: string) => void;
+  onAddAlbumToQueue: (albumKey: string) => void;
 }
 
-function AlbumsView({ albums, onSelect }: AlbumsViewProps) {
+function AlbumsView({ albums, onSelect, onPlayNextAlbum, onAddAlbumToQueue }: AlbumsViewProps) {
   return (
     <div className="view">
       <header className="view-header">
@@ -1563,16 +2890,34 @@ function AlbumsView({ albums, onSelect }: AlbumsViewProps) {
       ) : (
         <div className="card-grid">
           {albums.map((a) => (
-            <button key={a.key} className="card" onClick={() => onSelect(a.key)}>
-              <Cover
-                trackPath={a.samplePath}
-                fallback={a.album[0]?.toUpperCase() ?? '◉'}
-                size="card"
-              />
-              <div className="card-title">{a.album}</div>
-              <div className="card-sub">{a.artist ?? 'Various artists'}</div>
-              <div className="card-meta">{a.count} tracks</div>
-            </button>
+            <div key={a.key} className="card-wrap">
+              <button className="card" onClick={() => onSelect(a.key)}>
+                <Cover
+                  trackPath={a.samplePath}
+                  fallback={a.album[0]?.toUpperCase() ?? '◉'}
+                  size="card"
+                />
+                <div className="card-title">{a.album}</div>
+                <div className="card-sub">{a.artist ?? 'Various artists'}</div>
+                <div className="card-meta">{a.count} tracks</div>
+              </button>
+              <div className="card-actions">
+                <button
+                  className="card-mini-action"
+                  onClick={() => onPlayNextAlbum(a.key)}
+                  title={`Play ${a.album} next`}
+                >
+                  Next
+                </button>
+                <button
+                  className="card-mini-action"
+                  onClick={() => onAddAlbumToQueue(a.key)}
+                  title={`Add ${a.album} to queue`}
+                >
+                  + Queue
+                </button>
+              </div>
+            </div>
           ))}
         </div>
       )}
@@ -1583,13 +2928,19 @@ function AlbumsView({ albums, onSelect }: AlbumsViewProps) {
 interface CoverProps {
   trackPath: string | null;
   fallback: string;
-  size: 'md' | 'card' | 'hero';
+  size: 'md' | 'card' | 'hero' | 'queue';
 }
 
 function Cover({ trackPath, fallback, size }: CoverProps) {
   const url = useCoverArt(trackPath);
   const className =
-    size === 'hero' ? 'cover-hero' : size === 'card' ? 'card-art' : 'cover';
+    size === 'hero'
+      ? 'cover-hero'
+      : size === 'card'
+        ? 'card-art'
+        : size === 'queue'
+          ? 'cover cover-queue'
+          : 'cover';
 
   if (url) {
     return (
@@ -1671,11 +3022,13 @@ function ArtistsView({ artists, onSelect }: ArtistsViewProps) {
 interface SettingsViewProps {
   settings: AppSettings;
   onChange: (next: AppSettings) => void;
+  onAddFolder: () => void;
   onMaintenance: () => void;
+  onRemoveRoot: (folder: string) => void;
   busy: boolean;
 }
 
-function SettingsView({ settings, onChange, onMaintenance, busy }: SettingsViewProps) {
+function SettingsView({ settings, onChange, onAddFolder, onMaintenance, onRemoveRoot, busy }: SettingsViewProps) {
   const isManualEqualizer = settings.equalizer_preset === 'manual';
   const [manualBandsDraft, setManualBandsDraft] = useState(() =>
     normalizeEqualizerBands(settings.equalizer_bands),
@@ -1845,6 +3198,31 @@ function SettingsView({ settings, onChange, onMaintenance, busy }: SettingsViewP
             <h2>Library</h2>
             <p>Keep your library database in sync without touching the underlying audio files.</p>
           </div>
+          <div className="settings-row settings-row-block">
+            <div className="settings-row-copy">
+              <label className="settings-label">Folders</label>
+              <p className="settings-hint">Manage the local folders Needle scans into your library.</p>
+            </div>
+            <div className="settings-library-roots">
+              {settings.library_roots.length === 0 ? (
+                <div className="settings-library-empty">No folders added yet.</div>
+              ) : (
+                settings.library_roots.map((root) => (
+                  <div key={root} className="settings-library-root" title={root}>
+                    <span className="settings-library-root-name">{root}</span>
+                    <button className="ghost-button" onClick={() => onRemoveRoot(root)}>
+                      Remove
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="settings-row-control">
+              <button className="primary" onClick={onAddFolder} disabled={busy}>
+                + Add folder
+              </button>
+            </div>
+          </div>
           <div className="settings-row">
             <div className="settings-row-copy">
               <label className="settings-label">Maintenance</label>
@@ -1890,13 +3268,15 @@ interface DashboardViewProps {
   featuredSeed: number;
   onShuffle: () => void;
   onAddFolder: () => void;
-  onMaintenance: () => void;
+  onOpenSettings: () => void;
   onShuffleFeatured: () => void;
   onOpenAlbum: (albumKey: string) => void;
   onOpenArtist: (artist: string) => void;
   onOpenPlaylist: (playlist: AutoPlaylist) => void;
   onPlayPlaylist: (playlist: AutoPlaylist) => void;
   onPlayAlbum: (albumKey: string) => void;
+  onPlayNextAlbum: (albumKey: string) => void;
+  onAddAlbumToQueue: (albumKey: string) => void;
   onPlayArtist: (artist: string) => void;
   onPlayQueue: (tracks: Track[]) => void;
   onOpenView: (view: View) => void;
@@ -1915,13 +3295,15 @@ function DashboardView({
   featuredSeed,
   onShuffle,
   onAddFolder,
-  onMaintenance,
+  onOpenSettings,
   onShuffleFeatured,
   onOpenAlbum,
   onOpenArtist,
   onOpenPlaylist,
   onPlayPlaylist,
   onPlayAlbum,
+  onPlayNextAlbum,
+  onAddAlbumToQueue,
   onPlayArtist,
   onPlayQueue,
   onOpenView,
@@ -2008,11 +3390,8 @@ function DashboardView({
           <button className="primary" onClick={onShuffle} disabled={busy}>
             ▶ Shuffle play
           </button>
-          <button className="ghost-button" onClick={onAddFolder} disabled={busy}>
-            + Add folder
-          </button>
-          <button className="ghost-button" onClick={onMaintenance} disabled={busy}>
-            ↻ Maintenance
+          <button className="ghost-button" onClick={onOpenSettings}>
+            ⚙ Settings
           </button>
         </div>
       </header>
@@ -2060,6 +3439,22 @@ function DashboardView({
                 >
                   ▶
                 </button>
+                <div className="card-actions">
+                  <button
+                    className="card-mini-action"
+                    onClick={() => onPlayNextAlbum(a.key)}
+                    title={`Play ${a.album} next`}
+                  >
+                    Next
+                  </button>
+                  <button
+                    className="card-mini-action"
+                    onClick={() => onAddAlbumToQueue(a.key)}
+                    title={`Add ${a.album} to queue`}
+                  >
+                    + Queue
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -2134,6 +3529,22 @@ function DashboardView({
                 >
                   ▶
                 </button>
+                <div className="card-actions">
+                  <button
+                    className="card-mini-action"
+                    onClick={() => onPlayNextAlbum(a.key)}
+                    title={`Play ${a.album} next`}
+                  >
+                    Next
+                  </button>
+                  <button
+                    className="card-mini-action"
+                    onClick={() => onAddAlbumToQueue(a.key)}
+                    title={`Add ${a.album} to queue`}
+                  >
+                    + Queue
+                  </button>
+                </div>
               </div>
             ))}
           </div>

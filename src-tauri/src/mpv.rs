@@ -15,7 +15,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
-use crate::models::{AudioDevice, EqualizerPreset, PlaybackState};
+use crate::models::{AudioDevice, EqualizerPreset, PlaybackSession, PlaybackState, RepeatMode};
 
 // Global registry of mpv child PIDs so any code path (signal handler,
 // graceful shutdown, Drop) can reliably terminate them.
@@ -144,6 +144,114 @@ impl MpvController {
         )
     }
 
+    pub fn sync_playback_session(&mut self, session: &PlaybackSession) -> Result<()> {
+        let paths: Vec<String> = session
+            .queue_paths
+            .iter()
+            .filter(|path| Path::new(path).exists())
+            .cloned()
+            .collect();
+
+        if paths.is_empty() {
+            return self.stop_if_active();
+        }
+
+        self.write_playlist(&paths)?;
+        let mut stream = self.connect_or_spawn()?;
+        let playlist_path = self.playlist_path.to_string_lossy().to_string();
+        let target_index = session.current_index.min(paths.len().saturating_sub(1));
+
+        self.request(
+            &mut stream,
+            json!({ "command": ["loadlist", playlist_path, "replace"] }),
+        )?;
+        if target_index > 0 {
+            self.request(
+                &mut stream,
+                json!({ "command": ["set_property", "playlist-pos", target_index] }),
+            )?;
+        }
+        self.apply_repeat_mode(&mut stream, &session.repeat_mode)?;
+
+        if session.position_seconds > 0.0 {
+            self.request(
+                &mut stream,
+                json!({ "command": ["seek", session.position_seconds.max(0.0), "absolute+exact"] }),
+            )?;
+        }
+
+        self.request(
+            &mut stream,
+            json!({ "command": ["set_property", "pause", session.paused] }),
+        )
+        .map(|_| ())
+    }
+
+    pub fn play_queue_index(&mut self, index: usize) -> Result<()> {
+        let mut stream = self.connect_existing()?;
+        self.request(
+            &mut stream,
+            json!({ "command": ["set_property", "playlist-pos", index] }),
+        )?;
+        self.request(
+            &mut stream,
+            json!({ "command": ["set_property", "pause", false] }),
+        )
+        .map(|_| ())
+    }
+
+    pub fn append_queue(&mut self, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        self.write_playlist(paths)?;
+        let mut stream = self.connect_existing()?;
+        let playlist_path = self.playlist_path.to_string_lossy().to_string();
+        self.request(
+            &mut stream,
+            json!({ "command": ["loadlist", playlist_path, "append"] }),
+        )
+        .map(|_| ())
+    }
+
+    pub fn insert_queue_at(&mut self, paths: &[String], index: usize) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        self.write_playlist(paths)?;
+        let mut stream = self.connect_existing()?;
+        let playlist_path = self.playlist_path.to_string_lossy().to_string();
+        self.request(
+            &mut stream,
+            json!({ "command": ["loadlist", playlist_path, "insert-at", index] }),
+        )
+        .map(|_| ())
+    }
+
+    pub fn remove_queue_index(&mut self, index: usize) -> Result<()> {
+        let mut stream = self.connect_existing()?;
+        self.request(
+            &mut stream,
+            json!({ "command": ["playlist-remove", index] }),
+        )
+        .map(|_| ())
+    }
+
+    pub fn move_queue_index(&mut self, from_index: usize, to_index: usize) -> Result<()> {
+        let mut stream = self.connect_existing()?;
+        self.request(
+            &mut stream,
+            json!({ "command": ["playlist-move", from_index, to_index] }),
+        )
+        .map(|_| ())
+    }
+
+    pub fn clear_queue(&mut self) -> Result<()> {
+        let mut stream = self.connect_existing()?;
+        self.request(&mut stream, json!({ "command": ["playlist-clear"] }))
+            .map(|_| ())
+    }
+
     pub fn pause(&mut self) -> Result<()> {
         let mut stream = self.connect_existing()?;
         self.send(
@@ -213,6 +321,11 @@ impl MpvController {
         )
     }
 
+    pub fn set_repeat_mode(&mut self, repeat_mode: &RepeatMode) -> Result<()> {
+        let mut stream = self.connect_or_spawn()?;
+        self.apply_repeat_mode(&mut stream, repeat_mode)
+    }
+
     fn connect_or_spawn(&mut self) -> Result<UnixStream> {
         self.refresh_child_state()?;
 
@@ -243,6 +356,35 @@ impl MpvController {
             .context("Unable to connect to mpv IPC socket")?;
         self.start_listener();
         Ok(stream)
+    }
+
+    fn stop_if_active(&mut self) -> Result<()> {
+        self.refresh_child_state()?;
+        if !self.socket_path.exists() {
+            return Ok(());
+        }
+
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .context("Unable to connect to mpv IPC socket")?;
+        self.start_listener();
+        self.send(&mut stream, json!({ "command": ["stop"] }))
+    }
+
+    fn apply_repeat_mode(&self, stream: &mut UnixStream, repeat_mode: &RepeatMode) -> Result<()> {
+        let (loop_file, loop_playlist) = match repeat_mode {
+            RepeatMode::Off => ("no", "no"),
+            RepeatMode::One => ("inf", "no"),
+            RepeatMode::All => ("no", "inf"),
+        };
+
+        self.send(
+            stream,
+            json!({ "command": ["set_property", "loop-file", loop_file] }),
+        )?;
+        self.send(
+            stream,
+            json!({ "command": ["set_property", "loop-playlist", loop_playlist] }),
+        )
     }
 
     fn apply_equalizer(&self, stream: &mut UnixStream) -> Result<()> {
@@ -470,6 +612,11 @@ fn run_property_listener(socket_path: PathBuf, app: AppHandle) {
         writer,
         "{}",
         json!({"command": ["observe_property", 8, "audio-device-list"]})
+    );
+    let _ = writeln!(
+        writer,
+        "{}",
+        json!({"command": ["observe_property", 9, "idle-active"]})
     );
     let _ = writer.flush();
 

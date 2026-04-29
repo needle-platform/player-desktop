@@ -21,6 +21,15 @@ pub enum EqualizerPreset {
     Manual,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    One,
+    All,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub id: i64,
@@ -67,6 +76,8 @@ pub fn default_equalizer_bands() -> [f32; 10] {
 pub struct BootstrapPayload {
     pub settings: AppSettings,
     pub library: LibraryData,
+    pub playlists: Vec<SavedPlaylist>,
+    pub playback_session: PlaybackSession,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,4 +92,35 @@ pub struct PlaybackState {
     pub muted: bool,
     pub audio_device: String,
     pub audio_devices: Vec<AudioDevice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlaybackSession {
+    #[serde(default)]
+    pub queue_paths: Vec<String>,
+    #[serde(default)]
+    pub base_queue_paths: Vec<String>,
+    #[serde(default)]
+    pub current_index: usize,
+    #[serde(default)]
+    pub position_seconds: f64,
+    #[serde(default = "default_paused")]
+    pub paused: bool,
+    #[serde(default)]
+    pub repeat_mode: RepeatMode,
+    #[serde(default)]
+    pub shuffle_enabled: bool,
+}
+
+fn default_paused() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedPlaylist {
+    pub id: i64,
+    pub name: String,
+    pub track_paths: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }

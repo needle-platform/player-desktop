@@ -8,7 +8,7 @@ mod mpv;
 
 use std::{fs, path::Path, sync::Mutex};
 
-use models::{AppSettings, BootstrapPayload, PlaybackState};
+use models::{AppSettings, BootstrapPayload, PlaybackSession, PlaybackState, RepeatMode};
 use mpv::MpvController;
 use tauri::Manager;
 
@@ -164,6 +164,214 @@ fn get_playback_state(state: tauri::State<'_, AppState>) -> Result<PlaybackState
         .lock()
         .map_err(|_| "Unable to acquire player state".to_string())?;
     player.playback_state().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_playback_session(
+    session: PlaybackSession,
+    state: tauri::State<'_, AppState>,
+) -> Result<PlaybackSession, String> {
+    db::save_playback_session(&state.db_path, &session).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn sync_playback_session(
+    session: PlaybackSession,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let filtered_paths: Vec<String> = session
+        .queue_paths
+        .into_iter()
+        .filter(|path| Path::new(path).exists())
+        .collect();
+
+    let normalized = PlaybackSession {
+        current_index: session
+            .current_index
+            .min(filtered_paths.len().saturating_sub(1)),
+        queue_paths: filtered_paths,
+        base_queue_paths: session.base_queue_paths,
+        position_seconds: session.position_seconds.max(0.0),
+        paused: session.paused,
+        repeat_mode: session.repeat_mode,
+        shuffle_enabled: session.shuffle_enabled,
+    };
+
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .sync_playback_session(&normalized)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_repeat_mode(
+    repeat_mode: RepeatMode,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .set_repeat_mode(&repeat_mode)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn play_queue_index(index: usize, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .play_queue_index(index)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn append_queue(paths: Vec<String>, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let existing: Vec<String> = paths
+        .into_iter()
+        .filter(|path| Path::new(path).exists())
+        .collect();
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .append_queue(&existing)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn insert_queue_at(
+    paths: Vec<String>,
+    index: usize,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let existing: Vec<String> = paths
+        .into_iter()
+        .filter(|path| Path::new(path).exists())
+        .collect();
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .insert_queue_at(&existing, index)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_queue_index(index: usize, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .remove_queue_index(index)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn move_queue_index(
+    from_index: usize,
+    to_index: usize,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .move_queue_index(from_index, to_index)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn clear_queue(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player.clear_queue().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_playlist(
+    name: String,
+    track_paths: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::create_playlist(&state.db_path, &name, &track_paths).map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn rename_playlist(
+    playlist_id: i64,
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::rename_playlist(&state.db_path, playlist_id, &name).map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_playlist(
+    playlist_id: i64,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::delete_playlist(&state.db_path, playlist_id).map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn append_tracks_to_playlist(
+    playlist_id: i64,
+    track_paths: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::append_tracks_to_playlist(&state.db_path, playlist_id, &track_paths)
+        .map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn replace_playlist_tracks(
+    playlist_id: i64,
+    track_paths: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::replace_playlist_tracks(&state.db_path, playlist_id, &track_paths)
+        .map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_playlist_track(
+    playlist_id: i64,
+    index: usize,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::remove_playlist_track(&state.db_path, playlist_id, index)
+        .map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn move_playlist_track(
+    playlist_id: i64,
+    from_index: usize,
+    to_index: usize,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::move_playlist_track(&state.db_path, playlist_id, from_index, to_index)
+        .map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -371,9 +579,25 @@ pub fn run() {
             stop_playback,
             seek_playback,
             get_playback_state,
+            save_playback_session,
+            sync_playback_session,
+            play_queue_index,
+            append_queue,
+            insert_queue_at,
+            remove_queue_index,
+            move_queue_index,
+            clear_queue,
+            create_playlist,
+            rename_playlist,
+            delete_playlist,
+            append_tracks_to_playlist,
+            replace_playlist_tracks,
+            remove_playlist_track,
+            move_playlist_track,
             set_playback_volume,
             set_playback_muted,
             set_audio_device,
+            set_repeat_mode,
             run_maintenance,
             remove_library_root,
             get_cover_art,

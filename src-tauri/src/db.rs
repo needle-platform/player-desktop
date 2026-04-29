@@ -1,11 +1,12 @@
 use std::path::Path;
 
 use anyhow::Result;
+use anyhow::{anyhow, bail};
 use rusqlite::{params, Connection};
 
 use crate::models::{
     default_equalizer_bands, AppSettings, BootstrapPayload, EqualizerPreset, LibraryData,
-    ThemeMode, Track,
+    PlaybackSession, SavedPlaylist, ThemeMode, Track,
 };
 
 pub fn init_database(db_path: &Path) -> Result<()> {
@@ -54,6 +55,21 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             source_url TEXT,
             fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS playlists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS playlist_tracks (
+            playlist_id INTEGER NOT NULL,
+            track_path TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            PRIMARY KEY (playlist_id, track_path),
+            UNIQUE (playlist_id, position)
+        );
         ",
     )?;
 
@@ -96,6 +112,8 @@ pub fn load_bootstrap(db_path: &Path) -> Result<BootstrapPayload> {
     Ok(BootstrapPayload {
         settings: load_settings(db_path)?,
         library: load_library(db_path)?,
+        playlists: load_playlists(db_path)?,
+        playback_session: load_playback_session(db_path)?,
     })
 }
 
@@ -217,13 +235,17 @@ pub fn remove_library_root(db_path: &Path, folder: &str) -> Result<()> {
         params![folder, pattern],
     )?;
     transaction.execute("DELETE FROM library_roots WHERE path = ?1", params![folder])?;
+    prune_orphaned_playlist_tracks_tx(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
 
 pub fn purge_dotfile_tracks(db_path: &Path) -> Result<usize> {
-    let connection = Connection::open(db_path)?;
-    let removed = connection.execute("DELETE FROM tracks WHERE path LIKE '%/.%'", [])?;
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    let removed = transaction.execute("DELETE FROM tracks WHERE path LIKE '%/.%'", [])?;
+    prune_orphaned_playlist_tracks_tx(&transaction)?;
+    transaction.commit()?;
     Ok(removed)
 }
 
@@ -304,6 +326,7 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
         )?;
     }
 
+    prune_orphaned_playlist_tracks_tx(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
@@ -392,6 +415,197 @@ pub fn record_play(db_path: &Path, path: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn load_playback_session(db_path: &Path) -> Result<PlaybackSession> {
+    let connection = Connection::open(db_path)?;
+    let value = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'playback_session'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+
+    Ok(value
+        .and_then(|json| serde_json::from_str::<PlaybackSession>(&json).ok())
+        .unwrap_or_default())
+}
+
+pub fn save_playback_session(db_path: &Path, session: &PlaybackSession) -> Result<PlaybackSession> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params!["playback_session", serde_json::to_string(session)?],
+    )?;
+    load_playback_session(db_path)
+}
+
+pub fn load_playlists(db_path: &Path) -> Result<Vec<SavedPlaylist>> {
+    let mut connection = Connection::open(db_path)?;
+    prune_orphaned_playlist_tracks(&mut connection)?;
+
+    let mut playlist_stmt = connection.prepare(
+        "
+        SELECT id, name, created_at, updated_at
+        FROM playlists
+        ORDER BY lower(name), id
+        ",
+    )?;
+
+    let rows = playlist_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut track_stmt = connection.prepare(
+        "
+        SELECT pt.track_path
+        FROM playlist_tracks pt
+        INNER JOIN tracks t ON t.path = pt.track_path
+        WHERE pt.playlist_id = ?1
+        ORDER BY pt.position ASC
+        ",
+    )?;
+
+    let mut playlists = Vec::with_capacity(rows.len());
+    for (id, name, created_at, updated_at) in rows {
+        let track_paths = track_stmt
+            .query_map(params![id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        playlists.push(SavedPlaylist {
+            id,
+            name,
+            track_paths,
+            created_at,
+            updated_at,
+        });
+    }
+
+    Ok(playlists)
+}
+
+pub fn create_playlist(db_path: &Path, name: &str, track_paths: &[String]) -> Result<Vec<SavedPlaylist>> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        bail!("Playlist name cannot be empty");
+    }
+
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "INSERT INTO playlists (name, created_at, updated_at) VALUES (?1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        params![trimmed],
+    )?;
+    let playlist_id = transaction.last_insert_rowid();
+    replace_playlist_tracks_tx(&transaction, playlist_id, track_paths)?;
+    transaction.commit()?;
+    load_playlists(db_path)
+}
+
+pub fn rename_playlist(db_path: &Path, playlist_id: i64, name: &str) -> Result<Vec<SavedPlaylist>> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        bail!("Playlist name cannot be empty");
+    }
+
+    let connection = Connection::open(db_path)?;
+    let updated = connection.execute(
+        "UPDATE playlists SET name = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+        params![trimmed, playlist_id],
+    )?;
+    if updated == 0 {
+        return Err(anyhow!("Playlist not found"));
+    }
+    load_playlists(db_path)
+}
+
+pub fn delete_playlist(db_path: &Path, playlist_id: i64) -> Result<Vec<SavedPlaylist>> {
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+        params![playlist_id],
+    )?;
+    let deleted = transaction.execute("DELETE FROM playlists WHERE id = ?1", params![playlist_id])?;
+    if deleted == 0 {
+        return Err(anyhow!("Playlist not found"));
+    }
+    transaction.commit()?;
+    load_playlists(db_path)
+}
+
+pub fn append_tracks_to_playlist(
+    db_path: &Path,
+    playlist_id: i64,
+    track_paths: &[String],
+) -> Result<Vec<SavedPlaylist>> {
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    let mut combined = load_playlist_track_paths_tx(&transaction, playlist_id)?;
+    for path in dedupe_paths(track_paths) {
+        if !combined.iter().any(|existing| existing == &path) {
+            combined.push(path);
+        }
+    }
+    replace_playlist_tracks_tx(&transaction, playlist_id, &combined)?;
+    transaction.commit()?;
+    load_playlists(db_path)
+}
+
+pub fn replace_playlist_tracks(
+    db_path: &Path,
+    playlist_id: i64,
+    track_paths: &[String],
+) -> Result<Vec<SavedPlaylist>> {
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    replace_playlist_tracks_tx(&transaction, playlist_id, track_paths)?;
+    transaction.commit()?;
+    load_playlists(db_path)
+}
+
+pub fn remove_playlist_track(
+    db_path: &Path,
+    playlist_id: i64,
+    index: usize,
+) -> Result<Vec<SavedPlaylist>> {
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    let mut track_paths = load_playlist_track_paths_tx(&transaction, playlist_id)?;
+    if index >= track_paths.len() {
+        bail!("Track is out of range for this playlist");
+    }
+    track_paths.remove(index);
+    replace_playlist_tracks_tx(&transaction, playlist_id, &track_paths)?;
+    transaction.commit()?;
+    load_playlists(db_path)
+}
+
+pub fn move_playlist_track(
+    db_path: &Path,
+    playlist_id: i64,
+    from_index: usize,
+    to_index: usize,
+) -> Result<Vec<SavedPlaylist>> {
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    let mut track_paths = load_playlist_track_paths_tx(&transaction, playlist_id)?;
+    if from_index >= track_paths.len() || to_index >= track_paths.len() {
+        bail!("Track is out of range for this playlist");
+    }
+    let track = track_paths.remove(from_index);
+    track_paths.insert(to_index, track);
+    replace_playlist_tracks_tx(&transaction, playlist_id, &track_paths)?;
+    transaction.commit()?;
+    load_playlists(db_path)
+}
+
 pub fn load_library(db_path: &Path) -> Result<LibraryData> {
     let connection = Connection::open(db_path)?;
 
@@ -456,6 +670,90 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
 
 fn query_count(connection: &Connection, sql: &str) -> Result<usize> {
     Ok(connection.query_row(sql, [], |row| row.get::<_, i64>(0))? as usize)
+}
+
+fn dedupe_paths(track_paths: &[String]) -> Vec<String> {
+    let mut deduped = Vec::new();
+    for path in track_paths {
+        if path.trim().is_empty() || deduped.iter().any(|existing| existing == path) {
+            continue;
+        }
+        deduped.push(path.clone());
+    }
+    deduped
+}
+
+fn load_playlist_track_paths_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    playlist_id: i64,
+) -> Result<Vec<String>> {
+    let mut exists_stmt = transaction.prepare("SELECT 1 FROM playlists WHERE id = ?1 LIMIT 1")?;
+    let exists = exists_stmt.exists(params![playlist_id])?;
+    if !exists {
+        return Err(anyhow!("Playlist not found"));
+    }
+
+    let mut stmt = transaction.prepare(
+        "SELECT track_path FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position ASC",
+    )?;
+    let paths = stmt
+        .query_map(params![playlist_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(paths)
+}
+
+fn replace_playlist_tracks_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    playlist_id: i64,
+    track_paths: &[String],
+) -> Result<()> {
+    let normalized = dedupe_paths(track_paths);
+
+    let mut exists_stmt = transaction.prepare("SELECT 1 FROM playlists WHERE id = ?1 LIMIT 1")?;
+    let exists = exists_stmt.exists(params![playlist_id])?;
+    if !exists {
+        return Err(anyhow!("Playlist not found"));
+    }
+
+    transaction.execute(
+        "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+        params![playlist_id],
+    )?;
+
+    for (index, path) in normalized.iter().enumerate() {
+        let exists_in_library = transaction
+            .prepare("SELECT 1 FROM tracks WHERE path = ?1 LIMIT 1")?
+            .exists(params![path])?;
+        if !exists_in_library {
+            continue;
+        }
+
+        transaction.execute(
+            "INSERT INTO playlist_tracks (playlist_id, track_path, position) VALUES (?1, ?2, ?3)",
+            params![playlist_id, path, index as i64],
+        )?;
+    }
+
+    transaction.execute(
+        "UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+        params![playlist_id],
+    )?;
+    Ok(())
+}
+
+fn prune_orphaned_playlist_tracks(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction()?;
+    prune_orphaned_playlist_tracks_tx(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn prune_orphaned_playlist_tracks_tx(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM playlist_tracks WHERE track_path NOT IN (SELECT path FROM tracks)",
+        [],
+    )?;
+    Ok(())
 }
 
 fn theme_to_str(theme: &ThemeMode) -> &'static str {

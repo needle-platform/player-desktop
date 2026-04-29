@@ -8,6 +8,8 @@ export type EqualizerPreset =
   | 'lounge'
   | 'manual';
 
+export type RepeatMode = 'off' | 'one' | 'all';
+
 export interface Track {
   id: number;
   path: string;
@@ -45,6 +47,8 @@ export interface AppSettings {
 export interface BootstrapPayload {
   settings: AppSettings;
   library: LibraryData;
+  playlists: SavedPlaylist[];
+  playback_session: PlaybackSession;
 }
 
 export interface AudioDevice {
@@ -57,4 +61,22 @@ export interface PlaybackState {
   muted: boolean;
   audio_device: string;
   audio_devices: AudioDevice[];
+}
+
+export interface PlaybackSession {
+  queue_paths: string[];
+  base_queue_paths: string[];
+  current_index: number;
+  position_seconds: number;
+  paused: boolean;
+  repeat_mode: RepeatMode;
+  shuffle_enabled: boolean;
+}
+
+export interface SavedPlaylist {
+  id: number;
+  name: string;
+  track_paths: string[];
+  created_at: string;
+  updated_at: string;
 }
