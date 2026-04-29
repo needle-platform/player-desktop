@@ -17,6 +17,8 @@
   --row-current: rgba(91, 124, 255, 0.16);
   --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
   --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.08);
+  --player-surface: rgba(255, 255, 255, 0.74);
+  --player-shadow: rgba(15, 23, 42, 0.08);
 }
 
 :root[data-theme='dark'] {
@@ -35,6 +37,8 @@
   --row-current: rgba(135, 160, 255, 0.18);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --player-surface: rgba(20, 23, 31, 0.68);
+  --player-shadow: rgba(0, 0, 0, 0.22);
 }
 
 * { box-sizing: border-box; }
@@ -89,12 +93,12 @@ input, select {
 /* ------- App layout ------- */
 
 .app {
+  position: relative;
   display: grid;
   grid-template-columns: 260px 1fr;
-  grid-template-rows: 1fr 112px;
+  grid-template-rows: 1fr;
   grid-template-areas:
-    'sidebar content'
-    'player player';
+    'sidebar content';
   height: 100vh;
 }
 
@@ -102,7 +106,7 @@ input, select {
   grid-area: sidebar;
   background: var(--sidebar);
   border-right: 1px solid var(--border);
-  padding: 18px 14px 14px;
+  padding: 18px 14px 136px;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -112,18 +116,28 @@ input, select {
 .content {
   grid-area: content;
   overflow-y: auto;
-  padding: 28px 36px 32px;
+  padding: 28px 36px 136px;
 }
 
 .player-bar {
-  grid-area: player;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  background: var(--player-surface);
+  border: 1px solid color-mix(in srgb, var(--border) 85%, white 10%);
+  border-radius: 18px;
+  overflow: hidden;
   padding: 0 22px;
+  min-height: 96px;
   display: grid;
   grid-template-columns: minmax(180px, 0.9fr) minmax(260px, 1.5fr) auto auto;
   align-items: center;
   gap: 18px;
+  box-shadow: 0 10px 26px -20px var(--player-shadow);
+  backdrop-filter: blur(18px) saturate(1.08);
+  -webkit-backdrop-filter: blur(18px) saturate(1.08);
+  z-index: 30;
 }
 
 /* ------- Sidebar ------- */
