@@ -1783,7 +1783,16 @@ function App() {
   const volumeLabel = isMuted ? 'Unmute' : 'Mute';
   const repeatLabel =
     repeatMode === 'off' ? 'Repeat off' : repeatMode === 'all' ? 'Repeat all' : 'Repeat one';
-  const upNextCount = Math.max(queueTracks.length - currentQueueIndex - 1, 0);
+  const queueDisplayStartIndex = useMemo(() => {
+    if (queueTracks.length === 0) return 0;
+    const currentIndexFromPath = currentPath ? queueTracks.findIndex((track) => track.path === currentPath) : -1;
+    return clampIndex(currentIndexFromPath >= 0 ? currentIndexFromPath : currentQueueIndex, queueTracks.length);
+  }, [currentPath, currentQueueIndex, queueTracks]);
+  const visibleQueueTracks = useMemo(
+    () => queueTracks.slice(queueDisplayStartIndex),
+    [queueDisplayStartIndex, queueTracks],
+  );
+  const upNextCount = Math.max(visibleQueueTracks.length - 1, 0);
   const volumeIcon =
     isMuted || roundedVolume === 0 ? (
       <VolumeMutedIcon />
@@ -2100,8 +2109,8 @@ function App() {
       {isQueueOpen && (
         <QueueDrawer
           drawerRef={queueDrawerRef}
-          tracks={queueTracks}
-          currentIndex={currentQueueIndex}
+          tracks={visibleQueueTracks}
+          currentIndex={0}
           currentPath={currentPath}
           isPlaying={isPlaying}
           onClose={() => setIsQueueOpen(false)}
@@ -2111,8 +2120,8 @@ function App() {
               void jumpToQueueIndex(index, `Playing ${track.title}`);
             }
           }}
-          onMoveTrack={moveQueueItem}
-          onRemoveTrack={removeQueueItem}
+          onMoveTrack={(index, delta) => moveQueueItem(queueDisplayStartIndex + index, delta)}
+          onRemoveTrack={(index) => removeQueueItem(queueDisplayStartIndex + index)}
           onClearQueue={() => void clearQueue()}
         />
       )}
@@ -2231,11 +2240,11 @@ function App() {
           <button
             className={`ctrl ctrl-queue ${isQueueOpen ? 'is-open' : ''}`}
             onClick={() => setIsQueueOpen((open) => !open)}
-            title={queueTracks.length === 0 ? 'Queue is empty' : `Up Next · ${upNextCount} upcoming`}
-            aria-label={queueTracks.length === 0 ? 'Queue is empty' : `Up Next · ${upNextCount} upcoming`}
+            title={visibleQueueTracks.length === 0 ? 'Queue is empty' : `Up Next · ${upNextCount} upcoming`}
+            aria-label={visibleQueueTracks.length === 0 ? 'Queue is empty' : `Up Next · ${upNextCount} upcoming`}
           >
             <QueueIcon />
-            {queueTracks.length > 0 && <span className="ctrl-badge">{upNextCount}</span>}
+            {visibleQueueTracks.length > 0 && <span className="ctrl-badge">{upNextCount}</span>}
           </button>
 
           <div className="volume-controls">
