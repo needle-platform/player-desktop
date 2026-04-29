@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-const USER_AGENT: &str = "Resonance/0.1 (https://gitea.davidrelich.com/davidrelich/music-player)";
+const USER_AGENT: &str = "Needle/0.1 (https://gitea.davidrelich.com/davidrelich/music-player)";
 
 // Reuse the same MusicBrainz throttle as artist lookups.
 static MB_LIMIT: tokio::sync::OnceCell<Semaphore> = tokio::sync::OnceCell::const_new();

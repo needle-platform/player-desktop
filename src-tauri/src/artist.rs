@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-const USER_AGENT: &str = "Resonance/0.1 (https://gitea.davidrelich.com/davidrelich/music-player)";
+const USER_AGENT: &str = "Needle/0.1 (https://gitea.davidrelich.com/davidrelich/music-player)";
 
 // MusicBrainz asks for at most 1 req/sec. We allow a tiny bit of concurrency
 // since we cache aggressively and every artist is looked up at most once.

@@ -32,6 +32,8 @@ import { useCoverArt } from './lib/cover';
 import { useArtistImage } from './lib/artistImage';
 import { useAlbumInfo } from './lib/albumInfo';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
+import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
+import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'settings';
 type AlbumSummary = {
@@ -289,6 +291,7 @@ function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
+  const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light');
   const lastRecordedPath = useRef<string | null>(null);
   const scrubPositionRef = useRef<number | null>(null);
   const albumReturnView = useRef<View>('albums');
@@ -427,6 +430,7 @@ function App() {
     const apply = () => {
       const t = data.settings.theme === 'system' ? (media.matches ? 'dark' : 'light') : data.settings.theme;
       document.documentElement.dataset.theme = t;
+      setResolvedTheme(t);
     };
     apply();
     media.addEventListener('change', apply);
@@ -821,9 +825,13 @@ function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark" />
+          <img
+            className="brand-mark"
+            src={resolvedTheme === 'dark' ? needleBrandMarkDark : needleBrandMarkLight}
+            alt=""
+          />
           <div>
-            <div className="brand-title">Resonance</div>
+            <div className="brand-title">Needle</div>
             <div className="brand-sub">Local-first player</div>
           </div>
         </div>
@@ -1725,7 +1733,7 @@ function SettingsView({ settings, onChange, onMaintenance, busy }: SettingsViewP
         <section className="settings-section">
           <div className="settings-section-head">
             <h2>Appearance</h2>
-            <p>Choose how Resonance should look while you browse and listen.</p>
+            <p>Choose how Needle should look while you browse and listen.</p>
           </div>
           <div className="settings-row">
             <div className="settings-row-copy">
@@ -1853,7 +1861,7 @@ function SettingsView({ settings, onChange, onMaintenance, busy }: SettingsViewP
         <section className="settings-section">
           <div className="settings-section-head">
             <h2>Playback</h2>
-            <p>Resonance plays through mpv for local, bit-perfect playback.</p>
+            <p>Needle plays through mpv for local, bit-perfect playback.</p>
           </div>
           <div className="settings-row">
             <div className="settings-row-copy">
@@ -1941,7 +1949,7 @@ function DashboardView({
         <header className="dashboard-hero">
           <div>
             <div className="view-eyebrow">{greeting()}</div>
-            <h1 className="view-title">Welcome to Resonance</h1>
+            <h1 className="view-title">Welcome to Needle</h1>
             <p className="dashboard-lead">
               Your library is empty. Import a folder of music to get started — FLAC, ALAC, WAV, AIFF, M4A, AAC, MP3,
               OGG, and Opus are all supported.

@@ -17,6 +17,37 @@ struct AppState {
     player: Mutex<MpvController>,
 }
 
+const DB_FILENAME: &str = "library.sqlite";
+const SOCKET_FILENAME: &str = "mpv.sock";
+const LEGACY_BUNDLE_IDENTIFIER: &str = "com.davidrelich.musicplayer";
+
+fn migrate_legacy_app_data(app_data_dir: &Path) {
+    let Some(parent) = app_data_dir.parent() else {
+        return;
+    };
+
+    let legacy_dir = parent.join(LEGACY_BUNDLE_IDENTIFIER);
+    if legacy_dir == app_data_dir {
+        return;
+    }
+
+    for filename in [DB_FILENAME, "library.sqlite-shm", "library.sqlite-wal"] {
+        let source = legacy_dir.join(filename);
+        let target = app_data_dir.join(filename);
+        if target.exists() || !source.exists() {
+            continue;
+        }
+
+        if let Err(error) = fs::copy(&source, &target) {
+            eprintln!(
+                "Failed to migrate legacy app data from {} to {}: {error}",
+                source.display(),
+                target.display()
+            );
+        }
+    }
+}
+
 #[tauri::command]
 fn bootstrap_app(state: tauri::State<'_, AppState>) -> Result<BootstrapPayload, String> {
     db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
@@ -308,11 +339,12 @@ pub fn run() {
                 .app_data_dir()
                 .expect("Unable to determine app data directory");
             fs::create_dir_all(&app_data_dir).expect("Unable to create app data directory");
+            migrate_legacy_app_data(&app_data_dir);
 
-            let db_path = app_data_dir.join("library.sqlite");
+            let db_path = app_data_dir.join(DB_FILENAME);
             db::init_database(&db_path).expect("Unable to initialize SQLite database");
 
-            let socket_path = app_data_dir.join("mpv.sock");
+            let socket_path = app_data_dir.join(SOCKET_FILENAME);
             let settings = db::load_bootstrap(&db_path)
                 .expect("Unable to load app settings for mpv initialization")
                 .settings;

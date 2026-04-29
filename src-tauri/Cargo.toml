@@ -1,5 +1,5 @@
 [package]
-name = "music-player"
+name = "needle"
 version = "0.1.0"
 description = "Local-first music player"
 authors = ["David Relich"]

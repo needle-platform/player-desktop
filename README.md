@@ -1,4 +1,4 @@
-# Resonance
+# Needle
 
 A local-first, hi-fi music player for macOS built with **Tauri**, **React + TypeScript**, and **Rust**. Audio playback is handled by **mpv** through its JSON IPC, so lossless formats (FLAC, ALAC, WAV, AIFF) sound exactly the way they should.
 
@@ -65,6 +65,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 
 ### Themes & UX
 - **Themes**: System, Light, Dark
+- **Theme-aware branding** with separate light/dark app icons and a dock-tuned macOS icon set
 - **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Vocal, Treble Boost, Lounge
 - **Manual 10-band EQ** with preset curve visualization; manual slider edits are applied on release to avoid playback stutter
 
@@ -130,14 +131,16 @@ npm run tauri build
 
 ## Data locations
 
-- **Library DB**: `library.sqlite` inside the OS app-data dir for the bundle id `com.davidrelich.musicplayer`
+- **Library DB**: `library.sqlite` inside the OS app-data dir for the bundle id `com.davidrelich.needle`
 - **mpv IPC socket**: `mpv.sock` in the same directory
+
+On first launch after the rename from `Resonance`, Needle copies the existing database and SQLite sidecar files forward from the legacy app-data directory under `com.davidrelich.musicplayer`.
 
 Maintenance and remove-folder actions only touch the database — your audio files are never modified or deleted.
 
 ## Auto-playlists & metadata
 
-Resonance generates auto-playlists from data we already have, no machine learning required:
+Needle generates auto-playlists from data we already have, no machine learning required:
 
 - **Tags** (genre, year) drive era and genre playlists
 - **Duration** drives mood-ish buckets (Quick hits, Deep listens, Wind down)
