@@ -18,6 +18,7 @@ pub enum EqualizerPreset {
     Vocal,
     TrebleBoost,
     Lounge,
+    Manual,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +54,13 @@ pub struct LibraryData {
 pub struct AppSettings {
     pub theme: ThemeMode,
     pub equalizer_preset: EqualizerPreset,
+    #[serde(default = "default_equalizer_bands")]
+    pub equalizer_bands: [f32; 10],
     pub library_roots: Vec<String>,
+}
+
+pub fn default_equalizer_bands() -> [f32; 10] {
+    [0.0; 10]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

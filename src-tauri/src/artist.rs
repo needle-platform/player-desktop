@@ -5,8 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-const USER_AGENT: &str =
-    "Resonance/0.1 (https://gitea.davidrelich.com/davidrelich/music-player)";
+const USER_AGENT: &str = "Resonance/0.1 (https://gitea.davidrelich.com/davidrelich/music-player)";
 
 // MusicBrainz asks for at most 1 req/sec. We allow a tiny bit of concurrency
 // since we cache aggressively and every artist is looked up at most once.
@@ -61,7 +60,10 @@ pub async fn fetch_artist_image(name: &str) -> Result<Option<ArtistImage>> {
             .await
             .context("musicbrainz search response invalid")?;
 
-        let result = resp["artists"].as_array().and_then(|arr| arr.first()).cloned();
+        let result = resp["artists"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .cloned();
         let Some(top) = result else {
             return Ok(None);
         };
@@ -138,7 +140,10 @@ pub async fn fetch_artist_image(name: &str) -> Result<Option<ArtistImage>> {
             .context("wikidata response invalid")?;
 
         let filename = resp
-            .pointer(&format!("/entities/{}/claims/P18/0/mainsnak/datavalue/value", qid))
+            .pointer(&format!(
+                "/entities/{}/claims/P18/0/mainsnak/datavalue/value",
+                qid
+            ))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
@@ -174,4 +179,3 @@ fn commons_thumbnail_from_page(page_url: &str) -> Option<String> {
     }
     None
 }
-

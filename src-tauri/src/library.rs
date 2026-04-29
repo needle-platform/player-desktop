@@ -64,13 +64,18 @@ fn read_track(path: &Path) -> Track {
         sample_rate = properties.sample_rate();
         bit_depth = properties.bit_depth();
 
-        if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
+        if let Some(tag) = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag())
+        {
             if let Some(value) = tag.title() {
                 title = value.to_string();
             }
             artist = tag.artist().map(|value| value.to_string());
             album = tag.album().map(|value| value.to_string());
-            album_artist = tag.get_string(&ItemKey::AlbumArtist).map(|value| value.to_string());
+            album_artist = tag
+                .get_string(&ItemKey::AlbumArtist)
+                .map(|value| value.to_string());
             disc_number = tag.disk().map(|value| value as i64);
             track_number = tag.track().map(|value| value as i64);
             genre = tag.genre().map(|value| value.to_string());
@@ -144,7 +149,10 @@ fn infer_disc_and_track(path: &Path) -> (Option<i64>, Option<i64>) {
         .filter_map(|ancestor| ancestor.file_name().and_then(|value| value.to_str()))
         .find_map(parse_disc_hint);
 
-    let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("");
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
     let file_numbers = parse_disc_track_prefix(stem);
 
     let inferred_disc = disc_number.or(file_numbers.map(|(disc, _)| disc));

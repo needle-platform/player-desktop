@@ -15,7 +15,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
-use crate::models::{AudioDevice, PlaybackState};
+use crate::models::{AudioDevice, EqualizerPreset, PlaybackState};
 
 // Global registry of mpv child PIDs so any code path (signal handler,
 // graceful shutdown, Drop) can reliably terminate them.
@@ -72,6 +72,8 @@ pub struct MpvController {
     socket_path: PathBuf,
     playlist_path: PathBuf,
     child: Option<Child>,
+    equalizer_preset: EqualizerPreset,
+    equalizer_bands: [f32; 10],
     #[allow(dead_code)]
     app_handle: Option<AppHandle>,
     #[allow(dead_code)]
@@ -79,11 +81,17 @@ pub struct MpvController {
 }
 
 impl MpvController {
-    pub fn new(socket_path: PathBuf) -> Self {
+    pub fn new(
+        socket_path: PathBuf,
+        equalizer_preset: EqualizerPreset,
+        equalizer_bands: [f32; 10],
+    ) -> Self {
         Self {
             playlist_path: socket_path.with_extension("m3u8"),
             socket_path,
             child: None,
+            equalizer_preset,
+            equalizer_bands,
             app_handle: None,
             listener_active: Arc::new(AtomicBool::new(false)),
         }
@@ -93,10 +101,30 @@ impl MpvController {
         self.app_handle = Some(handle);
     }
 
+    pub fn set_equalizer(&mut self, preset: EqualizerPreset, bands: [f32; 10]) -> Result<()> {
+        self.equalizer_preset = preset;
+        self.equalizer_bands = bands;
+        self.refresh_child_state()?;
+
+        if !self.socket_path.exists() {
+            return Ok(());
+        }
+
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .context("Unable to connect to mpv IPC socket")?;
+        self.apply_equalizer(&mut stream)
+    }
+
     pub fn play(&mut self, path: &str) -> Result<()> {
         let mut stream = self.connect_or_spawn()?;
-        self.send(&mut stream, json!({ "command": ["loadfile", path, "replace"] }))?;
-        self.send(&mut stream, json!({ "command": ["set_property", "pause", false] }))
+        self.send(
+            &mut stream,
+            json!({ "command": ["loadfile", path, "replace"] }),
+        )?;
+        self.send(
+            &mut stream,
+            json!({ "command": ["set_property", "pause", false] }),
+        )
     }
 
     pub fn play_queue(&mut self, paths: &[String]) -> Result<()> {
@@ -106,18 +134,30 @@ impl MpvController {
         self.write_playlist(paths)?;
         let mut stream = self.connect_or_spawn()?;
         let playlist_path = self.playlist_path.to_string_lossy().to_string();
-        self.send(&mut stream, json!({ "command": ["loadlist", playlist_path, "replace"] }))?;
-        self.send(&mut stream, json!({ "command": ["set_property", "pause", false] }))
+        self.send(
+            &mut stream,
+            json!({ "command": ["loadlist", playlist_path, "replace"] }),
+        )?;
+        self.send(
+            &mut stream,
+            json!({ "command": ["set_property", "pause", false] }),
+        )
     }
 
     pub fn pause(&mut self) -> Result<()> {
         let mut stream = self.connect_existing()?;
-        self.send(&mut stream, json!({ "command": ["set_property", "pause", true] }))
+        self.send(
+            &mut stream,
+            json!({ "command": ["set_property", "pause", true] }),
+        )
     }
 
     pub fn resume(&mut self) -> Result<()> {
         let mut stream = self.connect_existing()?;
-        self.send(&mut stream, json!({ "command": ["set_property", "pause", false] }))
+        self.send(
+            &mut stream,
+            json!({ "command": ["set_property", "pause", false] }),
+        )
     }
 
     pub fn stop(&mut self) -> Result<()> {
@@ -128,13 +168,18 @@ impl MpvController {
     pub fn seek_to(&mut self, position_seconds: f64) -> Result<()> {
         let mut stream = self.connect_existing()?;
         let clamped = position_seconds.max(0.0);
-        self.send(&mut stream, json!({ "command": ["seek", clamped, "absolute+exact"] }))
+        self.send(
+            &mut stream,
+            json!({ "command": ["seek", clamped, "absolute+exact"] }),
+        )
     }
 
     pub fn playback_state(&mut self) -> Result<PlaybackState> {
         let mut stream = self.connect_or_spawn()?;
         Ok(PlaybackState {
-            volume: self.property::<f64>(&mut stream, "volume")?.clamp(0.0, 100.0),
+            volume: self
+                .property::<f64>(&mut stream, "volume")?
+                .clamp(0.0, 100.0),
             muted: self.property::<bool>(&mut stream, "mute")?,
             audio_device: self
                 .property::<Option<String>>(&mut stream, "audio-device")?
@@ -175,13 +220,14 @@ impl MpvController {
             self.spawn_mpv()?;
         }
 
-        let stream = UnixStream::connect(&self.socket_path).or_else(|_| {
+        let mut stream = UnixStream::connect(&self.socket_path).or_else(|_| {
             let _ = fs::remove_file(&self.socket_path);
             self.spawn_mpv()?;
             UnixStream::connect(&self.socket_path).context("Unable to connect to mpv IPC socket")
         })?;
 
         self.start_listener();
+        self.apply_equalizer(&mut stream)?;
 
         Ok(stream)
     }
@@ -193,10 +239,18 @@ impl MpvController {
             bail!("No active playback session")
         }
 
-        let stream =
-            UnixStream::connect(&self.socket_path).context("Unable to connect to mpv IPC socket")?;
+        let stream = UnixStream::connect(&self.socket_path)
+            .context("Unable to connect to mpv IPC socket")?;
         self.start_listener();
         Ok(stream)
+    }
+
+    fn apply_equalizer(&self, stream: &mut UnixStream) -> Result<()> {
+        let command = match equalizer_filter_value(&self.equalizer_preset, &self.equalizer_bands) {
+            Some(graph) => json!({ "command": ["set_property", "af", format!("lavfi=[{graph}]")] }),
+            None => json!({ "command": ["set_property", "af", []] }),
+        };
+        self.request(stream, command).map(|_| ())
     }
 
     fn send(&self, stream: &mut UnixStream, payload: serde_json::Value) -> Result<()> {
@@ -206,7 +260,11 @@ impl MpvController {
         Ok(())
     }
 
-    fn request(&self, stream: &mut UnixStream, payload: serde_json::Value) -> Result<serde_json::Value> {
+    fn request(
+        &self,
+        stream: &mut UnixStream,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         self.send(stream, payload)?;
 
         let mut reader = BufReader::new(
@@ -231,7 +289,10 @@ impl MpvController {
             Some(error) => bail!("mpv IPC error: {error}"),
         }
 
-        Ok(value.get("data").cloned().unwrap_or(serde_json::Value::Null))
+        Ok(value
+            .get("data")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     fn property<T: DeserializeOwned>(&self, stream: &mut UnixStream, name: &str) -> Result<T> {
@@ -260,8 +321,12 @@ impl MpvController {
             playlist.push_str(path);
             playlist.push('\n');
         }
-        fs::write(&self.playlist_path, playlist)
-            .with_context(|| format!("Failed to write playlist at {}", self.playlist_path.display()))
+        fs::write(&self.playlist_path, playlist).with_context(|| {
+            format!(
+                "Failed to write playlist at {}",
+                self.playlist_path.display()
+            )
+        })
     }
 
     fn spawn_mpv(&mut self) -> Result<()> {
@@ -416,7 +481,10 @@ fn run_property_listener(socket_path: PathBuf, app: AppHandle) {
         };
         if value.get("event").and_then(|v| v.as_str()) == Some("property-change") {
             let name = value.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let data = value.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            let data = value
+                .get("data")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             let _ = app.emit(
                 "mpv-property",
                 serde_json::json!({ "name": name, "data": data }),
@@ -447,4 +515,30 @@ fn resolve_mpv_binary() -> Option<PathBuf> {
     }
 
     None
+}
+
+fn equalizer_filter_value(preset: &EqualizerPreset, manual_bands: &[f32; 10]) -> Option<String> {
+    let bands = match preset {
+        EqualizerPreset::Flat => return None,
+        EqualizerPreset::BassBoost => [2.3, 2.6, 2.2, 1.4, 0.5, 0.0, 0.0, -0.2, -0.3, 0.0],
+        EqualizerPreset::Vocal => [-0.8, -0.6, -0.3, 0.2, 1.0, 1.8, 2.2, 1.0, 0.4, -0.2],
+        EqualizerPreset::TrebleBoost => [-0.3, -0.2, 0.0, 0.0, 0.3, 0.9, 1.6, 2.2, 2.5, 1.4],
+        EqualizerPreset::Lounge => [1.2, 1.4, 1.0, 0.5, 0.2, -0.3, -0.8, -0.2, 0.2, 0.4],
+        EqualizerPreset::Manual => *manual_bands,
+    };
+
+    let frequencies = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+    let max_gain = bands.iter().copied().fold(0.0_f32, f32::max).max(0.0);
+    let preamp = -(max_gain * 0.3).min(1.5);
+
+    let mut entries = vec![format!("entry(0,{:.1})", bands[0])];
+    for (frequency, gain) in frequencies.iter().zip(bands.iter()) {
+        entries.push(format!("entry({frequency},{gain:.1})"));
+    }
+    entries.push(format!("entry(20000,{:.1})", bands[bands.len() - 1]));
+
+    Some(format!(
+        "volume={preamp:.1}dB,firequalizer=gain_entry='{}':delay=0.05:accuracy=4:zero_phase=on",
+        entries.join(";")
+    ))
 }

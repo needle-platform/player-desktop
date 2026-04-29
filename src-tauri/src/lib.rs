@@ -23,13 +23,17 @@ fn bootstrap_app(state: tauri::State<'_, AppState>) -> Result<BootstrapPayload, 
 }
 
 #[tauri::command]
-fn scan_library(folder: String, state: tauri::State<'_, AppState>) -> Result<BootstrapPayload, String> {
+fn scan_library(
+    folder: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
     if !Path::new(&folder).exists() {
         return Err("Selected folder does not exist".to_string());
     }
 
     let tracks = library::scan_folder(&folder).map_err(|error| error.to_string())?;
-    db::insert_or_update_library_root(&state.db_path, &folder).map_err(|error| error.to_string())?;
+    db::insert_or_update_library_root(&state.db_path, &folder)
+        .map_err(|error| error.to_string())?;
     db::replace_tracks(&state.db_path, &folder, &tracks).map_err(|error| error.to_string())?;
     db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
 }
@@ -39,7 +43,17 @@ fn save_settings(
     settings: AppSettings,
     state: tauri::State<'_, AppState>,
 ) -> Result<AppSettings, String> {
-    db::save_settings(&state.db_path, &settings).map_err(|error| error.to_string())
+    db::save_settings(&state.db_path, &settings).map_err(|error| error.to_string())?;
+
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .set_equalizer(settings.equalizer_preset.clone(), settings.equalizer_bands)
+        .map_err(|error| error.to_string())?;
+
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -69,7 +83,9 @@ fn play_queue(paths: Vec<String>, state: tauri::State<'_, AppState>) -> Result<(
         .player
         .lock()
         .map_err(|_| "Unable to acquire player state".to_string())?;
-    player.play_queue(&existing).map_err(|error| error.to_string())
+    player
+        .play_queue(&existing)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -105,7 +121,9 @@ fn seek_playback(position_seconds: f64, state: tauri::State<'_, AppState>) -> Re
         .player
         .lock()
         .map_err(|_| "Unable to acquire player state".to_string())?;
-    player.seek_to(position_seconds).map_err(|error| error.to_string())
+    player
+        .seek_to(position_seconds)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -194,8 +212,8 @@ async fn get_artist_image(
         return Ok(None);
     }
 
-    if let Some(cached) = db::get_artist_image(&state.db_path, &trimmed)
-        .map_err(|error| error.to_string())?
+    if let Some(cached) =
+        db::get_artist_image(&state.db_path, &trimmed).map_err(|error| error.to_string())?
     {
         return Ok(cached.map(|url| artist::ArtistImage {
             url,
@@ -234,14 +252,11 @@ async fn get_album_info(
     let key = format!(
         "{}|{}",
         album_trim.to_lowercase(),
-        artist_trim
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase(),
+        artist_trim.as_deref().unwrap_or("").to_lowercase(),
     );
 
-    if let Some(cached) = db::get_album_info(&state.db_path, &key)
-        .map_err(|error| error.to_string())?
+    if let Some(cached) =
+        db::get_album_info(&state.db_path, &key).map_err(|error| error.to_string())?
     {
         return Ok(cached.map(|info| album::AlbumInfo {
             description: info.description,
@@ -298,7 +313,14 @@ pub fn run() {
             db::init_database(&db_path).expect("Unable to initialize SQLite database");
 
             let socket_path = app_data_dir.join("mpv.sock");
-            let mut player = MpvController::new(socket_path);
+            let settings = db::load_bootstrap(&db_path)
+                .expect("Unable to load app settings for mpv initialization")
+                .settings;
+            let mut player = MpvController::new(
+                socket_path,
+                settings.equalizer_preset,
+                settings.equalizer_bands,
+            );
             player.set_app_handle(app.handle().clone());
             app.manage(AppState {
                 db_path,

@@ -55,7 +55,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Albums** (cards with cover art)
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, full track list, and background album info when available
 - **Artists** (list with track counts)
-- **Settings** with theme switcher, equalizer presets, and maintenance
+- **Settings** with theme switcher, live equalizer presets, manual 10-band EQ, and maintenance
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
@@ -65,7 +65,8 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 
 ### Themes & UX
 - **Themes**: System, Light, Dark
-- **Equalizer presets** (UI only for now — DSP wiring through mpv is the next milestone)
+- **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Vocal, Treble Boost, Lounge
+- **Manual 10-band EQ** with preset curve visualization; manual slider edits are applied on release to avoid playback stutter
 
 ## Architecture
 
@@ -149,7 +150,6 @@ Real **BPM and key analysis** would unlock proper mood detection (energy, workou
 ## Roadmap
 
 - BPM + key analysis as an opt-in background step, with cached `audio_features` table
-- Wire equalizer presets through mpv audio filters
 - Queue / now-playing list
 - Gapless playback hand-off
 - Watch folders with incremental rescans

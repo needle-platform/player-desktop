@@ -1,5 +1,6 @@
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
+import type { CSSProperties } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   bootstrapApp,
@@ -80,7 +81,18 @@ const equalizerOptions: Array<{ value: EqualizerPreset; label: string }> = [
   { value: 'vocal', label: 'Vocal' },
   { value: 'treble_boost', label: 'Treble Boost' },
   { value: 'lounge', label: 'Lounge' },
+  { value: 'manual', label: 'Manual' },
 ];
+const equalizerBandLabels = ['32', '64', '125', '250', '500', '1k', '2k', '4k', '8k', '16k'];
+const defaultEqualizerBands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+const maxEqualizerGain = 6;
+const equalizerPresetBands: Record<Exclude<EqualizerPreset, 'manual'>, number[]> = {
+  flat: defaultEqualizerBands,
+  bass_boost: [2.3, 2.6, 2.2, 1.4, 0.5, 0.0, 0.0, -0.2, -0.3, 0.0],
+  vocal: [-0.8, -0.6, -0.3, 0.2, 1.0, 1.8, 2.2, 1.0, 0.4, -0.2],
+  treble_boost: [-0.3, -0.2, 0.0, 0.0, 0.3, 0.9, 1.6, 2.2, 2.5, 1.4],
+  lounge: [1.2, 1.4, 1.0, 0.5, 0.2, -0.3, -0.8, -0.2, 0.2, 0.4],
+};
 
 const themeOptions: Array<{ value: ThemeMode; label: string }> = [
   { value: 'system', label: 'System' },
@@ -123,6 +135,20 @@ const compareAlbumTracks = (a: Track, b: Track) =>
   (a.track_number ?? 9999) - (b.track_number ?? 9999) ||
   a.title.localeCompare(b.title) ||
   a.path.localeCompare(b.path);
+const clampEqualizerGain = (value: number) => Math.max(-maxEqualizerGain, Math.min(maxEqualizerGain, value));
+const normalizeEqualizerBands = (bands: number[] | null | undefined) => {
+  const next = defaultEqualizerBands.slice();
+  if (!Array.isArray(bands)) return next;
+  for (let i = 0; i < next.length; i += 1) {
+    const value = bands[i];
+    next[i] = clampEqualizerGain(typeof value === 'number' && Number.isFinite(value) ? value : 0);
+  }
+  return next;
+};
+const displayedEqualizerBands = (settings: AppSettings) =>
+  settings.equalizer_preset === 'manual'
+    ? normalizeEqualizerBands(settings.equalizer_bands)
+    : equalizerPresetBands[settings.equalizer_preset] ?? defaultEqualizerBands;
 
 const normalizeAudioDevices = (data: unknown): AudioDevice[] => {
   if (!Array.isArray(data)) return [];
@@ -1640,6 +1666,52 @@ interface SettingsViewProps {
 }
 
 function SettingsView({ settings, onChange, onMaintenance, busy }: SettingsViewProps) {
+  const isManualEqualizer = settings.equalizer_preset === 'manual';
+  const [manualBandsDraft, setManualBandsDraft] = useState(() =>
+    normalizeEqualizerBands(settings.equalizer_bands),
+  );
+
+  useEffect(() => {
+    setManualBandsDraft(normalizeEqualizerBands(settings.equalizer_bands));
+  }, [settings.equalizer_bands, settings.equalizer_preset]);
+
+  const equalizerBands = isManualEqualizer ? manualBandsDraft : displayedEqualizerBands(settings);
+
+  const applyEqualizerPreset = (preset: EqualizerPreset) => {
+    if (preset === 'manual') {
+      onChange({
+        ...settings,
+        equalizer_preset: 'manual',
+      });
+      return;
+    }
+
+    onChange({
+      ...settings,
+      equalizer_preset: preset,
+    });
+  };
+
+  const updateManualBandDraft = (index: number, value: number) => {
+    if (!isManualEqualizer) return;
+    const nextBands = normalizeEqualizerBands(manualBandsDraft);
+    nextBands[index] = clampEqualizerGain(value);
+    setManualBandsDraft(nextBands);
+  };
+
+  const commitManualBands = () => {
+    if (!isManualEqualizer) return;
+    const nextBands = normalizeEqualizerBands(manualBandsDraft);
+    const currentBands = normalizeEqualizerBands(settings.equalizer_bands);
+    const changed = nextBands.some((value, index) => value !== currentBands[index]);
+    if (!changed) return;
+    onChange({
+      ...settings,
+      equalizer_preset: 'manual',
+      equalizer_bands: nextBands,
+    });
+  };
+
   return (
     <div className="view">
       <header className="view-header">
@@ -1679,12 +1751,12 @@ function SettingsView({ settings, onChange, onMaintenance, busy }: SettingsViewP
         <section className="settings-section">
           <div className="settings-section-head">
             <h2>Equalizer</h2>
-            <p>Tune the listening profile now, with mpv DSP wiring ready for the next phase.</p>
+            <p>Shape playback with quick presets that apply immediately through mpv.</p>
           </div>
           <div className="settings-row">
             <div className="settings-row-copy">
               <label className="settings-label">Preset</label>
-              <p className="settings-hint">Presets are stored locally and will map to live playback once DSP lands.</p>
+              <p className="settings-hint">Choose a curve for the current session and future playback.</p>
             </div>
             <div className="settings-row-control">
               <div className="seg">
@@ -1692,12 +1764,68 @@ function SettingsView({ settings, onChange, onMaintenance, busy }: SettingsViewP
                   <button
                     key={opt.value}
                     className={`seg-btn ${settings.equalizer_preset === opt.value ? 'on' : ''}`}
-                    onClick={() => onChange({ ...settings, equalizer_preset: opt.value })}
+                    onClick={() => applyEqualizerPreset(opt.value)}
                   >
                     {opt.label}
                   </button>
                 ))}
               </div>
+            </div>
+          </div>
+          <div className="settings-row settings-row-block">
+            <div className="settings-row-copy">
+              <label className="settings-label">10-Band Curve</label>
+              <p className="settings-hint">
+                {isManualEqualizer
+                  ? 'Manual mode is live. Drag the bands to sculpt the current EQ curve.'
+                  : 'This graph reflects the selected preset. Switch to Manual to unlock the sliders and tweak from this shape.'}
+              </p>
+            </div>
+            <div className="equalizer-graph" role="img" aria-label="10 band equalizer curve">
+              {equalizerBandLabels.map((label, index) => {
+                const gain = clampEqualizerGain(equalizerBands[index] ?? 0);
+                const bandStyle = {
+                  '--band-height': `${(Math.abs(gain) / maxEqualizerGain) * 50}%`,
+                } as CSSProperties;
+
+                return (
+                  <div
+                    key={label}
+                    className={`equalizer-band ${gain >= 0 ? 'positive' : 'negative'}`}
+                    style={bandStyle}
+                  >
+                    <div className="equalizer-band-value">
+                      {gain > 0 ? `+${gain.toFixed(1)}` : gain.toFixed(1)}
+                    </div>
+                    <div className="equalizer-band-track">
+                      <div className="equalizer-band-fill" />
+                      <input
+                        className="equalizer-band-slider"
+                        type="range"
+                        min={-maxEqualizerGain}
+                        max={maxEqualizerGain}
+                        step={0.1}
+                        value={gain}
+                        disabled={!isManualEqualizer}
+                        aria-label={`${label} hertz`}
+                        onChange={(event) => updateManualBandDraft(index, Number(event.currentTarget.value))}
+                        onPointerUp={commitManualBands}
+                        onKeyUp={(event) => {
+                          if (
+                            ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(
+                              event.key,
+                            )
+                          ) {
+                            commitManualBands();
+                          }
+                        }}
+                        onBlur={commitManualBands}
+                      />
+                    </div>
+                    <div className="equalizer-band-label">{label}</div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </section>

@@ -3,7 +3,10 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::{params, Connection};
 
-use crate::models::{AppSettings, BootstrapPayload, EqualizerPreset, LibraryData, ThemeMode, Track};
+use crate::models::{
+    default_equalizer_bands, AppSettings, BootstrapPayload, EqualizerPreset, LibraryData,
+    ThemeMode, Track,
+};
 
 pub fn init_database(db_path: &Path) -> Result<()> {
     let connection = Connection::open(db_path)?;
@@ -62,6 +65,13 @@ pub fn init_database(db_path: &Path) -> Result<()> {
         "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
         params!["equalizer_preset", "flat"],
     )?;
+    connection.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+        params![
+            "equalizer_bands",
+            serde_json::to_string(&default_equalizer_bands())?
+        ],
+    )?;
 
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN genre TEXT", []);
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
@@ -108,6 +118,16 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
         )
         .unwrap_or_else(|_| "flat".to_string());
 
+    let equalizer_bands = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'equalizer_bands'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|value| serde_json::from_str::<[f32; 10]>(&value).ok())
+        .unwrap_or_else(default_equalizer_bands);
+
     let mut roots_stmt = connection.prepare("SELECT path FROM library_roots ORDER BY path ASC")?;
     let library_roots = roots_stmt
         .query_map([], |row| row.get::<_, String>(0))?
@@ -124,8 +144,10 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
             "vocal" => EqualizerPreset::Vocal,
             "treble_boost" => EqualizerPreset::TrebleBoost,
             "lounge" => EqualizerPreset::Lounge,
+            "manual" => EqualizerPreset::Manual,
             _ => EqualizerPreset::Flat,
         },
+        equalizer_bands,
         library_roots,
     })
 }
@@ -145,6 +167,15 @@ pub fn save_settings(db_path: &Path, settings: &AppSettings) -> Result<AppSettin
         params![
             "equalizer_preset",
             equalizer_to_str(&settings.equalizer_preset)
+        ],
+    )?;
+
+    connection.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![
+            "equalizer_bands",
+            serde_json::to_string(&settings.equalizer_bands)?
         ],
     )?;
 
@@ -192,10 +223,7 @@ pub fn remove_library_root(db_path: &Path, folder: &str) -> Result<()> {
 
 pub fn purge_dotfile_tracks(db_path: &Path) -> Result<usize> {
     let connection = Connection::open(db_path)?;
-    let removed = connection.execute(
-        "DELETE FROM tracks WHERE path LIKE '%/.%'",
-        [],
-    )?;
+    let removed = connection.execute("DELETE FROM tracks WHERE path LIKE '%/.%'", [])?;
     Ok(removed)
 }
 
@@ -210,7 +238,8 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
     transaction.execute("DELETE FROM _scan_paths", [])?;
 
     {
-        let mut stage = transaction.prepare("INSERT OR IGNORE INTO _scan_paths (path) VALUES (?1)")?;
+        let mut stage =
+            transaction.prepare("INSERT OR IGNORE INTO _scan_paths (path) VALUES (?1)")?;
         for track in tracks {
             stage.execute(params![track.path])?;
         }
@@ -320,11 +349,7 @@ pub fn get_album_info(db_path: &Path, key: &str) -> Result<Option<Option<CachedA
     Ok(None)
 }
 
-pub fn cache_album_info(
-    db_path: &Path,
-    key: &str,
-    info: Option<&CachedAlbumInfo>,
-) -> Result<()> {
+pub fn cache_album_info(db_path: &Path, key: &str, info: Option<&CachedAlbumInfo>) -> Result<()> {
     let connection = Connection::open(db_path)?;
     let (description, source_url) = match info {
         Some(info) => (info.description.as_deref(), info.source_url.as_deref()),
@@ -448,5 +473,6 @@ fn equalizer_to_str(equalizer: &EqualizerPreset) -> &'static str {
         EqualizerPreset::Vocal => "vocal",
         EqualizerPreset::TrebleBoost => "treble_boost",
         EqualizerPreset::Lounge => "lounge",
+        EqualizerPreset::Manual => "manual",
     }
 }

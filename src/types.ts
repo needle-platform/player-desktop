@@ -5,7 +5,8 @@ export type EqualizerPreset =
   | 'bass_boost'
   | 'vocal'
   | 'treble_boost'
-  | 'lounge';
+  | 'lounge'
+  | 'manual';
 
 export interface Track {
   id: number;
@@ -37,6 +38,7 @@ export interface LibraryData {
 export interface AppSettings {
   theme: ThemeMode;
   equalizer_preset: EqualizerPreset;
+  equalizer_bands: number[];
   library_roots: string[];
 }
 

@@ -2,16 +2,10 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use lofty::{
-    picture::MimeType,
-    prelude::TaggedFileExt,
-    probe::Probe,
-};
+use lofty::{picture::MimeType, prelude::TaggedFileExt, probe::Probe};
 use serde::Serialize;
 
-const SIDECAR_NAMES: &[&str] = &[
-    "cover", "folder", "front", "album", "albumart", "artwork",
-];
+const SIDECAR_NAMES: &[&str] = &["cover", "folder", "front", "album", "albumart", "artwork"];
 const SIDECAR_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 
 #[derive(Debug, Clone, Serialize)]

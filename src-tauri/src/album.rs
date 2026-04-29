@@ -5,8 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-const USER_AGENT: &str =
-    "Resonance/0.1 (https://gitea.davidrelich.com/davidrelich/music-player)";
+const USER_AGENT: &str = "Resonance/0.1 (https://gitea.davidrelich.com/davidrelich/music-player)";
 
 // Reuse the same MusicBrainz throttle as artist lookups.
 static MB_LIMIT: tokio::sync::OnceCell<Semaphore> = tokio::sync::OnceCell::const_new();
@@ -36,15 +35,10 @@ fn http_client() -> Result<reqwest::Client> {
 }
 
 fn escape_query(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-pub async fn fetch_album_info(
-    album: &str,
-    artist: Option<&str>,
-) -> Result<Option<AlbumInfo>> {
+pub async fn fetch_album_info(album: &str, artist: Option<&str>) -> Result<Option<AlbumInfo>> {
     let album = album.trim();
     if album.is_empty() {
         return Ok(None);
