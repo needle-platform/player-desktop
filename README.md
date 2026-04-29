@@ -16,7 +16,8 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Per-folder removal** straight from the sidebar
 
 ### Dashboard
-- **Time-of-day greeting** with library summary, or "Still spinning…" when something's playing
+- **Time-of-day greeting** with library summary, or a **Now spinning** hero when something's playing
+- **Hero now-playing treatment** with an animated vinyl indicator, center-label album art, and album artwork stretched across the top dashboard band
 - **Quick actions**: Shuffle play · Add folder · Maintenance
 - **Recently added albums** sorted by newest tracks with relative timestamps (Today / 3d ago / 2w ago…)
 - **Made for you** auto-playlists generated from your library:

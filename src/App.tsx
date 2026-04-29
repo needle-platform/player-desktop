@@ -919,6 +919,7 @@ function App() {
             artists={artists}
             playlists={playlists}
             currentTrack={currentTrack}
+            isPlaying={isPlaying}
             featuredSeed={featuredSeed}
             onShuffle={shufflePlay}
             onAddFolder={importFolder}
@@ -1884,6 +1885,7 @@ interface DashboardViewProps {
   artists: Array<{ artist: string; count: number }>;
   playlists: AutoPlaylist[];
   currentTrack: Track | null;
+  isPlaying: boolean;
   featuredSeed: number;
   onShuffle: () => void;
   onAddFolder: () => void;
@@ -1908,6 +1910,7 @@ function DashboardView({
   artists,
   playlists,
   currentTrack,
+  isPlaying,
   featuredSeed,
   onShuffle,
   onAddFolder,
@@ -1924,6 +1927,7 @@ function DashboardView({
   onPlay,
   busy,
 }: DashboardViewProps) {
+  const currentArtwork = useCoverArt(currentTrack?.path);
   const featured = useMemo(
     () => sampleN(albums, 6),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1940,6 +1944,8 @@ function DashboardView({
     () => artists.slice().sort((a, b) => b.count - a.count).slice(0, 6),
     [artists],
   );
+  const heroBackdropStyle = currentArtwork ? { backgroundImage: `url(${currentArtwork})` } : undefined;
+  const recordLabelStyle = currentArtwork ? ({ backgroundImage: `url(${currentArtwork})` } as CSSProperties) : undefined;
 
   const isEmpty = tracks.length === 0;
 
@@ -1970,17 +1976,33 @@ function DashboardView({
 
   return (
     <div className="view dashboard">
+      {currentArtwork && (
+        <div className="dashboard-backdrop" aria-hidden="true">
+          <div className="dashboard-backdrop-image" style={heroBackdropStyle} />
+        </div>
+      )}
       <header className="dashboard-hero">
-        <div>
+        <div className="dashboard-hero-copy">
           <div className="view-eyebrow">{greeting()}</div>
-          <h1 className="view-title">
-            {currentTrack ? `Still spinning · ${currentTrack.title}` : 'What are we listening to?'}
-          </h1>
-          <p className="dashboard-lead">
-            {currentTrack
-              ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
-              : `${tracks.length} tracks across ${albums.length} albums and ${artists.length} artists.`}
-          </p>
+          <div className="dashboard-now">
+            <div className={`dashboard-record ${isPlaying ? 'is-spinning' : ''}`} aria-hidden="true">
+              <span className="dashboard-record-disc">
+                <span className="dashboard-record-label" style={recordLabelStyle}>
+                  <span className="dashboard-record-hole" />
+                </span>
+              </span>
+            </div>
+            <div>
+              <h1 className="view-title">
+                {currentTrack ? `Now spinning · ${currentTrack.title}` : 'What are we listening to?'}
+              </h1>
+              <p className="dashboard-lead">
+                {currentTrack
+                  ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
+                  : `${tracks.length} tracks across ${albums.length} albums and ${artists.length} artists.`}
+              </p>
+            </div>
+          </div>
         </div>
         <div className="dashboard-actions">
           <button className="primary" onClick={onShuffle} disabled={busy}>
