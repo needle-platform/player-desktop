@@ -21,11 +21,6 @@ const ACCENTS = [
 
 const accent = (n: number) => ACCENTS[n % ACCENTS.length];
 
-const decadeLabel = (year: number): string => {
-  if (year < 1950) return 'Pre-50s';
-  return `${Math.floor(year / 10) * 10}s`;
-};
-
 const titleCase = (value: string) =>
   value
     .toLowerCase()
@@ -40,13 +35,30 @@ const splitGenres = (raw: string): string[] =>
     .map((s) => s.trim())
     .filter(Boolean);
 
-const HI_RES_FORMATS = new Set(['FLAC', 'ALAC', 'WAV', 'AIFF', 'AIF']);
+const REDISCOVER_AFTER_DAYS = 30;
+const dayMs = 24 * 60 * 60 * 1000;
 
-const isHiRes = (track: Track): boolean => {
-  if (track.format && HI_RES_FORMATS.has(track.format)) return true;
-  if ((track.sample_rate ?? 0) >= 88200) return true;
-  if ((track.bit_depth ?? 0) >= 24) return true;
-  return false;
+const timestampOf = (value: string | null | undefined): number => {
+  if (!value) return Number.NaN;
+  const normalized = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+  const timestamp = Date.parse(normalized);
+  return Number.isNaN(timestamp) ? Number.NaN : timestamp;
+};
+
+const compareTimestamps = (
+  left: string | null | undefined,
+  right: string | null | undefined,
+  direction: 'asc' | 'desc',
+): number => {
+  const leftTs = timestampOf(left);
+  const rightTs = timestampOf(right);
+
+  const leftMissing = Number.isNaN(leftTs);
+  const rightMissing = Number.isNaN(rightTs);
+  if (leftMissing && rightMissing) return 0;
+  if (leftMissing) return 1;
+  if (rightMissing) return -1;
+  return direction === 'asc' ? leftTs - rightTs : rightTs - leftTs;
 };
 
 const sample = <T,>(arr: T[], n: number): T[] => {
@@ -64,13 +76,19 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
 
   const playlists: AutoPlaylist[] = [];
   let accentIndex = 0;
+  const now = Date.now();
 
   // Most played
   const played = tracks.filter((t) => (t.play_count ?? 0) > 0);
   if (played.length >= 5) {
     const mostPlayed = played
       .slice()
-      .sort((a, b) => (b.play_count ?? 0) - (a.play_count ?? 0))
+      .sort(
+        (a, b) =>
+          (b.play_count ?? 0) - (a.play_count ?? 0) ||
+          compareTimestamps(a.last_played_at, b.last_played_at, 'desc') ||
+          a.title.localeCompare(b.title),
+      )
       .slice(0, 50);
     playlists.push({
       id: 'history:most-played',
@@ -85,7 +103,10 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
   const recentlyPlayed = tracks
     .filter((t) => Boolean(t.last_played_at))
     .slice()
-    .sort((a, b) => (b.last_played_at ?? '').localeCompare(a.last_played_at ?? ''))
+    .sort(
+      (a, b) =>
+        compareTimestamps(a.last_played_at, b.last_played_at, 'desc') || a.title.localeCompare(b.title),
+    )
     .slice(0, 50);
   if (recentlyPlayed.length >= 3) {
     playlists.push({
@@ -97,32 +118,54 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
     });
   }
 
-  // Decade × top genre mixes (e.g. "90s Rock")
-  const decadeGenre = new Map<string, Track[]>();
-  for (const t of tracks) {
-    if (!t.year || !t.genre) continue;
-    for (const g of splitGenres(t.genre)) {
-      const key = `${decadeLabel(t.year)} · ${titleCase(g)}`;
-      const existing = decadeGenre.get(key);
-      if (existing) existing.push(t);
-      else decadeGenre.set(key, [t]);
-    }
-  }
-  const topDecadeGenre = Array.from(decadeGenre.entries())
-    .filter(([, list]) => list.length >= 4)
-    .sort((a, b) => b[1].length - a[1].length)
-    .slice(0, 4);
-  for (const [name, list] of topDecadeGenre) {
+  // Needs a first spin
+  const needsFirstSpin = tracks
+    .filter((t) => (t.play_count ?? 0) === 0)
+    .slice()
+    .sort(
+      (a, b) =>
+        compareTimestamps(a.added_at, b.added_at, 'asc') ||
+        (a.album ?? '').localeCompare(b.album ?? '') ||
+        a.title.localeCompare(b.title),
+    )
+    .slice(0, 50);
+  if (needsFirstSpin.length >= 5) {
     playlists.push({
-      id: `dg:${name}`,
-      name,
-      description: `${list.length} tracks · era mix`,
+      id: 'library:first-spin',
+      name: 'Needs a first spin',
+      description: 'Unplayed tracks still waiting in your library',
       accent: accent(accentIndex++),
-      tracks: list,
+      tracks: needsFirstSpin,
     });
   }
 
-  // Pure genre buckets (top 4 genres not already represented above)
+  // Rediscover: tracks you played before, but not recently.
+  const rediscover = tracks
+    .filter((t) => {
+      if ((t.play_count ?? 0) <= 0 || !t.last_played_at) return false;
+      const lastPlayed = timestampOf(t.last_played_at);
+      if (Number.isNaN(lastPlayed)) return false;
+      return now - lastPlayed >= REDISCOVER_AFTER_DAYS * dayMs;
+    })
+    .slice()
+    .sort(
+      (a, b) =>
+        compareTimestamps(a.last_played_at, b.last_played_at, 'asc') ||
+        (b.play_count ?? 0) - (a.play_count ?? 0) ||
+        a.title.localeCompare(b.title),
+    )
+    .slice(0, 50);
+  if (rediscover.length >= 5) {
+    playlists.push({
+      id: 'library:rediscover',
+      name: 'Rediscover',
+      description: 'Played before, not recently',
+      accent: accent(accentIndex++),
+      tracks: rediscover,
+    });
+  }
+
+  // One top-genre mix, not a wall of genre cards.
   const genreBuckets = new Map<string, Track[]>();
   for (const t of tracks) {
     if (!t.genre) continue;
@@ -133,93 +176,17 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
       else genreBuckets.set(key, [t]);
     }
   }
-  const topGenres = Array.from(genreBuckets.entries())
+  const topGenre = Array.from(genreBuckets.entries())
     .filter(([, list]) => list.length >= 5)
-    .sort((a, b) => b[1].length - a[1].length)
-    .slice(0, 4);
-  for (const [genre, list] of topGenres) {
+    .sort((a, b) => b[1].length - a[1].length)[0];
+  if (topGenre) {
+    const [genre, list] = topGenre;
     playlists.push({
       id: `genre:${genre}`,
-      name: `Best of ${genre}`,
-      description: `${list.length} tracks across your library`,
+      name: 'From your top genre',
+      description: `${genre} · ${list.length} tracks across your library`,
       accent: accent(accentIndex++),
-      tracks: list,
-    });
-  }
-
-  // Decade-only buckets if we don't have great genre coverage
-  if (playlists.length < 4) {
-    const decadeOnly = new Map<string, Track[]>();
-    for (const t of tracks) {
-      if (!t.year) continue;
-      const key = decadeLabel(t.year);
-      const existing = decadeOnly.get(key);
-      if (existing) existing.push(t);
-      else decadeOnly.set(key, [t]);
-    }
-    const topDecades = Array.from(decadeOnly.entries())
-      .filter(([, list]) => list.length >= 5)
-      .sort((a, b) => b[1].length - a[1].length)
-      .slice(0, 3);
-    for (const [decade, list] of topDecades) {
-      playlists.push({
-        id: `decade:${decade}`,
-        name: `${decade} mix`,
-        description: `${list.length} tracks from the ${decade}`,
-        accent: accent(accentIndex++),
-        tracks: list,
-      });
-    }
-  }
-
-  // Mood-ish buckets via duration heuristics
-  const quickHits = tracks.filter((t) => (t.duration_seconds ?? 0) > 60 && (t.duration_seconds ?? 0) < 180);
-  if (quickHits.length >= 6) {
-    playlists.push({
-      id: 'mood:quick',
-      name: 'Quick hits',
-      description: 'Punchy tracks under 3 minutes',
-      accent: accent(accentIndex++),
-      tracks: sample(quickHits, 60),
-    });
-  }
-
-  const deepListens = tracks.filter((t) => (t.duration_seconds ?? 0) >= 8 * 60);
-  if (deepListens.length >= 4) {
-    playlists.push({
-      id: 'mood:deep',
-      name: 'Deep listens',
-      description: 'Long-form tracks for focus',
-      accent: accent(accentIndex++),
-      tracks: deepListens,
-    });
-  }
-
-  const slowDown = tracks.filter((t) => {
-    const seconds = t.duration_seconds ?? 0;
-    if (seconds < 4 * 60) return false;
-    const g = (t.genre ?? '').toLowerCase();
-    return /ambient|classical|jazz|chill|acoustic|piano|cinematic|score|soundtrack/.test(g);
-  });
-  if (slowDown.length >= 4) {
-    playlists.push({
-      id: 'mood:wind-down',
-      name: 'Wind down',
-      description: 'Mellow long-form selections',
-      accent: accent(accentIndex++),
-      tracks: slowDown,
-    });
-  }
-
-  // Audiophile session: hi-res only
-  const hiRes = tracks.filter(isHiRes);
-  if (hiRes.length >= 6) {
-    playlists.push({
-      id: 'mood:hi-res',
-      name: 'Audiophile session',
-      description: 'Lossless and high-resolution tracks',
-      accent: accent(accentIndex++),
-      tracks: hiRes,
+      tracks: sample(list, 60),
     });
   }
 

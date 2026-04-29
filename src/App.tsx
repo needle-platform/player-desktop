@@ -32,6 +32,7 @@ import { useCoverArt } from './lib/cover';
 import { useArtistImage } from './lib/artistImage';
 import { useAlbumInfo } from './lib/albumInfo';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
+import dashboardIdleBackdrop from './assets/bg.jpg';
 import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
 
@@ -1928,6 +1929,7 @@ function DashboardView({
   busy,
 }: DashboardViewProps) {
   const currentArtwork = useCoverArt(currentTrack?.path);
+  const dashboardBackdrop = currentArtwork ?? dashboardIdleBackdrop;
   const featured = useMemo(
     () => sampleN(albums, 6),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1944,7 +1946,7 @@ function DashboardView({
     () => artists.slice().sort((a, b) => b.count - a.count).slice(0, 6),
     [artists],
   );
-  const heroBackdropStyle = currentArtwork ? { backgroundImage: `url(${currentArtwork})` } : undefined;
+  const heroBackdropStyle = { backgroundImage: `url(${dashboardBackdrop})` };
   const recordLabelStyle = currentArtwork ? ({ backgroundImage: `url(${currentArtwork})` } as CSSProperties) : undefined;
 
   const isEmpty = tracks.length === 0;
@@ -1976,11 +1978,9 @@ function DashboardView({
 
   return (
     <div className="view dashboard">
-      {currentArtwork && (
-        <div className="dashboard-backdrop" aria-hidden="true">
-          <div className="dashboard-backdrop-image" style={heroBackdropStyle} />
-        </div>
-      )}
+      <div className="dashboard-backdrop" aria-hidden="true">
+        <div className="dashboard-backdrop-image" style={heroBackdropStyle} />
+      </div>
       <header className="dashboard-hero">
         <div className="dashboard-hero-copy">
           <div className="view-eyebrow">{greeting()}</div>
@@ -2069,7 +2069,7 @@ function DashboardView({
       {playlists.length > 0 && (
         <section className="dashboard-section">
           <div className="section-head">
-            <h2 className="section-title">Made for you</h2>
+            <h2 className="section-title">From your library</h2>
             <div className="section-actions">
               <button className="ghost-button" onClick={onShuffleFeatured}>
                 ↻ Refresh

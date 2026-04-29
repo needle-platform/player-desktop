@@ -18,21 +18,20 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Dashboard
 - **Time-of-day greeting** with library summary, or a **Now spinning** hero when something's playing
 - **Hero now-playing treatment** with an animated vinyl indicator, center-label album art, and album artwork stretched across the top dashboard band
+- **Idle dashboard backdrop** from bundled artwork when nothing is playing, so the hero stays readable instead of falling back to empty white space
 - **Quick actions**: Shuffle play · Add folder · Maintenance
 - **Recently added albums** sorted by newest tracks with relative timestamps (Today / 3d ago / 2w ago…)
-- **Made for you** auto-playlists generated from your library:
+- **From your library** recommendations grounded in your own listening history and collection metadata:
   - **Most played** & **Recently played** (from real play history)
-  - **Decade × Genre** mixes (e.g. `90s · Rock`)
-  - **Best of {Genre}** for top genres
-  - **{Decade} mix** when genre data is sparse
-  - **Quick hits** (under 3 min), **Deep listens** (≥8 min), **Wind down** (long ambient/classical/jazz/etc.)
-  - **Audiophile session** (FLAC/ALAC or 24-bit / ≥88.2 kHz)
+  - **Needs a first spin** for unplayed tracks still waiting in the library
+  - **Rediscover** for tracks you played before but have not visited in a while
+  - **From your top genre** for one focused genre mix instead of a wall of auto-generated buckets
 - **Featured albums** & **Top artists** rows
 - **Quick picks** — random tracks playable in one click
 
 ### Playback
 - **mpv backend** for bit-perfect lossless playback through JSON IPC
-- **Real playlist queues**: play album · shuffle artist · play all Quick picks · shuffle a Made-for-you playlist — mpv auto-advances through the queue
+- **Real playlist queues**: play album · shuffle artist · play all Quick picks · shuffle a From-your-library playlist — mpv auto-advances through the queue
 - **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
@@ -141,12 +140,11 @@ Maintenance and remove-folder actions only touch the database — your audio fil
 
 ## Auto-playlists & metadata
 
-Needle generates auto-playlists from data we already have, no machine learning required:
+Needle generates dashboard recommendations from data we already have, no machine learning required:
 
-- **Tags** (genre, year) drive era and genre playlists
-- **Duration** drives mood-ish buckets (Quick hits, Deep listens, Wind down)
-- **Format / sample rate / bit depth** drives the Audiophile session
-- **Play history** (`play_count`, `last_played_at`) drives Most played and Recently played
+- **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
+- **Library state** (`play_count = 0`) drives Needs a first spin
+- **Tags** (genre) drive one top-genre mix when your collection has a clear favorite
 - **`added_at`** (preserved across rescans) drives the Recently added albums row
 
 Real **BPM and key analysis** would unlock proper mood detection (energy, workout, slow groove). It's tractable in Rust via onset-detection / autocorrelation, but it's CPU-heavy and best done as an opt-in background "Analyze library" maintenance step. Tracked in the roadmap.
