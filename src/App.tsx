@@ -59,7 +59,7 @@ type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: n
 type TrackSortOption = 'title' | 'artist' | 'album' | 'recent' | 'plays' | 'duration';
 type AlbumSortOption = 'album' | 'artist' | 'recent' | 'tracks';
 type ArtistSortOption = 'artist' | 'tracks' | 'recent';
-type TrackYearFilterOption = 'all' | 'unknown' | string;
+type TrackYearBoundaryFilter = 'all' | string;
 type PlaylistCreateSource = {
   id: string;
   label: string;
@@ -194,7 +194,6 @@ const artistSortOptions: Array<{ value: ArtistSortOption; label: string }> = [
   { value: 'recent', label: 'Recently added' },
 ];
 const allTrackFilterValue = 'all';
-const unknownTrackFilterValue = 'unknown';
 const defaultVolumePercent = 80;
 
 const formatDuration = (seconds: number | null | undefined) => {
@@ -210,6 +209,20 @@ const filteredPlaylistName = (artist: string, genre: string) => {
 const effectiveTrackGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
 const uniqueSorted = (values: string[]) =>
   Array.from(new Set(values.filter(Boolean))).sort((a, b) => compareText(a, b));
+const dedupeTracksByPath = (tracks: Track[]) => Array.from(new Map(tracks.map((track) => [track.path, track])).values());
+const yearFilterNumber = (value: TrackYearBoundaryFilter) => {
+  if (value === allTrackFilterValue) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+const formatTrackYearRange = (start: TrackYearBoundaryFilter, end: TrackYearBoundaryFilter) => {
+  if (start !== allTrackFilterValue && end !== allTrackFilterValue) {
+    return start === end ? `Year ${start}` : `${start}–${end}`;
+  }
+  if (start !== allTrackFilterValue) return `From ${start}`;
+  if (end !== allTrackFilterValue) return `Up to ${end}`;
+  return null;
+};
 
 const formatQuality = (track: Track) => {
   const parts = [
@@ -535,7 +548,8 @@ function App() {
   const [trackSort, setTrackSort] = useState<TrackSortOption>('title');
   const [trackArtistFilter, setTrackArtistFilter] = useState(allTrackFilterValue);
   const [trackGenreFilter, setTrackGenreFilter] = useState(allTrackFilterValue);
-  const [trackYearFilter, setTrackYearFilter] = useState<TrackYearFilterOption>(allTrackFilterValue);
+  const [trackYearFromFilter, setTrackYearFromFilter] = useState<TrackYearBoundaryFilter>(allTrackFilterValue);
+  const [trackYearToFilter, setTrackYearToFilter] = useState<TrackYearBoundaryFilter>(allTrackFilterValue);
   const [albumSort, setAlbumSort] = useState<AlbumSortOption>('album');
   const [artistSort, setArtistSort] = useState<ArtistSortOption>('artist');
   const [selectedAlbum, setSelectedAlbum] = useState<string | null>(null);
@@ -598,7 +612,28 @@ function App() {
   const clearTrackFilters = () => {
     setTrackArtistFilter(allTrackFilterValue);
     setTrackGenreFilter(allTrackFilterValue);
-    setTrackYearFilter(allTrackFilterValue);
+    setTrackYearFromFilter(allTrackFilterValue);
+    setTrackYearToFilter(allTrackFilterValue);
+  };
+  const updateTrackYearFromFilter = (value: TrackYearBoundaryFilter) => {
+    setTrackYearFromFilter(value);
+    if (
+      value !== allTrackFilterValue &&
+      trackYearToFilter !== allTrackFilterValue &&
+      Number(value) > Number(trackYearToFilter)
+    ) {
+      setTrackYearToFilter(value);
+    }
+  };
+  const updateTrackYearToFilter = (value: TrackYearBoundaryFilter) => {
+    setTrackYearToFilter(value);
+    if (
+      value !== allTrackFilterValue &&
+      trackYearFromFilter !== allTrackFilterValue &&
+      Number(value) < Number(trackYearFromFilter)
+    ) {
+      setTrackYearFromFilter(value);
+    }
   };
 
   useEffect(() => {
@@ -981,7 +1016,7 @@ function App() {
   const trackYearOptions = useMemo(
     () =>
       Array.from(new Set(scopedTracks.map((track) => track.year).filter((year): year is number => year != null)))
-        .sort((a, b) => b - a)
+        .sort((a, b) => a - b)
         .map(String),
     [scopedTracks],
   );
@@ -993,10 +1028,15 @@ function App() {
     if (trackGenreFilter !== allTrackFilterValue) {
       list = list.filter((track) => splitTrackGenres(effectiveTrackGenre(track)).includes(trackGenreFilter));
     }
-    if (trackYearFilter !== allTrackFilterValue) {
-      list = list.filter((track) =>
-        trackYearFilter === unknownTrackFilterValue ? track.year == null : String(track.year ?? '') === trackYearFilter,
-      );
+    const startYear = yearFilterNumber(trackYearFromFilter);
+    const endYear = yearFilterNumber(trackYearToFilter);
+    if (startYear != null || endYear != null) {
+      list = list.filter((track) => {
+        if (track.year == null) return false;
+        if (startYear != null && track.year < startYear) return false;
+        if (endYear != null && track.year > endYear) return false;
+        return true;
+      });
     }
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -1008,7 +1048,7 @@ function App() {
       );
     }
     return list;
-  }, [scopedTracks, trackArtistFilter, trackGenreFilter, trackYearFilter, search]);
+  }, [scopedTracks, trackArtistFilter, trackGenreFilter, trackYearFromFilter, trackYearToFilter, search]);
   const sortedTracks = useMemo(() => {
     if (selectedManualPlaylist) {
       return filteredTracks;
@@ -1138,21 +1178,32 @@ function App() {
     [albums, selectedAlbum],
   );
   const visibleTracksForPlaylist = selectedManualPlaylist ? filteredTracks : sortedTracks;
+  const yearFilterSummary = formatTrackYearRange(trackYearFromFilter, trackYearToFilter);
   const hasTrackFilters =
     trackArtistFilter !== allTrackFilterValue ||
     trackGenreFilter !== allTrackFilterValue ||
-    trackYearFilter !== allTrackFilterValue;
+    yearFilterSummary !== null;
   const activeTrackFilterSummary = [
     trackArtistFilter !== allTrackFilterValue ? trackArtistFilter : null,
     trackGenreFilter !== allTrackFilterValue ? trackGenreFilter : null,
-    trackYearFilter === unknownTrackFilterValue
-      ? 'Unknown year'
-      : trackYearFilter !== allTrackFilterValue
-        ? trackYearFilter
-        : null,
+    yearFilterSummary,
   ]
     .filter(Boolean)
     .join(' · ');
+  const selectedPlaylistBaseTracks = selectedPlaylistData ? dedupeTracksByPath(selectedPlaylistData.tracks) : [];
+  const isSelectedPlaylistActive =
+    Boolean(currentPath) &&
+    selectedPlaylistBaseTracks.length > 0 &&
+    selectedPlaylistBaseTracks.length === baseQueueTracks.length &&
+    selectedPlaylistBaseTracks.every((track, index) => baseQueueTracks[index]?.path === track.path) &&
+    selectedPlaylistBaseTracks.some((track) => track.path === currentPath);
+  const selectedPlaylistPrimaryActionLabel = !selectedPlaylistData
+    ? '▶ Play'
+    : isSelectedPlaylistActive
+      ? isPlaying
+        ? '⏸ Pause'
+        : '▶ Resume'
+      : '▶ Play';
 
   const selectedRawOutputDevice = useMemo(
     () => audioDevices.find((device) => device.name === selectedAudioDevice) ?? null,
@@ -1794,6 +1845,85 @@ function App() {
       shuffle: true,
     });
   };
+  const playPlaylistSelection = (playlist: ResolvedPlaylist) => {
+    const baseTracks = dedupeTracksByPath(playlist.tracks);
+    const actualTracks = shuffleEnabled ? shuffleList(baseTracks) : baseTracks;
+    void playQueue(actualTracks, `Playing playlist · ${playlist.name}`, {
+      baseTracks,
+      shuffle: shuffleEnabled,
+    });
+  };
+  const shufflePlaylistSelection = (playlist: ResolvedPlaylist) => {
+    const baseTracks = dedupeTracksByPath(playlist.tracks);
+    if (baseTracks.length === 0) return;
+    void playQueue(shuffleList(baseTracks), `Shuffle playlist · ${playlist.name}`, {
+      baseTracks,
+      shuffle: true,
+    });
+  };
+  const queueTrackCollection = async (
+    tracks: Track[],
+    label: string,
+    placement: 'next' | 'queue',
+  ) => {
+    const baseTracks = dedupeTracksByPath(tracks);
+    if (baseTracks.length === 0) return;
+
+    if (!currentTrack) {
+      await playQueue(baseTracks, `Playing playlist · ${label}`, {
+        baseTracks,
+      });
+      return;
+    }
+
+    const collectionPaths = baseTracks.map((track) => track.path).filter((path) => path !== currentTrack.path);
+    if (collectionPaths.length === 0) {
+      setStatus('That playlist is already playing');
+      return;
+    }
+
+    const nextQueue = queueTracks.map((track) => track.path).filter((path) => !collectionPaths.includes(path));
+    const nextBase = baseQueueTracks.map((track) => track.path).filter((path) => !collectionPaths.includes(path));
+
+    if (placement === 'next') {
+      const activeIndex = Math.max(queuePaths.indexOf(currentTrack.path), 0);
+      nextQueue.splice(activeIndex + 1, 0, ...collectionPaths);
+      nextBase.splice(activeIndex + 1, 0, ...collectionPaths);
+    } else {
+      nextQueue.push(...collectionPaths);
+      nextBase.push(...collectionPaths);
+    }
+
+    if (!isBackendPlaybackLoaded) {
+      applyQueueLocally(nextQueue, nextBase, { keepCurrentPath: null });
+      setStatus(
+        placement === 'next' ? `Playlist plays next · ${label}` : `Added playlist to queue · ${label}`,
+      );
+      return;
+    }
+
+    try {
+      const existingIndices = queueTracks
+        .map((track, index) => (collectionPaths.includes(track.path) ? index : -1))
+        .filter((index) => index >= 0)
+        .sort((a, b) => b - a);
+      for (const index of existingIndices) {
+        await tauriRemoveQueueIndex(index);
+      }
+      if (placement === 'next') {
+        const activeIndex = Math.max(queuePaths.indexOf(currentTrack.path), 0);
+        await insertQueueAt(collectionPaths, activeIndex + 1);
+      } else {
+        await appendQueue(collectionPaths);
+      }
+      applyQueueLocally(nextQueue, nextBase, { keepCurrentPath: currentTrack.path });
+      setStatus(
+        placement === 'next' ? `Playlist plays next · ${label}` : `Added playlist to queue · ${label}`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   const togglePlayPause = async () => {
     if (!currentTrack) {
@@ -2277,7 +2407,7 @@ function App() {
     : selectedManualPlaylist
       ? 'This saved playlist is empty right now.'
       : hasTrackFilters
-        ? 'Try widening the artist, genre, or year filters.'
+        ? 'Try widening the artist, genre, or year range filters.'
       : search.trim()
         ? `Try a different search than “${search.trim()}”.`
         : selectedArtist
@@ -2467,8 +2597,10 @@ function App() {
             genreFilterValue={trackGenreFilter}
             onGenreFilterChange={setTrackGenreFilter}
             genreFilterOptions={trackGenreOptions}
-            yearFilterValue={trackYearFilter}
-            onYearFilterChange={setTrackYearFilter}
+            yearFilterFromValue={trackYearFromFilter}
+            onYearFilterFromChange={updateTrackYearFromFilter}
+            yearFilterToValue={trackYearToFilter}
+            onYearFilterToChange={updateTrackYearToFilter}
             yearFilterOptions={trackYearOptions}
             hasTrackFilters={hasTrackFilters}
             onClearTrackFilters={clearTrackFilters}
@@ -2502,6 +2634,35 @@ function App() {
                 label: track.title,
                 suggestedName: `${track.title} picks`,
               })
+            }
+            playlistPrimaryActionLabel={selectedPlaylistData ? selectedPlaylistPrimaryActionLabel : undefined}
+            onPlayPlaylistPrimaryAction={
+              selectedPlaylistData
+                ? () => {
+                    if (isSelectedPlaylistActive) {
+                      void togglePlayPause();
+                      return;
+                    }
+                    playPlaylistSelection(selectedPlaylistData);
+                  }
+                : undefined
+            }
+            onShufflePlaylist={
+              selectedPlaylistData ? () => shufflePlaylistSelection(selectedPlaylistData) : undefined
+            }
+            onPlayPlaylistNext={
+              selectedPlaylistData
+                ? () => {
+                    void queueTrackCollection(selectedPlaylistData.tracks, selectedPlaylistData.name, 'next');
+                  }
+                : undefined
+            }
+            onAddPlaylistToQueue={
+              selectedPlaylistData
+                ? () => {
+                    void queueTrackCollection(selectedPlaylistData.tracks, selectedPlaylistData.name, 'queue');
+                  }
+                : undefined
             }
             title={
               selectedPlaylistData
@@ -3387,8 +3548,10 @@ interface TracksViewProps {
   genreFilterValue: string;
   onGenreFilterChange: (value: string) => void;
   genreFilterOptions: string[];
-  yearFilterValue: TrackYearFilterOption;
-  onYearFilterChange: (value: TrackYearFilterOption) => void;
+  yearFilterFromValue: TrackYearBoundaryFilter;
+  onYearFilterFromChange: (value: TrackYearBoundaryFilter) => void;
+  yearFilterToValue: TrackYearBoundaryFilter;
+  onYearFilterToChange: (value: TrackYearBoundaryFilter) => void;
   yearFilterOptions: string[];
   hasTrackFilters: boolean;
   onClearTrackFilters: () => void;
@@ -3406,6 +3569,11 @@ interface TracksViewProps {
   onSaveAsPlaylist?: () => void;
   saveActionLabel?: string;
   onAddTrackToPlaylist?: (track: Track) => void;
+  playlistPrimaryActionLabel?: string;
+  onPlayPlaylistPrimaryAction?: () => void;
+  onShufflePlaylist?: () => void;
+  onPlayPlaylistNext?: () => void;
+  onAddPlaylistToQueue?: () => void;
   title: string;
   subtitle: string;
   onClearFilter?: () => void;
@@ -3425,8 +3593,10 @@ function TracksView({
   genreFilterValue,
   onGenreFilterChange,
   genreFilterOptions,
-  yearFilterValue,
-  onYearFilterChange,
+  yearFilterFromValue,
+  onYearFilterFromChange,
+  yearFilterToValue,
+  onYearFilterToChange,
   yearFilterOptions,
   hasTrackFilters,
   onClearTrackFilters,
@@ -3444,6 +3614,11 @@ function TracksView({
   onSaveAsPlaylist,
   saveActionLabel,
   onAddTrackToPlaylist,
+  playlistPrimaryActionLabel,
+  onPlayPlaylistPrimaryAction,
+  onShufflePlaylist,
+  onPlayPlaylistNext,
+  onAddPlaylistToQueue,
   title,
   subtitle,
   onClearFilter,
@@ -3475,6 +3650,30 @@ function TracksView({
           )}
         </div>
       </header>
+      {(onPlayPlaylistPrimaryAction || onShufflePlaylist || onPlayPlaylistNext || onAddPlaylistToQueue) && (
+        <div className="tracks-playlist-actions">
+          {onPlayPlaylistPrimaryAction && (
+            <button className="primary-button" onClick={onPlayPlaylistPrimaryAction}>
+              {playlistPrimaryActionLabel ?? '▶ Play'}
+            </button>
+          )}
+          {onPlayPlaylistNext && (
+            <button className="ghost-button" onClick={onPlayPlaylistNext}>
+              ≫ Play next
+            </button>
+          )}
+          {onAddPlaylistToQueue && (
+            <button className="ghost-button" onClick={onAddPlaylistToQueue}>
+              + Add to queue
+            </button>
+          )}
+          {onShufflePlaylist && (
+            <button className="ghost-button" onClick={onShufflePlaylist}>
+              ⤮ Shuffle
+            </button>
+          )}
+        </div>
+      )}
       <section className={`tracks-toolbar ${playlistMode ? 'is-playlist-mode' : ''}`}>
         <div className="tracks-toolbar-main">
           <label className="tracks-search-wrap">
@@ -3536,21 +3735,35 @@ function TracksView({
                   ))}
                 </select>
               </label>
-              <label className="tracks-filter-card">
+              <label className="tracks-filter-card tracks-filter-card-year">
                 <span className="view-select-label">Year</span>
-                <select
-                  className="view-select tracks-select"
-                  value={yearFilterValue}
-                  onChange={(event) => onYearFilterChange(event.currentTarget.value as TrackYearFilterOption)}
-                >
-                  <option value={allTrackFilterValue}>All years</option>
-                  <option value={unknownTrackFilterValue}>Unknown year</option>
-                  {yearFilterOptions.map((year) => (
-                    <option key={year} value={year}>
-                      {year}
-                    </option>
-                  ))}
-                </select>
+                <div className="tracks-year-range">
+                  <select
+                    className="view-select tracks-select"
+                    value={yearFilterFromValue}
+                    onChange={(event) => onYearFilterFromChange(event.currentTarget.value as TrackYearBoundaryFilter)}
+                  >
+                    <option value={allTrackFilterValue}>From</option>
+                    {yearFilterOptions.map((year) => (
+                      <option key={`from-${year}`} value={year}>
+                        {year}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="tracks-year-range-separator">→</span>
+                  <select
+                    className="view-select tracks-select"
+                    value={yearFilterToValue}
+                    onChange={(event) => onYearFilterToChange(event.currentTarget.value as TrackYearBoundaryFilter)}
+                  >
+                    <option value={allTrackFilterValue}>To</option>
+                    {yearFilterOptions.map((year) => (
+                      <option key={`to-${year}`} value={year}>
+                        {year}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </label>
             </div>
             <div className="tracks-toolbar-footer">

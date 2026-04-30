@@ -55,6 +55,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Manual playlists** stored in SQLite and editable in-app
 - **Empty playlist creation** directly from the sidebar
 - **Add to playlist** actions on tracks and albums, with in-app creation of a new playlist during the add flow
+- **Playlist pages as playback views** with top-level Play / Shuffle / Play next / Add to queue actions
 - **Save visible track sets** from the Tracks view or album pages as playlist snapshots
 - **Filtered playlist creation** from library metadata such as artist and genre
 - **Playlist management**: rename, delete, reorder tracks, remove tracks
@@ -68,7 +69,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 
 ### Views
 - **Dashboard** (default landing screen)
-- **Tracks** with live search, sorting, and filters for artist / genre / year, plus album / artist / playlist context
+- **Tracks** with live search, sorting, and filters for artist / genre / year range, plus album / artist / playlist context
 - **Albums** with cover art, sorting, and direct playlist actions
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, full track list, and background album info when available
 - **Artists** with sorting and track counts
