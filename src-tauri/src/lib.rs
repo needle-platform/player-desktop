@@ -525,6 +525,23 @@ async fn get_artist_image(
 }
 
 #[tauri::command]
+async fn peek_artist_image(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<artist::ArtistImage>, String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let cached = db::get_artist_image(&state.db_path, &trimmed).map_err(|error| error.to_string())?;
+    Ok(cached.flatten().map(|url| artist::ArtistImage {
+        url,
+        source: "cache".into(),
+    }))
+}
+
+#[tauri::command]
 async fn refresh_artist_image(
     name: String,
     state: tauri::State<'_, AppState>,
@@ -880,6 +897,7 @@ pub fn run() {
             get_cover_art,
             record_play,
             get_artist_image,
+            peek_artist_image,
             refresh_artist_image,
             get_artist_info,
             refresh_artist_info,

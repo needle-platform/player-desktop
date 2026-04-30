@@ -252,6 +252,40 @@ const formatTrackYearRange = (start: TrackYearBoundaryFilter, end: TrackYearBoun
   if (end !== allTrackFilterValue) return `Up to ${end}`;
   return null;
 };
+function useNearViewport(lazyLoad: boolean) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [isNearViewport, setIsNearViewport] = useState(!lazyLoad);
+
+  useEffect(() => {
+    if (!lazyLoad) {
+      setIsNearViewport(true);
+      return;
+    }
+    if (isNearViewport) return;
+
+    const node = ref.current;
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      setIsNearViewport(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting || entry.intersectionRatio > 0)) {
+          setIsNearViewport(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '600px 0px' },
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [isNearViewport, lazyLoad]);
+
+  return { ref, isNearViewport };
+}
+
 const formatArtistGenderLabel = (value: string | null | undefined) => {
   if (!value) return 'unknown';
   return value
@@ -1492,40 +1526,61 @@ function App() {
     return withDate.slice().sort((a, b) => (b.addedAt ?? '').localeCompare(a.addedAt ?? '')).slice(0, 8);
   }, [albums]);
 
-  const buildArtistSummaries = (mode: ArtistBrowseMode): ArtistSummary[] => {
-    const map = new Map<string, { count: number; addedAt: string | null; albumKeys: Set<string>; samplePath: string }>();
-    for (const t of allTracks) {
-      const artist = artistNameForTrack(t, mode);
-      if (!artist) continue;
+  const artistSummaries = useMemo(() => {
+    const allMap = new Map<string, { count: number; addedAt: string | null; albumKeys: Set<string>; samplePath: string }>();
+    const albumMap = new Map<string, { count: number; addedAt: string | null; albumKeys: Set<string>; samplePath: string }>();
+
+    const updateSummaryMap = (
+      map: Map<string, { count: number; addedAt: string | null; albumKeys: Set<string>; samplePath: string }>,
+      artist: string | null,
+      track: Track,
+      albumKeyValue: string | null,
+    ) => {
+      if (!artist) return;
       const existing = map.get(artist);
-      const albumKeyValue = trackAlbumKey(t);
       if (existing) {
         existing.count += 1;
         if (albumKeyValue) {
           existing.albumKeys.add(albumKeyValue);
         }
-        if (t.added_at && (!existing.addedAt || t.added_at > existing.addedAt)) {
-          existing.addedAt = t.added_at;
+        if (track.added_at && (!existing.addedAt || track.added_at > existing.addedAt)) {
+          existing.addedAt = track.added_at;
         }
-      } else {
-        map.set(artist, {
-          count: 1,
-          addedAt: t.added_at ?? null,
-          albumKeys: new Set(albumKeyValue ? [albumKeyValue] : []),
-          samplePath: t.path,
-        });
+        return;
       }
+
+      map.set(artist, {
+        count: 1,
+        addedAt: track.added_at ?? null,
+        albumKeys: new Set(albumKeyValue ? [albumKeyValue] : []),
+        samplePath: track.path,
+      });
+    };
+
+    for (const track of allTracks) {
+      const albumKeyValue = trackAlbumKey(track);
+      updateSummaryMap(allMap, artistNameForTrack(track, 'all'), track, albumKeyValue);
+      updateSummaryMap(albumMap, artistNameForTrack(track, 'album'), track, albumKeyValue);
     }
-    return Array.from(map.entries()).map(([artist, meta]) => ({
-      artist,
-      count: meta.count,
-      albumCount: meta.albumKeys.size,
-      samplePath: meta.samplePath,
-      addedAt: meta.addedAt,
-    }));
-  };
-  const allArtists = useMemo<ArtistSummary[]>(() => buildArtistSummaries('all'), [allTracks]);
-  const albumArtists = useMemo<ArtistSummary[]>(() => buildArtistSummaries('album'), [allTracks]);
+
+    const toSummaries = (
+      map: Map<string, { count: number; addedAt: string | null; albumKeys: Set<string>; samplePath: string }>,
+    ): ArtistSummary[] =>
+      Array.from(map.entries()).map(([artist, meta]) => ({
+        artist,
+        count: meta.count,
+        albumCount: meta.albumKeys.size,
+        samplePath: meta.samplePath,
+        addedAt: meta.addedAt,
+      }));
+
+    return {
+      all: toSummaries(allMap),
+      album: toSummaries(albumMap),
+    };
+  }, [allTracks]);
+  const allArtists = artistSummaries.all;
+  const albumArtists = artistSummaries.album;
   const artists = artistBrowseMode === 'album' ? albumArtists : allArtists;
   const filteredArtists = useMemo(() => {
     if (!artistSearch.trim()) return artists;
@@ -4707,6 +4762,8 @@ function TracksView({
                     trackPath={track.path}
                     fallback={(track.album ?? track.title)[0]?.toUpperCase() ?? '♪'}
                     size="md"
+                    imageMode="deferred"
+                    lazyLoad
                   />
                   <button className="track-row-main" onClick={() => onPlay(track)}>
                     <span className="track-index">
@@ -5647,12 +5704,14 @@ function AlbumsView({
         <div className="card-grid">
           {albums.map((a) => (
             <div key={a.key} className="card-wrap">
-              <button className="card" onClick={() => onSelect(a.key)}>
-                <Cover
-                  trackPath={a.samplePath}
-                  fallback={a.album[0]?.toUpperCase() ?? '◉'}
-                  size="card"
-                />
+                <button className="card" onClick={() => onSelect(a.key)}>
+                  <Cover
+                    trackPath={a.samplePath}
+                    fallback={a.album[0]?.toUpperCase() ?? '◉'}
+                    size="card"
+                    imageMode="deferred"
+                    lazyLoad
+                  />
                 <div className="card-title">{a.album}</div>
                 <div className="card-sub">{a.artist ?? 'Various artists'}</div>
                 <div className="card-meta">{a.count} tracks</div>
@@ -5695,10 +5754,17 @@ interface CoverProps {
   trackPath: string | null;
   fallback: string;
   size: 'md' | 'card' | 'hero' | 'queue' | 'mini';
+  imageMode?: 'default' | 'cache_only' | 'deferred';
+  lazyLoad?: boolean;
 }
 
-function Cover({ trackPath, fallback, size }: CoverProps) {
-  const url = useCoverArt(trackPath);
+function Cover({ trackPath, fallback, size, imageMode = 'default', lazyLoad = false }: CoverProps) {
+  const { ref, isNearViewport } = useNearViewport(lazyLoad);
+  const url = useCoverArt(trackPath, {
+    cacheOnly: imageMode === 'cache_only',
+    defer: imageMode === 'deferred',
+    enabled: isNearViewport,
+  });
   const className =
     size === 'hero'
       ? 'cover-hero'
@@ -5712,13 +5778,17 @@ function Cover({ trackPath, fallback, size }: CoverProps) {
 
   if (url) {
     return (
-      <div className={className}>
+      <div className={className} ref={ref}>
         <img src={url} alt="" className="cover-img" />
       </div>
     );
   }
 
-  return <div className={className}>{fallback}</div>;
+  return (
+    <div className={className} ref={ref}>
+      {fallback}
+    </div>
+  );
 }
 
 interface ArtistAvatarProps {
@@ -5726,11 +5796,27 @@ interface ArtistAvatarProps {
   size: 'sm' | 'lg' | 'hero';
   urlOverride?: string | null;
   fallbackTrackPath?: string | null;
+  imageMode?: 'default' | 'cache_only';
+  lazyLoad?: boolean;
 }
 
-function ArtistAvatar({ name, size, urlOverride, fallbackTrackPath }: ArtistAvatarProps) {
-  const { url } = useArtistImage(urlOverride === undefined ? name : null);
-  const fallbackArtworkUrl = useCoverArt(fallbackTrackPath ?? null);
+function ArtistAvatar({
+  name,
+  size,
+  urlOverride,
+  fallbackTrackPath,
+  imageMode = 'default',
+  lazyLoad = false,
+}: ArtistAvatarProps) {
+  const { ref, isNearViewport } = useNearViewport(lazyLoad);
+  const { url } = useArtistImage(urlOverride === undefined ? name : null, {
+    cacheOnly: imageMode === 'cache_only',
+    enabled: isNearViewport,
+  });
+  const fallbackArtworkUrl = useCoverArt(fallbackTrackPath ?? null, {
+    cacheOnly: imageMode === 'cache_only',
+    enabled: isNearViewport,
+  });
   const resolvedUrl = urlOverride ?? url;
   const [imageFailed, setImageFailed] = useState(false);
   const [fallbackFailed, setFallbackFailed] = useState(false);
@@ -5750,7 +5836,7 @@ function ArtistAvatar({ name, size, urlOverride, fallbackTrackPath }: ArtistAvat
 
   if (displayUrl) {
     return (
-      <div className={className}>
+      <div className={className} ref={ref}>
         <img
           src={displayUrl}
           alt=""
@@ -5768,7 +5854,11 @@ function ArtistAvatar({ name, size, urlOverride, fallbackTrackPath }: ArtistAvat
     );
   }
 
-  return <div className={className}>{initial}</div>;
+  return (
+    <div className={className} ref={ref}>
+      {initial}
+    </div>
+  );
 }
 
 interface ArtistsViewProps {
@@ -5888,7 +5978,13 @@ function ArtistsView({
         <div className="artist-row artist-browser-grid">
           {artists.map((artist) => (
             <button key={artist.artist} className="artist-tile artist-browser-tile" onClick={() => onSelect(artist.artist)}>
-              <ArtistAvatar name={artist.artist} size="lg" fallbackTrackPath={artist.samplePath} />
+              <ArtistAvatar
+                name={artist.artist}
+                size="lg"
+                fallbackTrackPath={artist.samplePath}
+                imageMode="cache_only"
+                lazyLoad
+              />
               <div className="artist-tile-name">{artist.artist}</div>
               <div className="artist-tile-meta">{formatArtistCounts(artist.albumCount, artist.count)}</div>
             </button>
@@ -5898,7 +5994,13 @@ function ArtistsView({
         <div className="list">
           {artists.map((artist) => (
             <button key={artist.artist} className="list-row" onClick={() => onSelect(artist.artist)}>
-              <ArtistAvatar name={artist.artist} size="sm" fallbackTrackPath={artist.samplePath} />
+              <ArtistAvatar
+                name={artist.artist}
+                size="sm"
+                fallbackTrackPath={artist.samplePath}
+                imageMode="cache_only"
+                lazyLoad
+              />
               <div className="list-main">
                 <div className="list-title">{artist.artist}</div>
                 <div className="list-sub">{formatArtistCounts(artist.albumCount, artist.count)}</div>
@@ -6363,6 +6465,8 @@ function DashboardView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
+                    imageMode="deferred"
+                    lazyLoad
                   />
                   <div className="card-title">{a.album}</div>
                   <div className="card-sub">{a.artist ?? 'Various artists'}</div>
@@ -6455,6 +6559,8 @@ function DashboardView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
+                    imageMode="deferred"
+                    lazyLoad
                   />
                   <div className="card-title">{a.album}</div>
                   <div className="card-sub">{a.artist ?? 'Various artists'}</div>
@@ -6506,7 +6612,7 @@ function DashboardView({
                   className="artist-tile"
                   onClick={() => onOpenArtist(a.artist)}
                 >
-                  <ArtistAvatar name={a.artist} size="lg" />
+                  <ArtistAvatar name={a.artist} size="lg" imageMode="cache_only" lazyLoad />
                   <div className="artist-tile-name">{a.artist}</div>
                   <div className="artist-tile-meta">{a.count} tracks</div>
                 </button>
@@ -6542,7 +6648,13 @@ function DashboardView({
         <div className="quick-list">
           {quickPicks.map((t) => (
             <button key={t.id} className="quick-item" onClick={() => onPlay(t)}>
-              <Cover trackPath={t.path} fallback={t.title[0]?.toUpperCase() ?? '♪'} size="md" />
+              <Cover
+                trackPath={t.path}
+                fallback={t.title[0]?.toUpperCase() ?? '♪'}
+                size="md"
+                imageMode="deferred"
+                lazyLoad
+              />
               <div className="quick-meta">
                 <div className="quick-title">{t.title}</div>
                 <div className="quick-sub">

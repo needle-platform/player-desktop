@@ -114,6 +114,9 @@ export type ArtistGender = 'female' | 'male' | 'non_binary' | 'other' | 'not_app
 export const getArtistImage = (name: string) =>
   invoke<ArtistImage | null>('get_artist_image', { name });
 
+export const peekArtistImage = (name: string) =>
+  invoke<ArtistImage | null>('peek_artist_image', { name });
+
 export const refreshArtistImage = (name: string) =>
   invoke<ArtistImage | null>('refresh_artist_image', { name });
 

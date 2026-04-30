@@ -50,6 +50,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
   - sidecar files first: `cover.{jpg,png,webp}`, `folder.*`, `front.*`, `album.*`, `albumart.*`, `artwork.*`
   - falls back to embedded artwork via `lofty`
   - cached in-memory on the frontend
+  - broad browsing surfaces now prefer throttled / deferred cover loading so Albums, Tracks, and Dashboard stay responsive even in large libraries
 
 ### Playlists
 - **Sidebar Playlists section** with saved playlists and smart playlists
@@ -73,11 +74,13 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - Cached in SQLite (`artist_info`) for 90 days on successful lookups, while empty misses expire quickly so transient upstream failures do not stick around for months
 - **Artist-page recovery tools** are hidden behind a right-click menu on the hero portrait for Refresh photo / Refresh bio, with loading feedback during background refreshes
 - **Graceful artwork fallback** uses the artist's album art across the artist page and Artists browser before falling back to a gradient initial when no portrait loads
+- **Artists browser performance** favors cached portraits and lazy offscreen loading so large artist grids feel fast without hammering remote lookups up front
 
 ### Views
 - **Dashboard** (default landing screen)
 - **Tracks** with live search, sorting, and filters for artist / genre / year range, plus album / artist / playlist context
 - **Albums** with cover art, sorting, and direct playlist actions
+- **Large library browsers** lazily load offscreen covers / portraits and stage media work near the viewport instead of trying to resolve every image at once
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
 - **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
 - **Settings** with theme switcher, custom accent color, library folders, maintenance, live equalizer presets, and manual 10-band EQ

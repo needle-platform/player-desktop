@@ -1,29 +1,59 @@
 import { useEffect, useState } from 'react';
-import { getArtistImage, refreshArtistImage } from './tauri';
+import { getArtistImage, peekArtistImage, refreshArtistImage } from './tauri';
 
-const cache = new Map<string, string | null>();
-const inflight = new Map<string, Promise<string | null>>();
+const fullCache = new Map<string, string | null>();
+const fullInflight = new Map<string, Promise<string | null>>();
+const peekCache = new Map<string, string | null>();
+const peekInflight = new Map<string, Promise<string | null>>();
+
+const seedArtistImageCaches = (name: string, url: string | null) => {
+  fullCache.set(name, url);
+  peekCache.set(name, url);
+};
 
 const fetchOnce = (name: string): Promise<string | null> => {
-  if (cache.has(name)) return Promise.resolve(cache.get(name) ?? null);
-  const existing = inflight.get(name);
+  if (fullCache.has(name)) return Promise.resolve(fullCache.get(name) ?? null);
+  const existing = fullInflight.get(name);
   if (existing) return existing;
 
   const promise = (async () => {
     try {
       const result = await getArtistImage(name);
       const url = result?.url ?? null;
-      cache.set(name, url);
+      seedArtistImageCaches(name, url);
       return url;
     } catch {
-      cache.set(name, null);
+      fullCache.set(name, null);
       return null;
     } finally {
-      inflight.delete(name);
+      fullInflight.delete(name);
     }
   })();
 
-  inflight.set(name, promise);
+  fullInflight.set(name, promise);
+  return promise;
+};
+
+const peekOnce = (name: string): Promise<string | null> => {
+  if (peekCache.has(name)) return Promise.resolve(peekCache.get(name) ?? null);
+  const existing = peekInflight.get(name);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    try {
+      const result = await peekArtistImage(name);
+      const url = result?.url ?? null;
+      peekCache.set(name, url);
+      return url;
+    } catch {
+      peekCache.set(name, null);
+      return null;
+    } finally {
+      peekInflight.delete(name);
+    }
+  })();
+
+  peekInflight.set(name, promise);
   return promise;
 };
 
@@ -34,7 +64,18 @@ export interface ArtistImageState {
   retry: () => Promise<void>;
 }
 
-export function useArtistImage(name: string | null | undefined): ArtistImageState {
+interface UseArtistImageOptions {
+  cacheOnly?: boolean;
+  enabled?: boolean;
+}
+
+export function useArtistImage(
+  name: string | null | undefined,
+  options?: UseArtistImageOptions,
+): ArtistImageState {
+  const cacheOnly = options?.cacheOnly === true;
+  const enabled = options?.enabled !== false;
+  const cache = cacheOnly ? peekCache : fullCache;
   const [state, setState] = useState<Omit<ArtistImageState, 'retry'>>(() => {
     if (!name) return { url: null, loading: false, retrying: false };
     if (cache.has(name)) {
@@ -54,26 +95,33 @@ export function useArtistImage(name: string | null | undefined): ArtistImageStat
       return;
     }
 
+    if (!enabled) {
+      setState({ url: null, loading: false, retrying: false });
+      return;
+    }
+
     let cancelled = false;
     setState((current) => ({ url: current.url, loading: true, retrying: false }));
-    void fetchOnce(name).then((value) => {
+    void (cacheOnly ? peekOnce(name) : fetchOnce(name)).then((value) => {
       if (!cancelled) setState({ url: value, loading: false, retrying: false });
     });
 
     return () => {
       cancelled = true;
     };
-  }, [name]);
+  }, [cache, cacheOnly, enabled, name]);
 
   const retry = async () => {
     if (!name) return;
-    cache.delete(name);
-    inflight.delete(name);
+    fullCache.delete(name);
+    fullInflight.delete(name);
+    peekCache.delete(name);
+    peekInflight.delete(name);
     setState((current) => ({ ...current, loading: true, retrying: true }));
     try {
       const result = await refreshArtistImage(name);
       const url = result?.url ?? null;
-      cache.set(name, url);
+      seedArtistImageCaches(name, url);
       setState({ url, loading: false, retrying: false });
     } catch {
       setState((current) => ({ url: current.url, loading: false, retrying: false }));
