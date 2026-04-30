@@ -69,6 +69,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Artist gender enrichment** pulled from **MusicBrainz** when the artist record exposes it, giving artist-radio and other metadata-driven features a useful extra signal for solo acts
 - **Artist photo fallback chain** now checks direct MusicBrainz image relations, Wikidata `P18`, and finally the linked Wikipedia page image when available
 - **Artist info fallback chain** now keeps MusicBrainz gender whenever available, prefers Wikipedia summaries for bios, falls back to Wikidata descriptions when needed, and avoids wiping a previously good portrait or bio on a failed manual refresh
+- **Collaboration artist credits** such as `Artist A & Artist B` now fall back to individual credited artists when the combined string does not exist as a standalone MusicBrainz artist
 - No API keys required; polite User-Agent + 1 req/sec serialization
 - Cached in SQLite (`artist_images`) for 30 days, including misses so we don't keep hammering the API
 - Cached in SQLite (`artist_info`) for 90 days on successful lookups, while empty misses expire quickly so transient upstream failures do not stick around for months
@@ -88,7 +89,9 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
 - Artist-aware album matching improves lookups for releases with ambiguous or very common titles
+- Collaboration credits on album artists now try split candidates as well, so releases like `Artist A & Orchestra B` can still resolve to the correct MusicBrainz release group
 - Subtitle-aware fallback matching now also trims common edition markers after separators like `:` / `-`, helping releases such as anthology or deluxe variants resolve to the parent album article when MusicBrainz groups them that way
+- When a release group has no linked Wikipedia or Wikidata page, Needle now falls back to a simple factual note from MusicBrainz itself instead of leaving the album page blank
 - Cached in SQLite (`album_info`) so repeat opens are instant and we avoid repeat lookups
 - **Album page genres** are derived from the imported track tags already embedded in your files
 - **Primary genre override** lets you set a local album-level genre Needle should prefer for browsing, filtering, and smart-playlist logic without rewriting the source files
@@ -135,8 +138,8 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - `src-tauri/src/lib.rs` — Tauri command surface, app setup, and native external-URL opening
 - `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, saved playlists, artist-image cache, artist-info cache, album-info cache, album primary-genre overrides
 - `src-tauri/src/library.rs` — folder scanner, dotfile filter, metadata via `lofty`
-- `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup with Wikipedia image fallback + Wikipedia-backed artist biography lookup
-- `src-tauri/src/album.rs` — MusicBrainz → Wikidata → Wikipedia album lookup
+- `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup with Wikipedia image fallback, Wikipedia-backed artist biography lookup, and collaboration-credit fallback matching
+- `src-tauri/src/album.rs` — MusicBrainz → Wikidata → Wikipedia album lookup with collaboration-credit matching and MusicBrainz factual fallback when no article is linked
 - `src-tauri/src/mpv.rs` — IPC controller, spawns mpv with `--no-video --idle=yes`
 
 ## Requirements

@@ -114,6 +114,52 @@ fn normalized_artist_name(value: &str) -> String {
     normalized.trim().to_string()
 }
 
+fn collaboration_artist_candidates(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let separators = [
+        " feat. ",
+        " featuring ",
+        " ft. ",
+        " with ",
+        " & ",
+        " and ",
+        " x ",
+        " × ",
+        ";",
+        ",",
+    ];
+
+    let mut seen = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::from([trimmed.to_string()]);
+    let mut candidates = Vec::new();
+
+    while let Some(candidate) = queue.pop_front() {
+        let normalized = candidate.trim().to_string();
+        if normalized.is_empty() || !seen.insert(normalized.to_ascii_lowercase()) {
+            continue;
+        }
+        candidates.push(normalized.clone());
+
+        for separator in separators {
+            if !normalized.to_ascii_lowercase().contains(separator.trim()) {
+                continue;
+            }
+            for part in normalized.split(separator) {
+                let part = part.trim();
+                if !part.is_empty() {
+                    queue.push_back(part.to_string());
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
 fn artist_type_rank(value: Option<&str>) -> usize {
     match value.map(|item| item.to_ascii_lowercase()) {
         Some(item) if item == "person" => 0,
@@ -193,10 +239,10 @@ async fn lookup_artist_profile(
         return Ok(None);
     }
 
-    // Throttle MusicBrainz traffic; release before hitting other hosts.
-    let mbid = {
+    let mut mbid = None;
+    for candidate in collaboration_artist_candidates(trimmed) {
         let _permit = mb_permit().await;
-        let query = format!("artist:\"{}\"", escape_query(trimmed));
+        let query = format!("artist:\"{}\"", escape_query(&candidate));
         let url = format!(
             "https://musicbrainz.org/ws/2/artist/?query={}&fmt=json&limit=10",
             urlencoding::encode(&query)
@@ -213,10 +259,14 @@ async fn lookup_artist_profile(
             .context("musicbrainz search response invalid")?;
 
         let results = resp["artists"].as_array().cloned().unwrap_or_default();
-        let Some(matched_id) = pick_artist_id(&results, trimmed) else {
-            return Ok(None);
-        };
-        matched_id
+        if let Some(matched_id) = pick_artist_id(&results, &candidate) {
+            mbid = Some(matched_id);
+            break;
+        }
+    }
+
+    let Some(mbid) = mbid else {
+        return Ok(None);
     };
 
     let profile = {
@@ -684,6 +734,25 @@ mod tests {
         assert_eq!(
             ArtistGender::from_musicbrainz("Not applicable"),
             Some(ArtistGender::NotApplicable)
+        );
+    }
+
+    #[test]
+    fn splits_collaboration_artist_candidates() {
+        assert_eq!(
+            collaboration_artist_candidates("Tata Bojs & SOČR"),
+            vec!["Tata Bojs & SOČR", "Tata Bojs", "SOČR"]
+        );
+        assert_eq!(
+            collaboration_artist_candidates("Black Coffee & DJ Angelo feat. Jinadu"),
+            vec![
+                "Black Coffee & DJ Angelo feat. Jinadu",
+                "Black Coffee & DJ Angelo",
+                "Jinadu",
+                "Black Coffee",
+                "DJ Angelo feat. Jinadu",
+                "DJ Angelo",
+            ]
         );
     }
 }

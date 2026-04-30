@@ -42,6 +42,131 @@ fn normalized_title(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
+fn collaboration_artist_candidates(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let separators = [
+        " feat. ",
+        " featuring ",
+        " ft. ",
+        " with ",
+        " & ",
+        " and ",
+        " x ",
+        " × ",
+        ";",
+        ",",
+    ];
+
+    let mut seen = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::from([trimmed.to_string()]);
+    let mut candidates = Vec::new();
+
+    while let Some(candidate) = queue.pop_front() {
+        let normalized = candidate.trim().to_string();
+        if normalized.is_empty() || !seen.insert(normalized.to_ascii_lowercase()) {
+            continue;
+        }
+        candidates.push(normalized.clone());
+
+        for separator in separators {
+            if !normalized.to_ascii_lowercase().contains(separator.trim()) {
+                continue;
+            }
+            for part in normalized.split(separator) {
+                let part = part.trim();
+                if !part.is_empty() {
+                    queue.push_back(part.to_string());
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
+fn release_group_artist_credit(value: &Value) -> Option<String> {
+    let credits = value["artist-credit"].as_array()?;
+    let mut combined = String::new();
+
+    for credit in credits {
+        let name = credit["name"]
+            .as_str()
+            .or_else(|| credit["artist"]["name"].as_str())?;
+        combined.push_str(name);
+        if let Some(joinphrase) = credit["joinphrase"].as_str() {
+            combined.push_str(joinphrase);
+        }
+    }
+
+    let combined = combined.trim();
+    if combined.is_empty() {
+        None
+    } else {
+        Some(combined.to_string())
+    }
+}
+
+fn release_group_kind(value: &Value) -> &'static str {
+    let is_live = value["secondary-types"]
+        .as_array()
+        .map(|types| {
+            types
+                .iter()
+                .filter_map(|item| item.as_str())
+                .any(|item| item.eq_ignore_ascii_case("live"))
+        })
+        .unwrap_or(false);
+
+    match value["primary-type"].as_str() {
+        Some(primary) if primary.eq_ignore_ascii_case("album") && is_live => "live album",
+        Some(primary) if primary.eq_ignore_ascii_case("ep") && is_live => "live EP",
+        Some(primary) if primary.eq_ignore_ascii_case("single") && is_live => "live single",
+        Some(primary) if primary.eq_ignore_ascii_case("album") => "album",
+        Some(primary) if primary.eq_ignore_ascii_case("ep") => "EP",
+        Some(primary) if primary.eq_ignore_ascii_case("single") => "single",
+        Some(primary) if primary.eq_ignore_ascii_case("compilation") => "compilation",
+        Some(primary) if primary.eq_ignore_ascii_case("soundtrack") => "soundtrack",
+        Some(_) if is_live => "live release",
+        Some(_) => "release",
+        None if is_live => "live release",
+        None => "release",
+    }
+}
+
+fn musicbrainz_fallback_info(value: &Value) -> Option<AlbumInfo> {
+    let title = value["title"].as_str()?.trim();
+    if title.is_empty() {
+        return None;
+    }
+
+    let kind = release_group_kind(value);
+    let artist_credit = release_group_artist_credit(value);
+    let release_year = value["first-release-date"]
+        .as_str()
+        .and_then(|date| date.get(..4))
+        .filter(|year| year.chars().all(|ch| ch.is_ascii_digit()));
+    let mbid = value["id"].as_str()?.trim();
+
+    let description = match (artist_credit.as_deref(), release_year) {
+        (Some(artist), Some(year)) => {
+            format!("{title} is a {kind} by {artist}, first released in {year}.")
+        }
+        (Some(artist), None) => format!("{title} is a {kind} by {artist}."),
+        (None, Some(year)) => format!("{title} is a {kind}, first released in {year}."),
+        (None, None) => format!("{title} is a {kind}."),
+    };
+
+    Some(AlbumInfo {
+        description: Some(description),
+        source_url: Some(format!("https://musicbrainz.org/release-group/{mbid}")),
+        source: "musicbrainz".into(),
+    })
+}
+
 fn release_group_type_rank(primary_type: Option<&str>) -> usize {
     match primary_type.map(|value| value.to_ascii_lowercase()) {
         Some(value) if value == "album" => 0,
@@ -177,19 +302,29 @@ pub async fn fetch_album_info(album: &str, artist: Option<&str>) -> Result<Optio
     }
 
     let client = http_client()?;
+    let artist_candidates = match artist {
+        Some(value) if !value.trim().is_empty() => collaboration_artist_candidates(value),
+        _ => Vec::new(),
+    };
 
     for album in titles {
-        // 1) Search MusicBrainz release-group for "album" + optional "artist".
-        let query = match artist {
-            Some(artist) if !artist.trim().is_empty() => format!(
-                "releasegroup:\"{}\" AND artist:\"{}\"",
-                escape_query(&album),
-                escape_query(artist.trim())
-            ),
-            _ => format!("releasegroup:\"{}\"", escape_query(&album)),
-        };
+        let mut queries = Vec::new();
+        if artist_candidates.is_empty() {
+            queries.push(format!("releasegroup:\"{}\"", escape_query(&album)));
+        } else {
+            for candidate in &artist_candidates {
+                queries.push(format!(
+                    "releasegroup:\"{}\" AND artist:\"{}\"",
+                    escape_query(&album),
+                    escape_query(candidate)
+                ));
+            }
+            queries.push(format!("releasegroup:\"{}\"", escape_query(&album)));
+        }
 
-        let mbid = {
+        let mut mbid = None;
+        let mut matched_group = None;
+        for query in queries {
             let _permit = mb_permit().await;
             let url = format!(
                 "https://musicbrainz.org/ws/2/release-group/?query={}&fmt=json&limit=5",
@@ -210,10 +345,18 @@ pub async fn fetch_album_info(album: &str, artist: Option<&str>) -> Result<Optio
                 .as_array()
                 .cloned()
                 .unwrap_or_default();
-            let Some(id) = pick_release_group_id(&groups, &album) else {
-                continue;
-            };
-            id
+            if let Some(id) = pick_release_group_id(&groups, &album) {
+                matched_group = groups
+                    .iter()
+                    .find(|group| group["id"].as_str() == Some(id.as_str()))
+                    .cloned();
+                mbid = Some(id);
+                break;
+            }
+        }
+
+        let Some(mbid) = mbid else {
+            continue;
         };
 
         // 2) Fetch the release-group with url-rels so we can find Wikipedia / Wikidata.
@@ -264,27 +407,26 @@ pub async fn fetch_album_info(album: &str, artist: Option<&str>) -> Result<Optio
                     None
                 }
             });
-            let Some(qid) = qid.filter(|q| q.starts_with('Q')) else {
-                continue;
-            };
-            let url = format!(
-                "https://www.wikidata.org/wiki/Special:EntityData/{}.json",
-                qid
-            );
-            let resp: Value = client
-                .get(&url)
-                .send()
-                .await
-                .context("Wikidata lookup failed")?
-                .error_for_status()
-                .context("Wikidata non-2xx")?
-                .json()
-                .await
-                .context("Wikidata invalid JSON")?;
-            wikipedia_title = resp
-                .pointer(&format!("/entities/{}/sitelinks/enwiki/title", qid))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            if let Some(qid) = qid.filter(|q| q.starts_with('Q')) {
+                let url = format!(
+                    "https://www.wikidata.org/wiki/Special:EntityData/{}.json",
+                    qid
+                );
+                let resp: Value = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .context("Wikidata lookup failed")?
+                    .error_for_status()
+                    .context("Wikidata non-2xx")?
+                    .json()
+                    .await
+                    .context("Wikidata invalid JSON")?;
+                wikipedia_title = resp
+                    .pointer(&format!("/entities/{}/sitelinks/enwiki/title", qid))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            }
         }
 
         // 5) Fetch Wikipedia summary if we found a title.
@@ -319,6 +461,10 @@ pub async fn fetch_album_info(album: &str, artist: Option<&str>) -> Result<Optio
                 }));
             }
         }
+
+        if let Some(group) = matched_group.as_ref().and_then(musicbrainz_fallback_info) {
+            return Ok(Some(group));
+        }
     }
 
     Ok(None)
@@ -326,7 +472,10 @@ pub async fn fetch_album_info(album: &str, artist: Option<&str>) -> Result<Optio
 
 #[cfg(test)]
 mod tests {
-    use super::{lookup_title_candidates, pick_release_group_id};
+    use super::{
+        collaboration_artist_candidates, lookup_title_candidates, musicbrainz_fallback_info,
+        pick_release_group_id,
+    };
     use serde_json::json;
 
     #[test]
@@ -386,5 +535,39 @@ mod tests {
             pick_release_group_id(&results, "She Wolf"),
             Some("album-id".to_string())
         );
+    }
+
+    #[test]
+    fn splits_collaboration_artist_candidates() {
+        assert_eq!(
+            collaboration_artist_candidates("Tata Bojs & SOČR"),
+            vec!["Tata Bojs & SOČR", "Tata Bojs", "SOČR"]
+        );
+    }
+
+    #[test]
+    fn builds_musicbrainz_fallback_info() {
+        let info = musicbrainz_fallback_info(&json!({
+            "id": "7f304b30-114c-4020-887a-3d43c59233d2",
+            "title": "Live",
+            "first-release-date": "2017-05-26",
+            "primary-type": "Album",
+            "secondary-types": ["Live"],
+            "artist-credit": [
+                { "name": "Tata Bojs", "joinphrase": " & " },
+                { "name": "SOČR" }
+            ]
+        }))
+        .expect("fallback info");
+
+        assert_eq!(
+            info.description.as_deref(),
+            Some("Live is a live album by Tata Bojs & SOČR, first released in 2017.")
+        );
+        assert_eq!(
+            info.source_url.as_deref(),
+            Some("https://musicbrainz.org/release-group/7f304b30-114c-4020-887a-3d43c59233d2")
+        );
+        assert_eq!(info.source, "musicbrainz");
     }
 }

@@ -534,7 +534,8 @@ async fn peek_artist_image(
         return Ok(None);
     }
 
-    let cached = db::get_artist_image(&state.db_path, &trimmed).map_err(|error| error.to_string())?;
+    let cached =
+        db::get_artist_image(&state.db_path, &trimmed).map_err(|error| error.to_string())?;
     Ok(cached.flatten().map(|url| artist::ArtistImage {
         url,
         source: "cache".into(),
