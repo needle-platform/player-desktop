@@ -109,6 +109,8 @@ export interface ArtistImage {
   source: string;
 }
 
+export type ArtistGender = 'female' | 'male' | 'non_binary' | 'other' | 'not_applicable';
+
 export const getArtistImage = (name: string) =>
   invoke<ArtistImage | null>('get_artist_image', { name });
 
@@ -118,6 +120,7 @@ export const refreshArtistImage = (name: string) =>
 export interface ArtistInfo {
   description: string | null;
   source_url: string | null;
+  gender: ArtistGender | null;
   source: string;
 }
 

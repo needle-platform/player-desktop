@@ -223,6 +223,7 @@ const miniPlayerBaseSize = { width: 380, height: 420 };
 const miniPlayerExpandedHeightDefault = 772;
 const miniPlayerExpandedHeightMin = 720;
 const miniPlayerExpandedHeightMax = 980;
+const isDevBuild = import.meta.env.DEV;
 
 const formatDuration = (seconds: number | null | undefined) => {
   if (!seconds || seconds <= 0) return '—';
@@ -250,6 +251,13 @@ const formatTrackYearRange = (start: TrackYearBoundaryFilter, end: TrackYearBoun
   if (start !== allTrackFilterValue) return `From ${start}`;
   if (end !== allTrackFilterValue) return `Up to ${end}`;
   return null;
+};
+const formatArtistGenderLabel = (value: string | null | undefined) => {
+  if (!value) return 'unknown';
+  return value
+    .split('_')
+    .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
+    .join(' ');
 };
 
 const formatQuality = (track: Track) => {
@@ -5359,6 +5367,9 @@ function ArtistDetailView({
               .filter(Boolean)
               .join(' · ')}
           </div>
+          {isDevBuild && (
+            <div className="artist-debug-line">Debug · MusicBrainz gender: {formatArtistGenderLabel(info?.gender)}</div>
+          )}
           <div className="album-hero-actions">
             <button className="primary-button" onClick={onPlayArtist}>
               ⤮ Shuffle artist

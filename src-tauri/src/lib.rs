@@ -534,7 +534,9 @@ async fn refresh_artist_image(
         return Ok(None);
     }
 
-    let _ = db::delete_artist_image(&state.db_path, &trimmed);
+    let existing = db::get_artist_image(&state.db_path, &trimmed)
+        .map_err(|error| error.to_string())?
+        .flatten();
 
     match artist::fetch_artist_image(&trimmed).await {
         Ok(Some(image)) => {
@@ -542,10 +544,24 @@ async fn refresh_artist_image(
             Ok(Some(image))
         }
         Ok(None) => {
+            if let Some(url) = existing {
+                return Ok(Some(artist::ArtistImage {
+                    url,
+                    source: "cache".into(),
+                }));
+            }
             let _ = db::cache_artist_image(&state.db_path, &trimmed, None);
             Ok(None)
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => {
+            if let Some(url) = existing {
+                return Ok(Some(artist::ArtistImage {
+                    url,
+                    source: "cache".into(),
+                }));
+            }
+            Err(error.to_string())
+        }
     }
 }
 
@@ -565,6 +581,7 @@ async fn get_artist_info(
         return Ok(cached.map(|info| artist::ArtistInfo {
             description: info.description,
             source_url: info.source_url,
+            gender: info.gender,
             source: "cache".into(),
         }));
     }
@@ -574,6 +591,7 @@ async fn get_artist_info(
             let cached = db::CachedArtistInfo {
                 description: info.description.clone(),
                 source_url: info.source_url.clone(),
+                gender: info.gender,
             };
             let _ = db::cache_artist_info(&state.db_path, &trimmed, Some(&cached));
             Ok(Some(info))
@@ -596,22 +614,53 @@ async fn refresh_artist_info(
         return Ok(None);
     }
 
-    let _ = db::delete_artist_info(&state.db_path, &trimmed);
+    let existing = db::get_artist_info(&state.db_path, &trimmed)
+        .map_err(|error| error.to_string())?
+        .flatten();
 
     match artist::fetch_artist_info(&trimmed).await {
         Ok(Some(info)) => {
+            let merged = if let Some(existing) = existing {
+                artist::ArtistInfo {
+                    description: info.description.or(existing.description),
+                    source_url: info.source_url.or(existing.source_url),
+                    gender: info.gender.or(existing.gender),
+                    source: info.source,
+                }
+            } else {
+                info
+            };
             let cached = db::CachedArtistInfo {
-                description: info.description.clone(),
-                source_url: info.source_url.clone(),
+                description: merged.description.clone(),
+                source_url: merged.source_url.clone(),
+                gender: merged.gender,
             };
             let _ = db::cache_artist_info(&state.db_path, &trimmed, Some(&cached));
-            Ok(Some(info))
+            Ok(Some(merged))
         }
         Ok(None) => {
+            if let Some(existing) = existing {
+                return Ok(Some(artist::ArtistInfo {
+                    description: existing.description,
+                    source_url: existing.source_url,
+                    gender: existing.gender,
+                    source: "cache".into(),
+                }));
+            }
             let _ = db::cache_artist_info(&state.db_path, &trimmed, None);
             Ok(None)
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => {
+            if let Some(existing) = existing {
+                return Ok(Some(artist::ArtistInfo {
+                    description: existing.description,
+                    source_url: existing.source_url,
+                    gender: existing.gender,
+                    source: "cache".into(),
+                }));
+            }
+            Err(error.to_string())
+        }
     }
 }
 

@@ -65,10 +65,12 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Artist portraits & bios
 - **Artist portraits** pulled for free via **MusicBrainz → Wikidata → Wikimedia Commons**
 - **Artist biographies** pulled via **MusicBrainz → Wikidata → Wikipedia** when linked metadata is available
+- **Artist gender enrichment** pulled from **MusicBrainz** when the artist record exposes it, giving artist-radio and other metadata-driven features a useful extra signal for solo acts
 - **Artist photo fallback chain** now checks direct MusicBrainz image relations, Wikidata `P18`, and finally the linked Wikipedia page image when available
+- **Artist info fallback chain** now keeps MusicBrainz gender whenever available, prefers Wikipedia summaries for bios, falls back to Wikidata descriptions when needed, and avoids wiping a previously good portrait or bio on a failed manual refresh
 - No API keys required; polite User-Agent + 1 req/sec serialization
 - Cached in SQLite (`artist_images`) for 30 days, including misses so we don't keep hammering the API
-- Cached in SQLite (`artist_info`) for 90 days, including misses, with manual retry from the artist page
+- Cached in SQLite (`artist_info`) for 90 days on successful lookups, while empty misses expire quickly so transient upstream failures do not stick around for months
 - **Artist-page recovery tools** are hidden behind a right-click menu on the hero portrait for Refresh photo / Refresh bio, with loading feedback during background refreshes
 - **Graceful artwork fallback** uses the artist's album art across the artist page and Artists browser before falling back to a gradient initial when no portrait loads
 
@@ -175,6 +177,7 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 - **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
 - **Library state** (`play_count = 0`) drives Needs a first spin
 - **Tags** and local overrides (`primary_genre`) drive one top-genre mix when your collection has a clear favorite
+- **Artist enrichment** (`gender` when MusicBrainz provides it) gives future artist-radio style mixes another optional signal without blocking playback when metadata is incomplete
 - **`added_at`** (preserved across rescans) drives the Recently added albums row
 
 Needle treats imported metadata as a starting point, not untouchable truth:
@@ -191,6 +194,7 @@ Real **BPM and key analysis** would unlock proper mood detection (energy, workou
 - Gapless playback hand-off
 - Watch folders with incremental rescans
 - Custom smart-playlist rules and editor
+- Artist radio built from local genre/style context plus MusicBrainz artist enrichment
 - Smarter sidecar handling (hidden FLAC metadata files, `.cue` sheets)
 - Proper macOS / Windows / Linux icon set
 

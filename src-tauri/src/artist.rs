@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
@@ -26,11 +26,61 @@ pub struct ArtistImage {
     pub source: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtistGender {
+    Female,
+    Male,
+    NonBinary,
+    Other,
+    NotApplicable,
+}
+
+impl ArtistGender {
+    fn from_musicbrainz(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "female" => Some(Self::Female),
+            "male" => Some(Self::Male),
+            "non-binary" | "non binary" => Some(Self::NonBinary),
+            "other" => Some(Self::Other),
+            "not applicable" | "not_applicable" => Some(Self::NotApplicable),
+            _ => None,
+        }
+    }
+
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Female => "female",
+            Self::Male => "male",
+            Self::NonBinary => "non_binary",
+            Self::Other => "other",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "female" => Some(Self::Female),
+            "male" => Some(Self::Male),
+            "non_binary" | "non-binary" => Some(Self::NonBinary),
+            "other" => Some(Self::Other),
+            "not_applicable" | "not applicable" => Some(Self::NotApplicable),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ArtistInfo {
     pub description: Option<String>,
     pub source_url: Option<String>,
+    pub gender: Option<ArtistGender>,
     pub source: String,
+}
+
+struct ArtistProfileLookup {
+    relations: Vec<Value>,
+    gender: Option<ArtistGender>,
 }
 
 fn http_client() -> Result<reqwest::Client> {
@@ -134,10 +184,10 @@ fn pick_artist_id(results: &[Value], query_name: &str) -> Option<String> {
         .map(|(_, _, _, _, id)| id)
 }
 
-async fn lookup_artist_relations(
+async fn lookup_artist_profile(
     client: &reqwest::Client,
     name: &str,
-) -> Result<Option<Vec<Value>>> {
+) -> Result<Option<ArtistProfileLookup>> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -169,7 +219,7 @@ async fn lookup_artist_relations(
         matched_id
     };
 
-    let relations: Vec<Value> = {
+    let profile = {
         let _permit = mb_permit().await;
         let url = format!(
             "https://musicbrainz.org/ws/2/artist/{}?inc=url-rels&fmt=json",
@@ -185,10 +235,15 @@ async fn lookup_artist_relations(
             .json()
             .await
             .context("musicbrainz lookup response invalid")?;
-        resp["relations"].as_array().cloned().unwrap_or_default()
+        ArtistProfileLookup {
+            relations: resp["relations"].as_array().cloned().unwrap_or_default(),
+            gender: resp["gender"]
+                .as_str()
+                .and_then(ArtistGender::from_musicbrainz),
+        }
     };
 
-    Ok(Some(relations))
+    Ok(Some(profile))
 }
 
 async fn wikipedia_title_from_relations(
@@ -248,6 +303,60 @@ async fn wikipedia_title_from_relations(
     Ok(wikipedia_title)
 }
 
+fn wikidata_qid_from_relations(relations: &[Value]) -> Option<String> {
+    relations.iter().find_map(|rel| {
+        if rel["type"] == "wikidata" {
+            rel["url"]["resource"]
+                .as_str()
+                .and_then(|url| url.rsplit('/').next())
+                .map(|value| value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+async fn wikidata_entity(client: &reqwest::Client, qid: &str) -> Result<Value> {
+    let url = format!(
+        "https://www.wikidata.org/wiki/Special:EntityData/{}.json",
+        qid
+    );
+    client
+        .get(&url)
+        .send()
+        .await
+        .context("wikidata lookup failed")?
+        .error_for_status()
+        .context("wikidata lookup returned non-2xx")?
+        .json()
+        .await
+        .context("wikidata response invalid")
+}
+
+async fn wikidata_description_from_relations(
+    client: &reqwest::Client,
+    relations: &[Value],
+) -> Result<Option<String>> {
+    let Some(qid) = wikidata_qid_from_relations(relations).filter(|value| value.starts_with('Q'))
+    else {
+        return Ok(None);
+    };
+
+    let resp = wikidata_entity(client, &qid).await?;
+    Ok(resp
+        .pointer(&format!("/entities/{}/descriptions/en/value", qid))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string()))
+}
+
+fn wikipedia_page_url(title: &str) -> String {
+    let path = title.replace(' ', "_");
+    format!(
+        "https://en.wikipedia.org/wiki/{}",
+        urlencoding::encode(&path)
+    )
+}
+
 async fn wikipedia_summary(client: &reqwest::Client, title: &str) -> Result<Value> {
     let path = title.replace(' ', "_");
     let url = format!(
@@ -266,6 +375,13 @@ async fn wikipedia_summary(client: &reqwest::Client, title: &str) -> Result<Valu
         .context("wikipedia summary invalid")
 }
 
+fn is_wikipedia_disambiguation(summary: &Value) -> bool {
+    summary["type"]
+        .as_str()
+        .map(|value| value.eq_ignore_ascii_case("disambiguation"))
+        .unwrap_or(false)
+}
+
 fn wikipedia_image_url(summary: &Value) -> Option<String> {
     summary
         .pointer("/thumbnail/source")
@@ -280,12 +396,13 @@ fn wikipedia_image_url(summary: &Value) -> Option<String> {
 
 pub async fn fetch_artist_image(name: &str) -> Result<Option<ArtistImage>> {
     let client = http_client()?;
-    let Some(relations) = lookup_artist_relations(&client, name).await? else {
+    let Some(profile) = lookup_artist_profile(&client, name).await? else {
         return Ok(None);
     };
+    let relations = &profile.relations;
 
     // 1) Direct image relation if present
-    for rel in &relations {
+    for rel in relations {
         if rel["type"] == "image" {
             if let Some(url) = rel["url"]["resource"].as_str() {
                 if let Some(commons_url) = commons_thumbnail_from_page(url) {
@@ -362,26 +479,75 @@ pub async fn fetch_artist_image(name: &str) -> Result<Option<ArtistImage>> {
 
 pub async fn fetch_artist_info(name: &str) -> Result<Option<ArtistInfo>> {
     let client = http_client()?;
-    let Some(relations) = lookup_artist_relations(&client, name).await? else {
+    let Some(profile) = lookup_artist_profile(&client, name).await? else {
         return Ok(None);
     };
-    let Some(title) = wikipedia_title_from_relations(&client, &relations).await? else {
-        return Ok(None);
-    };
+    let relation_title = wikipedia_title_from_relations(&client, &profile.relations).await?;
+    let mut titles_to_try = Vec::new();
+    if let Some(title) = relation_title.clone() {
+        titles_to_try.push(title);
+    }
+    let trimmed_name = name.trim();
+    if !trimmed_name.is_empty()
+        && !titles_to_try
+            .iter()
+            .any(|title| title.eq_ignore_ascii_case(trimmed_name))
+    {
+        titles_to_try.push(trimmed_name.to_string());
+    }
 
-    let resp = wikipedia_summary(&client, &title).await?;
+    let mut description = None;
+    let mut source_url = None;
+    let mut source = "musicbrainz";
 
-    let description = resp["extract"].as_str().map(|value| value.to_string());
-    let source_url = resp
-        .pointer("/content_urls/desktop/page")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string());
+    for title in titles_to_try {
+        let fallback_url = wikipedia_page_url(&title);
+        match wikipedia_summary(&client, &title).await {
+            Ok(resp) => {
+                if is_wikipedia_disambiguation(&resp) {
+                    continue;
+                }
 
-    if description.is_some() || source_url.is_some() {
+                description = resp["extract"].as_str().map(|value| value.to_string());
+                source_url = resp
+                    .pointer("/content_urls/desktop/page")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string())
+                    .or(Some(fallback_url));
+                source = "wikipedia";
+                break;
+            }
+            Err(error) => {
+                eprintln!(
+                    "Artist info summary lookup failed for '{}' ({}): {error:#}",
+                    name, title
+                );
+            }
+        }
+    }
+
+    if description.is_none() {
+        description = wikidata_description_from_relations(&client, &profile.relations).await?;
+        if description.is_some() {
+            source = "wikidata";
+        }
+    }
+
+    if description.is_some() || source_url.is_some() || profile.gender.is_some() {
         return Ok(Some(ArtistInfo {
             description,
             source_url,
-            source: "wikipedia".into(),
+            gender: profile.gender,
+            source: source.into(),
+        }));
+    }
+
+    if profile.gender.is_some() {
+        return Ok(Some(ArtistInfo {
+            description: None,
+            source_url: None,
+            gender: profile.gender,
+            source: "musicbrainz".into(),
         }));
     }
 
@@ -436,7 +602,10 @@ mod tests {
             }),
         ];
 
-        assert_eq!(pick_artist_id(&results, "Anna K"), Some("anna-id".to_string()));
+        assert_eq!(
+            pick_artist_id(&results, "Anna K"),
+            Some("anna-id".to_string())
+        );
     }
 
     #[test]
@@ -452,7 +621,10 @@ mod tests {
             ]
         })];
 
-        assert_eq!(pick_artist_id(&results, "Anna K"), Some("anna-id".to_string()));
+        assert_eq!(
+            pick_artist_id(&results, "Anna K"),
+            Some("anna-id".to_string())
+        );
     }
 
     #[test]
@@ -496,6 +668,22 @@ mod tests {
         assert_eq!(
             wikipedia_image_url(&summary),
             Some("https://upload.wikimedia.org/example.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn normalizes_musicbrainz_gender_values() {
+        assert_eq!(
+            ArtistGender::from_musicbrainz("Female"),
+            Some(ArtistGender::Female)
+        );
+        assert_eq!(
+            ArtistGender::from_musicbrainz("non-binary"),
+            Some(ArtistGender::NonBinary)
+        );
+        assert_eq!(
+            ArtistGender::from_musicbrainz("Not applicable"),
+            Some(ArtistGender::NotApplicable)
         );
     }
 }

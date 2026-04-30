@@ -4,6 +4,7 @@ use anyhow::Result;
 use anyhow::{anyhow, bail};
 use rusqlite::{params, Connection};
 
+use crate::artist::ArtistGender;
 use crate::models::{
     default_equalizer_bands, default_tracks_page_size, AppSettings, BootstrapPayload,
     EqualizerPreset, LibraryData, PlaybackSession, SavedPlaylist, ThemeMode, Track,
@@ -62,6 +63,7 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             name TEXT PRIMARY KEY,
             description TEXT,
             source_url TEXT,
+            gender TEXT,
             fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -124,6 +126,7 @@ pub fn init_database(db_path: &Path) -> Result<()> {
         [],
     );
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN last_played_at TEXT", []);
+    let _ = connection.execute("ALTER TABLE artist_info ADD COLUMN gender TEXT", []);
     let _ = connection.execute(
         "UPDATE tracks SET added_at = CURRENT_TIMESTAMP WHERE added_at IS NULL",
         [],
@@ -418,34 +421,46 @@ pub fn get_artist_image(db_path: &Path, name: &str) -> Result<Option<Option<Stri
     Ok(None)
 }
 
-pub fn delete_artist_image(db_path: &Path, name: &str) -> Result<()> {
-    let connection = Connection::open(db_path)?;
-    connection.execute("DELETE FROM artist_images WHERE name = ?1", params![name])?;
-    Ok(())
-}
-
 pub struct CachedArtistInfo {
     pub description: Option<String>,
     pub source_url: Option<String>,
+    pub gender: Option<ArtistGender>,
 }
 
 pub fn get_artist_info(db_path: &Path, name: &str) -> Result<Option<Option<CachedArtistInfo>>> {
     let connection = Connection::open(db_path)?;
     let mut stmt = connection.prepare(
-        "SELECT description, source_url FROM artist_info
+        "SELECT description, source_url, gender FROM artist_info
          WHERE name = ?1
-           AND datetime(fetched_at) > datetime('now', '-90 days')",
+           AND (
+                (
+                    description IS NULL
+                    AND source_url IS NULL
+                    AND gender IS NULL
+                    AND datetime(fetched_at) > datetime('now', '-6 hours')
+                )
+                OR
+                (
+                    (description IS NOT NULL OR source_url IS NOT NULL OR gender IS NOT NULL)
+                    AND datetime(fetched_at) > datetime('now', '-90 days')
+                )
+           )",
     )?;
     let mut rows = stmt.query(params![name])?;
     if let Some(row) = rows.next()? {
         let description: Option<String> = row.get(0)?;
         let source_url: Option<String> = row.get(1)?;
-        if description.is_none() && source_url.is_none() {
+        let gender = row
+            .get::<_, Option<String>>(2)?
+            .as_deref()
+            .and_then(ArtistGender::from_db_str);
+        if description.is_none() && source_url.is_none() && gender.is_none() {
             return Ok(Some(None));
         }
         return Ok(Some(Some(CachedArtistInfo {
             description,
             source_url,
+            gender,
         })));
     }
     Ok(None)
@@ -457,25 +472,24 @@ pub fn cache_artist_info(
     info: Option<&CachedArtistInfo>,
 ) -> Result<()> {
     let connection = Connection::open(db_path)?;
-    let (description, source_url) = match info {
-        Some(info) => (info.description.as_deref(), info.source_url.as_deref()),
-        None => (None, None),
+    let (description, source_url, gender) = match info {
+        Some(info) => (
+            info.description.as_deref(),
+            info.source_url.as_deref(),
+            info.gender.map(ArtistGender::as_db_str),
+        ),
+        None => (None, None, None),
     };
     connection.execute(
-        "INSERT INTO artist_info (name, description, source_url, fetched_at)
-         VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+        "INSERT INTO artist_info (name, description, source_url, gender, fetched_at)
+         VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
          ON CONFLICT(name) DO UPDATE SET
             description = excluded.description,
             source_url = excluded.source_url,
+            gender = excluded.gender,
             fetched_at = excluded.fetched_at",
-        params![name, description, source_url],
+        params![name, description, source_url, gender],
     )?;
-    Ok(())
-}
-
-pub fn delete_artist_info(db_path: &Path, name: &str) -> Result<()> {
-    let connection = Connection::open(db_path)?;
-    connection.execute("DELETE FROM artist_info WHERE name = ?1", params![name])?;
     Ok(())
 }
 
