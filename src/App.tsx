@@ -949,6 +949,7 @@ function App() {
           if (name === 'path') {
             const path = typeof data === 'string' ? data : null;
             backendPathRef.current = path;
+            backendIdleRef.current = path == null;
             setCurrentPath(path);
             if (!path) {
               scrubPositionRef.current = null;
@@ -2114,18 +2115,19 @@ function App() {
 
   const applySessionLocally = (session: PlaybackSession) => {
     const normalized = normalizeSession(session);
+    const nextPath = normalized.queue_paths[normalized.current_index] ?? null;
     setQueuePaths(normalized.queue_paths);
     setBaseQueuePaths(
       normalized.base_queue_paths.length > 0 ? normalized.base_queue_paths : normalized.queue_paths,
     );
     setCurrentQueueIndex(normalized.current_index);
-    setCurrentPath(normalized.queue_paths[normalized.current_index] ?? null);
+    setCurrentPath(nextPath);
     setPlaybackPosition(normalized.position_seconds);
     setPlaybackDuration(0);
-    if (normalized.paused || normalized.queue_paths.length === 0) {
-      backendPausedRef.current = true;
-      setIsPlaying(false);
-    }
+    backendPathRef.current = nextPath;
+    backendPausedRef.current = normalized.paused;
+    backendIdleRef.current = normalized.queue_paths.length === 0 || nextPath == null;
+    syncConfirmedPlaybackState();
     setRepeatMode(normalized.repeat_mode);
     setShuffleEnabled(normalized.shuffle_enabled);
   };
