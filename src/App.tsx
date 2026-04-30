@@ -50,13 +50,14 @@ import type {
 } from './types';
 import { useCoverArt } from './lib/cover';
 import { useArtistImage } from './lib/artistImage';
+import { useArtistInfo } from './lib/artistInfo';
 import { useAlbumInfo } from './lib/albumInfo';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
 import dashboardIdleBackdrop from './assets/bg.jpg';
 import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
 
-type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'settings';
+type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'artist' | 'settings';
 type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: number };
 type TrackSortOption = 'title' | 'artist' | 'album' | 'recent' | 'plays' | 'duration';
 type AlbumSortOption = 'album' | 'artist' | 'recent' | 'tracks';
@@ -203,6 +204,8 @@ const artistSortOptions: Array<{ value: ArtistSortOption; label: string }> = [
   { value: 'tracks', label: 'Most tracks' },
   { value: 'recent', label: 'Recently added' },
 ];
+const trackPageSizeOptions = [25, 50, 100] as const;
+const defaultTracksPageSize = 50;
 const allTrackFilterValue = 'all';
 const defaultVolumePercent = 80;
 const miniPlayerPinnedStorageKey = 'needle-mini-player-pinned';
@@ -345,6 +348,8 @@ const normalizeAccentColor = (value: string | null | undefined) => {
   if (!accentColorPattern.test(trimmed)) return null;
   return `#${trimmed.replace(/^#/, '').toLowerCase()}`;
 };
+const normalizeTracksPageSize = (value: number | null | undefined) =>
+  trackPageSizeOptions.includes(value as (typeof trackPageSizeOptions)[number]) ? value! : defaultTracksPageSize;
 const defaultAccentForTheme = (theme: 'light' | 'dark') => (theme === 'dark' ? '#87a0ff' : '#5b7cff');
 const hexToRgb = (hex: string): RgbColor => {
   const normalized = normalizeAccentColor(hex) ?? '#5b7cff';
@@ -643,7 +648,9 @@ function App() {
   const [artistSort, setArtistSort] = useState<ArtistSortOption>('artist');
   const [selectedAlbum, setSelectedAlbum] = useState<string | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
+  const [selectedArtistProfile, setSelectedArtistProfile] = useState<string | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<PlaylistSelection | null>(null);
+  const [tracksPage, setTracksPage] = useState(1);
   const [playlistComposer, setPlaylistComposer] = useState<PlaylistComposerState | null>(null);
   const [playlistTarget, setPlaylistTarget] = useState<PlaylistTargetState | null>(null);
   const [albumGenreEditor, setAlbumGenreEditor] = useState<AlbumGenreEditorState | null>(null);
@@ -682,6 +689,7 @@ function App() {
     [customAccentColor, effectiveTheme],
   );
   const currentAccentColor = accentTheme?.accent ?? defaultAccentForTheme(effectiveTheme);
+  const currentTracksPageSize = normalizeTracksPageSize(data?.settings.tracks_page_size);
   const lastRecordedPath = useRef<string | null>(null);
   const suppressRecordPathRef = useRef<string | null>(null);
   const sessionHydratedRef = useRef(false);
@@ -690,6 +698,7 @@ function App() {
   const backendPausedRef = useRef(true);
   const backendIdleRef = useRef(true);
   const albumReturnView = useRef<View>('albums');
+  const artistReturnView = useRef<View>('artists');
   const deviceMenuRef = useRef<HTMLDivElement | null>(null);
   const queueDrawerRef = useRef<HTMLElement | null>(null);
   const windowRestoreStateRef = useRef<WindowRestoreState | null>(null);
@@ -702,11 +711,26 @@ function App() {
   };
 
   const openAlbum = (album: string) => {
-    albumReturnView.current = view === 'tracks' ? 'albums' : view;
+    albumReturnView.current = view;
     setSelectedAlbum(album);
     setSelectedArtist(null);
     setSelectedPlaylist(null);
     setView('album');
+  };
+
+  const openArtist = (artist: string) => {
+    artistReturnView.current = view;
+    setSelectedArtistProfile(artist);
+    setSelectedAlbum(null);
+    setSelectedPlaylist(null);
+    setView('artist');
+  };
+
+  const openArtistTracks = (artist: string) => {
+    setSelectedArtist(artist);
+    setSelectedAlbum(null);
+    setSelectedPlaylist(null);
+    setView('tracks');
   };
 
   const clearBrowsingFilters = () => {
@@ -1457,7 +1481,43 @@ function App() {
     () => albums.find((album) => album.key === selectedAlbum) ?? null,
     [albums, selectedAlbum],
   );
+  const selectedArtistProfileSummary = useMemo(
+    () => artists.find((artist) => artist.artist === selectedArtistProfile) ?? null,
+    [artists, selectedArtistProfile],
+  );
   const visibleTracksForPlaylist = selectedManualPlaylist ? filteredTracks : sortedTracks;
+  const playlistSourceTrackIndices = useMemo(() => {
+    if (!selectedManualPlaylist || !selectedPlaylistData) return [] as number[];
+    const indicesByPath = new Map<string, number[]>();
+    selectedPlaylistData.tracks.forEach((track, index) => {
+      const existing = indicesByPath.get(track.path);
+      if (existing) {
+        existing.push(index);
+      } else {
+        indicesByPath.set(track.path, [index]);
+      }
+    });
+    const seenByPath = new Map<string, number>();
+    return visibleTracksForPlaylist.map((track) => {
+      const seenCount = seenByPath.get(track.path) ?? 0;
+      const matches = indicesByPath.get(track.path) ?? [];
+      seenByPath.set(track.path, seenCount + 1);
+      return matches[seenCount] ?? -1;
+    });
+  }, [selectedManualPlaylist, selectedPlaylistData, visibleTracksForPlaylist]);
+  const tracksTotalCount = visibleTracksForPlaylist.length;
+  const tracksPageCount = Math.max(1, Math.ceil(tracksTotalCount / currentTracksPageSize));
+  const tracksPageStartIndex = (tracksPage - 1) * currentTracksPageSize;
+  const pagedTracks = useMemo(
+    () => visibleTracksForPlaylist.slice(tracksPageStartIndex, tracksPageStartIndex + currentTracksPageSize),
+    [currentTracksPageSize, tracksPageStartIndex, visibleTracksForPlaylist],
+  );
+  const pagedPlaylistSourceTrackIndices = useMemo(
+    () => playlistSourceTrackIndices.slice(tracksPageStartIndex, tracksPageStartIndex + currentTracksPageSize),
+    [currentTracksPageSize, playlistSourceTrackIndices, tracksPageStartIndex],
+  );
+  const playlistSourceTotalCount =
+    selectedPlaylistData?.kind === 'manual' ? selectedPlaylistData.tracks.length : undefined;
   const yearFilterSummary = formatTrackYearRange(trackYearFromFilter, trackYearToFilter);
   const hasTrackFilters =
     trackArtistFilter !== allTrackFilterValue ||
@@ -1484,6 +1544,26 @@ function App() {
         ? '⏸ Pause'
         : '▶ Resume'
       : '▶ Play';
+
+  useEffect(() => {
+    setTracksPage(1);
+  }, [
+    view,
+    search,
+    trackSort,
+    trackArtistFilter,
+    trackGenreFilter,
+    trackYearFromFilter,
+    trackYearToFilter,
+    selectedAlbum,
+    selectedArtist,
+    selectedPlaylist?.kind,
+    selectedPlaylist?.id,
+  ]);
+
+  useEffect(() => {
+    setTracksPage((current) => Math.min(Math.max(current, 1), tracksPageCount));
+  }, [tracksPageCount]);
 
   const selectedRawOutputDevice = useMemo(
     () => audioDevices.find((device) => device.name === selectedAudioDevice) ?? null,
@@ -1567,6 +1647,7 @@ function App() {
     const normalizedSettings = {
       ...next,
       accent_color: normalizeAccentColor(next.accent_color),
+      tracks_page_size: normalizeTracksPageSize(next.tracks_page_size),
     };
     setData({ ...data, settings: normalizedSettings });
     try {
@@ -2870,12 +2951,7 @@ function App() {
             onOpenSettings={() => setView('settings')}
             onShuffleFeatured={() => setFeaturedSeed((s) => s + 1)}
             onOpenAlbum={openAlbum}
-            onOpenArtist={(artist) => {
-              setSelectedArtist(artist);
-              setSelectedAlbum(null);
-              setSelectedPlaylist(null);
-              setView('tracks');
-            }}
+            onOpenArtist={openArtist}
             onOpenPlaylist={(pl) => {
               setSelectedPlaylist({ kind: 'smart', id: pl.id });
               setSelectedAlbum(null);
@@ -2907,7 +2983,22 @@ function App() {
 
         {view === 'tracks' && (
           <TracksView
-            tracks={sortedTracks}
+            tracks={pagedTracks}
+            totalTracks={tracksTotalCount}
+            currentPage={tracksPage}
+            pageCount={tracksPageCount}
+            pageStartIndex={tracksPageStartIndex}
+            onPageChange={setTracksPage}
+            pageSize={currentTracksPageSize}
+            onPageSizeChange={(nextSize) => {
+              if (!data) return;
+              void updateSettings({
+                ...data.settings,
+                tracks_page_size: normalizeTracksPageSize(nextSize),
+              });
+            }}
+            playlistSourceTrackIndices={pagedPlaylistSourceTrackIndices}
+            playlistSourceTotalCount={playlistSourceTotalCount}
             search={search}
             onSearch={setSearch}
             sortValue={selectedManualPlaylist ? undefined : trackSort}
@@ -3007,6 +3098,8 @@ function App() {
                   }
                 : undefined
             }
+            onOpenAlbum={openAlbum}
+            onOpenArtist={openArtist}
             emptyTitle={tracksEmptyTitle}
             emptyMessage={tracksEmptyMessage}
           />
@@ -3083,11 +3176,7 @@ function App() {
                 shuffle: true,
               });
             }}
-            onOpenArtist={(artist) => {
-              setSelectedArtist(artist);
-              setSelectedAlbum(null);
-              setView('tracks');
-            }}
+            onOpenArtist={openArtist}
           />
         )}
 
@@ -3096,11 +3185,95 @@ function App() {
             artists={sortedArtists}
             sortValue={artistSort}
             onSortChange={setArtistSort}
-            onSelect={(artist) => {
-              setSelectedArtist(artist);
-              setSelectedAlbum(null);
-              setView('tracks');
+            onSelect={openArtist}
+          />
+        )}
+
+        {view === 'artist' && selectedArtistProfile && (
+          <ArtistDetailView
+            artist={selectedArtistProfile}
+            summary={selectedArtistProfileSummary}
+            tracks={allTracks}
+            albums={albums}
+            currentPath={currentPath}
+            queuePaths={queueTracks.map((track) => track.path)}
+            onBack={() => {
+              setView(artistReturnView.current);
             }}
+            onPlayTrack={play}
+            onPlayNext={playNext}
+            onAddToQueue={addToQueue}
+            onPlayArtist={() => playArtist(selectedArtistProfile)}
+            onPlayArtistNext={() => {
+              void queueTrackCollection(
+                allTracks.filter((track) => track.artist === selectedArtistProfile),
+                selectedArtistProfile,
+                'next',
+              );
+            }}
+            onAddArtistToQueue={() => {
+              void queueTrackCollection(
+                allTracks.filter((track) => track.artist === selectedArtistProfile),
+                selectedArtistProfile,
+                'queue',
+              );
+            }}
+            onViewTracks={() => openArtistTracks(selectedArtistProfile)}
+            onOpenAlbum={openAlbum}
+            onPlayAlbum={playAlbum}
+            onPlayAlbumNext={playAlbumNext}
+            onAddAlbumToQueue={addAlbumToQueue}
+            onAddAlbumToPlaylist={(albumKeyValue) =>
+              openPlaylistTarget(tracksForAlbum(albumKeyValue), {
+                label: albumTitleFromKey(albumKeyValue),
+                suggestedName: albumTitleFromKey(albumKeyValue),
+              })
+            }
+            onPlayTopTracks={() => {
+              const artistTopTracks = allTracks
+                .filter((track) => track.artist === selectedArtistProfile)
+                .slice()
+                .sort(compareTracksBySort('plays'))
+                .slice(0, 10);
+              if (artistTopTracks.length === 0) return;
+              void playQueue(artistTopTracks, `Top tracks · ${selectedArtistProfile}`, {
+                baseTracks: artistTopTracks,
+              });
+            }}
+            onShuffleTopTracks={() => {
+              const artistTopTracks = allTracks
+                .filter((track) => track.artist === selectedArtistProfile)
+                .slice()
+                .sort(compareTracksBySort('plays'))
+                .slice(0, 10);
+              if (artistTopTracks.length === 0) return;
+              void playQueue(shuffleList(artistTopTracks), `Shuffle top tracks · ${selectedArtistProfile}`, {
+                baseTracks: artistTopTracks,
+                shuffle: true,
+              });
+            }}
+            onPlayTopTracksNext={() => {
+              const artistTopTracks = allTracks
+                .filter((track) => track.artist === selectedArtistProfile)
+                .slice()
+                .sort(compareTracksBySort('plays'))
+                .slice(0, 10);
+              void queueTrackCollection(artistTopTracks, `${selectedArtistProfile} top tracks`, 'next');
+            }}
+            onAddTopTracksToQueue={() => {
+              const artistTopTracks = allTracks
+                .filter((track) => track.artist === selectedArtistProfile)
+                .slice()
+                .sort(compareTracksBySort('plays'))
+                .slice(0, 10);
+              void queueTrackCollection(artistTopTracks, `${selectedArtistProfile} top tracks`, 'queue');
+            }}
+            onAddTrackToPlaylist={(track) =>
+              openPlaylistTarget([track], {
+                label: track.title,
+                suggestedName: `${selectedArtistProfile} picks`,
+              })
+            }
           />
         )}
 
@@ -4101,6 +4274,15 @@ function MiniPlayerView({
 
 interface TracksViewProps {
   tracks: Track[];
+  totalTracks: number;
+  currentPage: number;
+  pageCount: number;
+  pageStartIndex: number;
+  onPageChange: (page: number) => void;
+  pageSize: number;
+  onPageSizeChange: (size: number) => void;
+  playlistSourceTrackIndices?: number[];
+  playlistSourceTotalCount?: number;
   search: string;
   onSearch: (value: string) => void;
   sortValue?: TrackSortOption;
@@ -4140,12 +4322,23 @@ interface TracksViewProps {
   title: string;
   subtitle: string;
   onClearFilter?: () => void;
+  onOpenAlbum: (albumKey: string) => void;
+  onOpenArtist: (artist: string) => void;
   emptyTitle: string;
   emptyMessage: string;
 }
 
 function TracksView({
   tracks,
+  totalTracks,
+  currentPage,
+  pageCount,
+  pageStartIndex,
+  onPageChange,
+  pageSize,
+  onPageSizeChange,
+  playlistSourceTrackIndices,
+  playlistSourceTotalCount,
   search,
   onSearch,
   sortValue,
@@ -4185,9 +4378,65 @@ function TracksView({
   title,
   subtitle,
   onClearFilter,
+  onOpenAlbum,
+  onOpenArtist,
   emptyTitle,
   emptyMessage,
 }: TracksViewProps) {
+  const rangeStart = totalTracks === 0 ? 0 : pageStartIndex + 1;
+  const rangeEnd = totalTracks === 0 ? 0 : Math.min(pageStartIndex + tracks.length, totalTracks);
+  const renderPagination = () =>
+    totalTracks > 0 ? (
+      <div className="tracks-pagination" aria-label="Track list pagination">
+        <div className="tracks-pagination-summary">{`Showing ${rangeStart}-${rangeEnd} of ${totalTracks} tracks`}</div>
+        <div className="tracks-pagination-actions">
+          <label className="tracks-pagination-size">
+            <span className="view-select-label">Page size</span>
+            <select
+              className="view-select tracks-select"
+              value={String(pageSize)}
+              onChange={(event) => onPageSizeChange(Number(event.currentTarget.value))}
+            >
+              {trackPageSizeOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option} tracks
+                </option>
+              ))}
+            </select>
+          </label>
+          {pageCount > 1 && (
+            <>
+              <button className="ghost-button" onClick={() => onPageChange(1)} disabled={currentPage === 1}>
+                « First
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() => onPageChange(Math.max(currentPage - 1, 1))}
+                disabled={currentPage === 1}
+              >
+                ‹ Prev
+              </button>
+              <span className="tracks-pagination-page">{`Page ${currentPage} of ${pageCount}`}</span>
+              <button
+                className="ghost-button"
+                onClick={() => onPageChange(Math.min(currentPage + 1, pageCount))}
+                disabled={currentPage === pageCount}
+              >
+                Next ›
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() => onPageChange(pageCount)}
+                disabled={currentPage === pageCount}
+              >
+                Last »
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    ) : null;
+
   return (
     <div className="view">
       <header className="view-header tracks-view-header">
@@ -4248,22 +4497,24 @@ function TracksView({
               onChange={(e) => onSearch(e.target.value)}
             />
           </label>
-          {sortValue && onSortChange && (
-            <label className="tracks-toolbar-control tracks-toolbar-sort">
-              <span className="view-select-label">Sort</span>
-              <select
-                className="view-select tracks-select"
-                value={sortValue}
-                onChange={(event) => onSortChange(event.currentTarget.value as TrackSortOption)}
-              >
-                {trackSortOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
+          <div className="tracks-toolbar-actions">
+            {sortValue && onSortChange && (
+              <label className="tracks-toolbar-control tracks-toolbar-sort">
+                <span className="view-select-label">Sort</span>
+                <select
+                  className="view-select tracks-select"
+                  value={sortValue}
+                  onChange={(event) => onSortChange(event.currentTarget.value as TrackSortOption)}
+                >
+                  {trackSortOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
         </div>
         {!playlistMode && (
           <>
@@ -4340,7 +4591,7 @@ function TracksView({
                   </button>
                 )}
                 {onSaveAsPlaylist && (
-                  <button className="ghost-button" onClick={onSaveAsPlaylist} disabled={tracks.length === 0}>
+                  <button className="ghost-button" onClick={onSaveAsPlaylist} disabled={totalTracks === 0}>
                     {saveActionLabel ?? '+ Save as playlist'}
                   </button>
                 )}
@@ -4350,123 +4601,152 @@ function TracksView({
         )}
       </section>
 
-      {tracks.length === 0 ? (
+      {totalTracks === 0 ? (
         <div className="empty">
           <div className="empty-icon">♪</div>
           <h2>{emptyTitle}</h2>
           <p>{emptyMessage}</p>
         </div>
       ) : (
-        <div className="track-list">
-          <div className="track-list-head">
-            <span>#</span>
-            <span>Title</span>
-            <span>Artist</span>
-            <span>Album</span>
-            <span className="num">Time</span>
-            <span>Quality</span>
-            <span className="track-actions-head">Actions</span>
-          </div>
-          {tracks.map((track, index) => {
-            const isCurrent = track.path === currentPath;
-            const isQueued = queuePaths.includes(track.path);
-            return (
-              <div key={track.id} className={`track-row ${isCurrent ? 'is-current' : ''}`}>
-                <button
-                  className="track-row-main"
-                  onDoubleClick={() => onPlay(track)}
-                  onClick={() => onPlay(track)}
-                >
-                  <span className="track-index">
-                    {isCurrent ? <PlayingIndicator /> : index + 1}
+        <>
+          {renderPagination()}
+          <div className="track-list">
+            {tracks.map((track, index) => {
+              const isCurrent = track.path === currentPath;
+              const isQueued = queuePaths.includes(track.path);
+              const albumKeyValue = trackAlbumKey(track);
+              const displayIndex = pageStartIndex + index;
+              const playlistSourceIndex = playlistSourceTrackIndices?.[index] ?? displayIndex;
+              const playlistLastIndex =
+                typeof playlistSourceTotalCount === 'number'
+                  ? playlistSourceTotalCount - 1
+                  : Math.max(totalTracks - 1, 0);
+              return (
+                <div key={track.id} className={`track-row ${isCurrent ? 'playing' : ''}`}>
+                  <Cover
+                    trackPath={track.path}
+                    fallback={(track.album ?? track.title)[0]?.toUpperCase() ?? '♪'}
+                    size="md"
+                  />
+                  <button className="track-row-main" onClick={() => onPlay(track)}>
+                    <span className="track-index">
+                      {isCurrent ? <PlayingIndicator /> : displayIndex + 1}
+                    </span>
+                    <span className="track-title-wrap">
+                      <span className="track-title">{track.title}</span>
+                      <span className="track-play-meta">
+                        {(track.play_count ?? 0) > 0
+                          ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
+                          : 'Unplayed so far'}
+                      </span>
+                    </span>
+                    <span className="track-duration">{formatDuration(track.duration_seconds)}</span>
+                  </button>
+                  <span className="track-artist-wrap">
+                    {track.artist ? (
+                      <button className="track-detail-link" onClick={() => onOpenArtist(track.artist ?? '')}>
+                        {track.artist}
+                      </button>
+                    ) : (
+                      <span className="track-detail-link is-static">Unknown artist</span>
+                    )}
                   </span>
-                  <span className="track-title">{track.title}</span>
-                  <span className="track-cell">{track.artist ?? '—'}</span>
-                  <span className="track-cell">{track.album ?? '—'}</span>
-                  <span className="track-cell num">{formatDuration(track.duration_seconds)}</span>
-                  <span className="track-cell muted">{formatQuality(track)}</span>
-                </button>
-                <span className="track-row-actions">
-                  {playlistMode ? (
-                    <>
-                      <button
-                        className="row-icon-button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onMovePlaylistTrack?.(index, Math.max(index - 1, 0));
-                        }}
-                        disabled={index === 0}
-                        title="Move up"
-                      >
-                        ↑
+                  <span className="track-album-wrap">
+                    {track.album && albumKeyValue ? (
+                      <button className="track-detail-link" onClick={() => onOpenAlbum(albumKeyValue)}>
+                        {track.album}
                       </button>
-                      <button
-                        className="row-icon-button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onMovePlaylistTrack?.(index, Math.min(index + 1, tracks.length - 1));
-                        }}
-                        disabled={index === tracks.length - 1}
-                        title="Move down"
-                      >
-                        ↓
-                      </button>
-                      <button
-                        className="row-icon-button is-danger"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onRemovePlaylistTrack?.(index);
-                        }}
-                        title="Remove"
-                      >
-                        ×
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      {isQueued && <span className="queue-pill">Queued</span>}
-                      <button
-                        className="row-icon-button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void onPlayNext(track);
-                        }}
-                        title={`Play ${track.title} next`}
-                        aria-label={`Play ${track.title} next`}
-                      >
-                        <NextIcon />
-                      </button>
-                      <button
-                        className="row-icon-button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void onAddToQueue(track);
-                        }}
-                        title={`Add ${track.title} to queue`}
-                        aria-label={`Add ${track.title} to queue`}
-                      >
-                        <QueueIcon />
-                      </button>
-                      {onAddTrackToPlaylist && (
+                    ) : (
+                      <span className="track-detail-link is-static">Standalone track</span>
+                    )}
+                  </span>
+                  <span className="album-track-actions">
+                    {playlistMode ? (
+                      <>
                         <button
                           className="row-icon-button"
                           onClick={(event) => {
                             event.stopPropagation();
-                            onAddTrackToPlaylist(track);
+                            onMovePlaylistTrack?.(playlistSourceIndex, Math.max(playlistSourceIndex - 1, 0));
                           }}
-                          title={`Add ${track.title} to a playlist`}
-                          aria-label={`Add ${track.title} to a playlist`}
+                          disabled={playlistSourceIndex <= 0}
+                          title="Move up"
                         >
-                          <PlaylistIcon />
+                          ↑
                         </button>
-                      )}
-                    </>
-                  )}
-                </span>
-              </div>
-            );
-          })}
-        </div>
+                        <button
+                          className="row-icon-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onMovePlaylistTrack?.(
+                              playlistSourceIndex,
+                              Math.min(playlistSourceIndex + 1, playlistLastIndex),
+                            );
+                          }}
+                          disabled={playlistSourceIndex < 0 || playlistSourceIndex >= playlistLastIndex}
+                          title="Move down"
+                        >
+                          ↓
+                        </button>
+                        <button
+                          className="row-icon-button is-danger"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onRemovePlaylistTrack?.(playlistSourceIndex);
+                          }}
+                          disabled={playlistSourceIndex < 0}
+                          title="Remove"
+                        >
+                          ×
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        {isQueued && <span className="queue-pill">Queued</span>}
+                        <button
+                          className="row-icon-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void onPlayNext(track);
+                          }}
+                          title={`Play ${track.title} next`}
+                          aria-label={`Play ${track.title} next`}
+                        >
+                          <NextIcon />
+                        </button>
+                        <button
+                          className="row-icon-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void onAddToQueue(track);
+                          }}
+                          title={`Add ${track.title} to queue`}
+                          aria-label={`Add ${track.title} to queue`}
+                        >
+                          <QueueIcon />
+                        </button>
+                        {onAddTrackToPlaylist && (
+                          <button
+                            className="row-icon-button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onAddTrackToPlaylist(track);
+                            }}
+                            title={`Add ${track.title} to a playlist`}
+                            aria-label={`Add ${track.title} to a playlist`}
+                          >
+                            <PlaylistIcon />
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          {renderPagination()}
+        </>
       )}
     </div>
   );
@@ -4604,7 +4884,10 @@ function AlbumDetailView({
   }, [albumTracks]);
 
   const samplePath = albumTracks[0]?.path ?? null;
-  const { info, loading: infoLoading } = useAlbumInfo(album, primaryArtist);
+  const { info, loading: infoLoading, retrying: infoRetrying, retry: retryAlbumInfo } = useAlbumInfo(
+    album,
+    primaryArtist,
+  );
 
   const formatTotalDuration = (seconds: number): string => {
     if (seconds <= 0) return '—';
@@ -4709,11 +4992,20 @@ function AlbumDetailView({
         ) : infoLoading ? (
           <p className="muted">Looking up album info…</p>
         ) : (
-          <p className="muted">
-            No background info found for this album. (We pull these from
-            Wikipedia via MusicBrainz — very obscure releases or non-album
-            collections may not have anything.)
-          </p>
+          <div className="album-about-empty">
+            <p className="muted">
+              No background info found for this album. (We pull these from
+              Wikipedia via MusicBrainz — very obscure releases or non-album
+              collections may not have anything.)
+            </p>
+            <button
+              className="album-about-retry"
+              onClick={() => void retryAlbumInfo()}
+              disabled={infoRetrying}
+            >
+              {infoRetrying ? 'Retrying…' : 'Retry lookup'}
+            </button>
+          </div>
         )}
       </section>
 
@@ -4790,6 +5082,352 @@ function AlbumDetailView({
             </section>
           ))}
         </div>
+      </section>
+    </div>
+  );
+}
+
+interface ArtistDetailViewProps {
+  artist: string;
+  summary: ArtistSummary | null;
+  tracks: Track[];
+  albums: AlbumSummary[];
+  currentPath: string | null;
+  queuePaths: string[];
+  onBack: () => void;
+  onPlayTrack: (track: Track) => void;
+  onPlayNext: (track: Track) => void;
+  onAddToQueue: (track: Track) => void;
+  onPlayArtist: () => void;
+  onPlayArtistNext: () => void;
+  onAddArtistToQueue: () => void;
+  onViewTracks: () => void;
+  onOpenAlbum: (albumKey: string) => void;
+  onPlayAlbum: (albumKey: string) => void;
+  onPlayAlbumNext: (albumKey: string) => void;
+  onAddAlbumToQueue: (albumKey: string) => void;
+  onAddAlbumToPlaylist: (albumKey: string) => void;
+  onPlayTopTracks: () => void;
+  onShuffleTopTracks: () => void;
+  onPlayTopTracksNext: () => void;
+  onAddTopTracksToQueue: () => void;
+  onAddTrackToPlaylist: (track: Track) => void;
+}
+
+function ArtistDetailView({
+  artist,
+  summary,
+  tracks,
+  albums,
+  currentPath,
+  queuePaths,
+  onBack,
+  onPlayTrack,
+  onPlayNext,
+  onAddToQueue,
+  onPlayArtist,
+  onPlayArtistNext,
+  onAddArtistToQueue,
+  onViewTracks,
+  onOpenAlbum,
+  onPlayAlbum,
+  onPlayAlbumNext,
+  onAddAlbumToQueue,
+  onAddAlbumToPlaylist,
+  onPlayTopTracks,
+  onShuffleTopTracks,
+  onPlayTopTracksNext,
+  onAddTopTracksToQueue,
+  onAddTrackToPlaylist,
+}: ArtistDetailViewProps) {
+  const [isBioExpanded, setIsBioExpanded] = useState(false);
+  const { info, loading: infoLoading, retrying: infoRetrying, retry: retryArtistInfo } = useArtistInfo(artist);
+  const artistTracks = useMemo(
+    () => tracks.filter((track) => track.artist === artist),
+    [artist, tracks],
+  );
+  const artistAlbums = useMemo(
+    () =>
+      albums
+        .filter((album) => album.artist === artist)
+        .slice()
+        .sort(
+          (a, b) =>
+            timestampValue(b.addedAt) - timestampValue(a.addedAt) ||
+            compareText(a.album, b.album) ||
+            compareText(a.key, b.key),
+        ),
+    [albums, artist],
+  );
+  const topTracks = useMemo(
+    () => artistTracks.slice().sort(compareTracksBySort('plays')).slice(0, 10),
+    [artistTracks],
+  );
+  const totalPlays = useMemo(
+    () => artistTracks.reduce((sum, track) => sum + (track.play_count ?? 0), 0),
+    [artistTracks],
+  );
+  const yearLine = useMemo(() => {
+    const years = artistTracks
+      .map((track) => track.year)
+      .filter((year): year is number => typeof year === 'number')
+      .sort((a, b) => a - b);
+    if (years.length === 0) return null;
+    const first = years[0];
+    const last = years[years.length - 1];
+    return first === last ? `${first}` : `${first}–${last}`;
+  }, [artistTracks]);
+  const shouldClampBio = (info?.description?.length ?? 0) > 320;
+  useEffect(() => {
+    setIsBioExpanded(false);
+  }, [artist, info?.description]);
+
+  return (
+    <div className="view artist-detail">
+      <button className="back-button" onClick={onBack}>
+        ← Back
+      </button>
+
+      <header className="artist-hero">
+        <ArtistAvatar name={artist} size="hero" />
+        <div className="artist-hero-meta">
+          <div className="album-hero-eyebrow">Artist</div>
+          <h1 className="album-hero-title">{artist}</h1>
+          <div className="artist-hero-line">
+            {[
+              `${artistAlbums.length} album${artistAlbums.length === 1 ? '' : 's'}`,
+              `${summary?.count ?? artistTracks.length} track${(summary?.count ?? artistTracks.length) === 1 ? '' : 's'}`,
+              totalPlays > 0 ? `${totalPlays} play${totalPlays === 1 ? '' : 's'}` : null,
+              yearLine,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </div>
+          <div className="album-hero-actions">
+            <button className="primary-button" onClick={onPlayArtist}>
+              ⤮ Shuffle artist
+            </button>
+            <button className="ghost-button" onClick={onPlayArtistNext}>
+              ≫ Play next
+            </button>
+            <button className="ghost-button" onClick={onAddArtistToQueue}>
+              + Add to queue
+            </button>
+            <button className="ghost-button" onClick={onViewTracks}>
+              View tracks
+            </button>
+          </div>
+          <div className="artist-hero-about">
+            <h2 className="section-title">About this artist</h2>
+            {info?.description ? (
+              <>
+                <p
+                  className={`album-about-text artist-about-text ${
+                    shouldClampBio && !isBioExpanded ? 'is-clamped' : ''
+                  }`}
+                >
+                  {info.description}
+                </p>
+                <div className="artist-about-actions">
+                  {shouldClampBio && (
+                    <button
+                      className="album-about-retry artist-about-toggle"
+                      onClick={() => setIsBioExpanded((value) => !value)}
+                    >
+                      {isBioExpanded ? 'Show less' : 'Read more'}
+                    </button>
+                  )}
+                  {info.source_url && (
+                    <a
+                      className="album-about-link"
+                      href={info.source_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Read more on Wikipedia →
+                    </a>
+                  )}
+                </div>
+              </>
+            ) : infoLoading ? (
+              <p className="muted">Looking up artist info…</p>
+            ) : (
+              <div className="album-about-empty">
+                <p className="muted">
+                  No background info found for this artist yet. (We currently pull these from
+                  Wikipedia via MusicBrainz when linked metadata is available.)
+                </p>
+                <button
+                  className="album-about-retry"
+                  onClick={() => void retryArtistInfo()}
+                  disabled={infoRetrying}
+                >
+                  {infoRetrying ? 'Retrying…' : 'Retry lookup'}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <section className="artist-albums">
+        <div className="section-head">
+          <h2 className="section-title">Albums</h2>
+          {artistAlbums.length > 0 && (
+            <div className="section-actions">
+              <button className="ghost-button" onClick={onViewTracks}>
+                View tracks
+              </button>
+            </div>
+          )}
+        </div>
+        {artistAlbums.length === 0 ? (
+          <p className="muted">No albums in your library are currently grouped under this artist.</p>
+        ) : (
+          <div className="card-grid artist-album-grid">
+            {artistAlbums.map((album) => (
+              <div key={album.key} className="card-wrap">
+                <button
+                  className="card-play"
+                  onClick={() => onPlayAlbum(album.key)}
+                  title={`Play ${album.album}`}
+                  aria-label={`Play ${album.album}`}
+                >
+                  ▶
+                </button>
+                <button className="card" onClick={() => onOpenAlbum(album.key)}>
+                  <Cover
+                    trackPath={album.samplePath}
+                    fallback={album.album[0]?.toUpperCase() ?? '◉'}
+                    size="card"
+                  />
+                  <div className="card-title">{album.album}</div>
+                  <div className="card-sub">{relativeAdded(album.addedAt)}</div>
+                  <div className="card-meta">{album.count} tracks</div>
+                </button>
+                <div className="card-actions">
+                  <button
+                    className="card-mini-action"
+                    onClick={() => onPlayAlbumNext(album.key)}
+                    title={`Play ${album.album} next`}
+                    aria-label={`Play ${album.album} next`}
+                  >
+                    <NextIcon />
+                  </button>
+                  <button
+                    className="card-mini-action"
+                    onClick={() => onAddAlbumToQueue(album.key)}
+                    title={`Add ${album.album} to queue`}
+                    aria-label={`Add ${album.album} to queue`}
+                  >
+                    <QueueIcon />
+                  </button>
+                  <button
+                    className="card-mini-action"
+                    onClick={() => onAddAlbumToPlaylist(album.key)}
+                    title={`Add ${album.album} to a playlist`}
+                    aria-label={`Add ${album.album} to a playlist`}
+                  >
+                    <PlaylistIcon />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="artist-top-tracks">
+        <div className="section-head artist-section-head">
+          <h2 className="section-title">Most played tracks</h2>
+          {topTracks.length > 0 && (
+            <div className="section-actions artist-track-actions-bar">
+              <button className="primary-button" onClick={onPlayTopTracks}>
+                ▶ Play
+              </button>
+              <button className="ghost-button" onClick={onPlayTopTracksNext}>
+                ≫ Play next
+              </button>
+              <button className="ghost-button" onClick={onAddTopTracksToQueue}>
+                + Add to queue
+              </button>
+              <button className="ghost-button" onClick={onShuffleTopTracks}>
+                ⤮ Shuffle
+              </button>
+            </div>
+          )}
+        </div>
+        {topTracks.length === 0 ? (
+          <p className="muted">No tracks from this artist are in your library yet.</p>
+        ) : (
+          <div className="album-track-list artist-track-list">
+            {topTracks.map((track, index) => {
+              const isCurrent = currentPath === track.path;
+              const isQueued = queuePaths.includes(track.path);
+              const albumKeyValue = trackAlbumKey(track);
+              return (
+                <div key={track.id} className={`album-track-row artist-top-track-row ${isCurrent ? 'playing' : ''}`}>
+                  <Cover
+                    trackPath={track.path}
+                    fallback={(track.album ?? track.title)[0]?.toUpperCase() ?? '♪'}
+                    size="md"
+                  />
+                  <button className="album-track-row-main artist-top-track-main" onClick={() => onPlayTrack(track)}>
+                    <span className="album-track-num">
+                      {isCurrent ? <PlayingIndicator /> : index + 1}
+                    </span>
+                    <span className="artist-track-title-wrap">
+                      <span className="album-track-title">{track.title}</span>
+                      <span className="artist-track-play-meta">
+                        {(track.play_count ?? 0) > 0
+                          ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
+                          : 'Unplayed so far'}
+                      </span>
+                    </span>
+                  </button>
+                  <span className="artist-track-duration">{formatDuration(track.duration_seconds)}</span>
+                  <span className="artist-track-album-wrap">
+                    {track.album && albumKeyValue ? (
+                      <button className="artist-track-album-link" onClick={() => onOpenAlbum(albumKeyValue)}>
+                        {track.album}
+                      </button>
+                    ) : (
+                      <span className="artist-track-album-link is-static">Standalone track</span>
+                    )}
+                  </span>
+                  <span className="artist-track-format">{formatQuality(track)}</span>
+                  <span className="album-track-actions">
+                    {isQueued && <span className="queue-pill">Queued</span>}
+                    <button
+                      className="row-icon-button"
+                      onClick={() => void onPlayNext(track)}
+                      title={`Play ${track.title} next`}
+                      aria-label={`Play ${track.title} next`}
+                    >
+                      <NextIcon />
+                    </button>
+                    <button
+                      className="row-icon-button"
+                      onClick={() => void onAddToQueue(track)}
+                      title={`Add ${track.title} to queue`}
+                      aria-label={`Add ${track.title} to queue`}
+                    >
+                      <QueueIcon />
+                    </button>
+                    <button
+                      className="row-icon-button"
+                      onClick={() => onAddTrackToPlaylist(track)}
+                      title={`Add ${track.title} to a playlist`}
+                      aria-label={`Add ${track.title} to a playlist`}
+                    >
+                      <PlaylistIcon />
+                    </button>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
     </div>
   );
@@ -4923,12 +5561,17 @@ function Cover({ trackPath, fallback, size }: CoverProps) {
 
 interface ArtistAvatarProps {
   name: string;
-  size: 'sm' | 'lg';
+  size: 'sm' | 'lg' | 'hero';
 }
 
 function ArtistAvatar({ name, size }: ArtistAvatarProps) {
   const url = useArtistImage(name);
-  const className = size === 'lg' ? 'avatar avatar-lg' : 'avatar';
+  const className =
+    size === 'hero'
+      ? 'artist-portrait'
+      : size === 'lg'
+        ? 'avatar avatar-lg'
+        : 'avatar';
   const initial = name[0]?.toUpperCase() ?? '?';
 
   if (url) {

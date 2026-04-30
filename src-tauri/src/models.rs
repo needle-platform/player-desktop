@@ -68,11 +68,17 @@ pub struct AppSettings {
     pub equalizer_preset: EqualizerPreset,
     #[serde(default = "default_equalizer_bands")]
     pub equalizer_bands: [f32; 10],
+    #[serde(default = "default_tracks_page_size")]
+    pub tracks_page_size: u32,
     pub library_roots: Vec<String>,
 }
 
 pub fn default_equalizer_bands() -> [f32; 10] {
     [0.0; 10]
+}
+
+pub fn default_tracks_page_size() -> u32 {
+    50
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -26,6 +26,13 @@ pub struct ArtistImage {
     pub source: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtistInfo {
+    pub description: Option<String>,
+    pub source_url: Option<String>,
+    pub source: String,
+}
+
 fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -34,13 +41,14 @@ fn http_client() -> Result<reqwest::Client> {
         .context("Failed to build HTTP client")
 }
 
-pub async fn fetch_artist_image(name: &str) -> Result<Option<ArtistImage>> {
+async fn lookup_artist_relations(
+    client: &reqwest::Client,
+    name: &str,
+) -> Result<Option<Vec<Value>>> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-
-    let client = http_client()?;
 
     // Throttle MusicBrainz traffic; release before hitting other hosts.
     let mbid = {
@@ -95,6 +103,72 @@ pub async fn fetch_artist_image(name: &str) -> Result<Option<ArtistImage>> {
             .await
             .context("musicbrainz lookup response invalid")?;
         resp["relations"].as_array().cloned().unwrap_or_default()
+    };
+
+    Ok(Some(relations))
+}
+
+async fn wikipedia_title_from_relations(
+    client: &reqwest::Client,
+    relations: &[Value],
+) -> Result<Option<String>> {
+    let mut wikipedia_title = relations.iter().find_map(|rel| {
+        if rel["type"] == "wikipedia" {
+            rel["url"]["resource"]
+                .as_str()
+                .and_then(|url| url.rsplit('/').next())
+                .map(|raw| {
+                    urlencoding::decode(raw)
+                        .map(|cow| cow.into_owned())
+                        .unwrap_or_else(|_| raw.to_string())
+                })
+        } else {
+            None
+        }
+    });
+
+    if wikipedia_title.is_none() {
+        let qid = relations.iter().find_map(|rel| {
+            if rel["type"] == "wikidata" {
+                rel["url"]["resource"]
+                    .as_str()
+                    .and_then(|url| url.rsplit('/').next())
+                    .map(|value| value.to_string())
+            } else {
+                None
+            }
+        });
+
+        if let Some(qid) = qid.filter(|value| value.starts_with('Q')) {
+            let url = format!(
+                "https://www.wikidata.org/wiki/Special:EntityData/{}.json",
+                qid
+            );
+            let resp: Value = client
+                .get(&url)
+                .send()
+                .await
+                .context("wikidata lookup failed")?
+                .error_for_status()
+                .context("wikidata lookup returned non-2xx")?
+                .json()
+                .await
+                .context("wikidata response invalid")?;
+
+            wikipedia_title = resp
+                .pointer(&format!("/entities/{}/sitelinks/enwiki/title", qid))
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string());
+        }
+    }
+
+    Ok(wikipedia_title)
+}
+
+pub async fn fetch_artist_image(name: &str) -> Result<Option<ArtistImage>> {
+    let client = http_client()?;
+    let Some(relations) = lookup_artist_relations(&client, name).await? else {
+        return Ok(None);
     };
 
     // 1) Direct image relation if present
@@ -158,6 +232,48 @@ pub async fn fetch_artist_image(name: &str) -> Result<Option<ArtistImage>> {
                 source: "wikidata".into(),
             }));
         }
+    }
+
+    Ok(None)
+}
+
+pub async fn fetch_artist_info(name: &str) -> Result<Option<ArtistInfo>> {
+    let client = http_client()?;
+    let Some(relations) = lookup_artist_relations(&client, name).await? else {
+        return Ok(None);
+    };
+    let Some(title) = wikipedia_title_from_relations(&client, &relations).await? else {
+        return Ok(None);
+    };
+
+    let path = title.replace(' ', "_");
+    let url = format!(
+        "https://en.wikipedia.org/api/rest_v1/page/summary/{}",
+        urlencoding::encode(&path)
+    );
+    let resp: Value = client
+        .get(&url)
+        .send()
+        .await
+        .context("wikipedia summary fetch failed")?
+        .error_for_status()
+        .context("wikipedia summary returned non-2xx")?
+        .json()
+        .await
+        .context("wikipedia summary invalid")?;
+
+    let description = resp["extract"].as_str().map(|value| value.to_string());
+    let source_url = resp
+        .pointer("/content_urls/desktop/page")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+
+    if description.is_some() || source_url.is_some() {
+        return Ok(Some(ArtistInfo {
+            description,
+            source_url,
+            source: "wikipedia".into(),
+        }));
     }
 
     Ok(None)

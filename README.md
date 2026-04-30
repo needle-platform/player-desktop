@@ -62,22 +62,25 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Playlist management**: rename, delete, reorder tracks, remove tracks
 - **Smart playlists** surfaced as first-class library views generated from your collection and listening history
 
-### Artist portraits
-- Pulled for free via **MusicBrainz → Wikidata → Wikimedia Commons**
+### Artist portraits & bios
+- **Artist portraits** pulled for free via **MusicBrainz → Wikidata → Wikimedia Commons**
+- **Artist biographies** pulled via **MusicBrainz → Wikidata → Wikipedia** when linked metadata is available
 - No API keys required; polite User-Agent + 1 req/sec serialization
 - Cached in SQLite (`artist_images`) for 30 days, including misses so we don't keep hammering the API
+- Cached in SQLite (`artist_info`) for 90 days, including misses, with manual retry from the artist page
 - Graceful fallback to a gradient initial when no portrait is found
 
 ### Views
 - **Dashboard** (default landing screen)
 - **Tracks** with live search, sorting, and filters for artist / genre / year range, plus album / artist / playlist context
 - **Albums** with cover art, sorting, and direct playlist actions
-- **Album detail page** with hero artwork, metadata, play/shuffle actions, full track list, and background album info when available
-- **Artists** with sorting and track counts
+- **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
+- **Artists** with sorting, track counts, dedicated artist pages, biographies, album grids, and most-played-track actions
 - **Settings** with theme switcher, custom accent color, library folders, maintenance, live equalizer presets, and manual 10-band EQ
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
+- Artist-aware album matching improves lookups for releases with ambiguous or very common titles
 - Cached in SQLite (`album_info`) so repeat opens are instant and we avoid repeat lookups
 - **Album page genres** are derived from the imported track tags already embedded in your files
 - **Primary genre override** lets you set a local album-level genre Needle should prefer for browsing, filtering, and smart-playlist logic without rewriting the source files
@@ -116,14 +119,15 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - `src/lib/tauri.ts` — typed wrappers around all Tauri commands
 - `src/lib/cover.ts` — cover-art hook with module-level cache
 - `src/lib/artistImage.ts` — artist portrait hook with module-level cache
+- `src/lib/artistInfo.ts` — artist-info hook with module-level cache
 - `src/lib/albumInfo.ts` — album-info hook with module-level cache
 - `src/lib/playlists.ts` — auto-playlist generators from tags + heuristics
 - `src/styles.css` — full theming + layout
 - `src-tauri/src/lib.rs` — Tauri command surface and app setup
-- `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, saved playlists, artist-image cache, album-info cache
+- `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, saved playlists, artist-image cache, artist-info cache, album-info cache, album primary-genre overrides
 - `src-tauri/src/library.rs` — folder scanner, dotfile filter, metadata via `lofty`
 - `src-tauri/src/cover.rs` — sidecar + embedded cover-art extraction
-- `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup
+- `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup + Wikipedia-backed artist biography lookup
 - `src-tauri/src/album.rs` — MusicBrainz → Wikidata → Wikipedia album lookup
 - `src-tauri/src/mpv.rs` — IPC controller, spawns mpv with `--no-video --idle=yes`
 

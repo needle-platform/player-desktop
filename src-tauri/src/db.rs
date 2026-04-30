@@ -5,8 +5,8 @@ use anyhow::{anyhow, bail};
 use rusqlite::{params, Connection};
 
 use crate::models::{
-    default_equalizer_bands, AppSettings, BootstrapPayload, EqualizerPreset, LibraryData,
-    PlaybackSession, SavedPlaylist, ThemeMode, Track,
+    default_equalizer_bands, default_tracks_page_size, AppSettings, BootstrapPayload,
+    EqualizerPreset, LibraryData, PlaybackSession, SavedPlaylist, ThemeMode, Track,
 };
 
 fn normalize_hex_color(value: &str) -> Option<String> {
@@ -55,6 +55,13 @@ pub fn init_database(db_path: &Path) -> Result<()> {
         CREATE TABLE IF NOT EXISTS artist_images (
             name TEXT PRIMARY KEY,
             url TEXT,
+            fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS artist_info (
+            name TEXT PRIMARY KEY,
+            description TEXT,
+            source_url TEXT,
             fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -172,6 +179,17 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
         .and_then(|value| serde_json::from_str::<[f32; 10]>(&value).ok())
         .unwrap_or_else(default_equalizer_bands);
 
+    let tracks_page_size = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'tracks_page_size'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| matches!(*value, 25 | 50 | 100))
+        .unwrap_or_else(default_tracks_page_size);
+
     let mut roots_stmt = connection.prepare("SELECT path FROM library_roots ORDER BY path ASC")?;
     let library_roots = roots_stmt
         .query_map([], |row| row.get::<_, String>(0))?
@@ -193,6 +211,7 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
             _ => EqualizerPreset::Flat,
         },
         equalizer_bands,
+        tracks_page_size,
         library_roots,
     })
 }
@@ -235,6 +254,19 @@ pub fn save_settings(db_path: &Path, settings: &AppSettings) -> Result<AppSettin
         params![
             "equalizer_bands",
             serde_json::to_string(&settings.equalizer_bands)?
+        ],
+    )?;
+
+    connection.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![
+            "tracks_page_size",
+            match settings.tracks_page_size {
+                25 | 50 | 100 => settings.tracks_page_size,
+                _ => default_tracks_page_size(),
+            }
+            .to_string()
         ],
     )?;
 
@@ -386,6 +418,61 @@ pub fn get_artist_image(db_path: &Path, name: &str) -> Result<Option<Option<Stri
     Ok(None)
 }
 
+pub struct CachedArtistInfo {
+    pub description: Option<String>,
+    pub source_url: Option<String>,
+}
+
+pub fn get_artist_info(db_path: &Path, name: &str) -> Result<Option<Option<CachedArtistInfo>>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "SELECT description, source_url FROM artist_info
+         WHERE name = ?1
+           AND datetime(fetched_at) > datetime('now', '-90 days')",
+    )?;
+    let mut rows = stmt.query(params![name])?;
+    if let Some(row) = rows.next()? {
+        let description: Option<String> = row.get(0)?;
+        let source_url: Option<String> = row.get(1)?;
+        if description.is_none() && source_url.is_none() {
+            return Ok(Some(None));
+        }
+        return Ok(Some(Some(CachedArtistInfo {
+            description,
+            source_url,
+        })));
+    }
+    Ok(None)
+}
+
+pub fn cache_artist_info(
+    db_path: &Path,
+    name: &str,
+    info: Option<&CachedArtistInfo>,
+) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    let (description, source_url) = match info {
+        Some(info) => (info.description.as_deref(), info.source_url.as_deref()),
+        None => (None, None),
+    };
+    connection.execute(
+        "INSERT INTO artist_info (name, description, source_url, fetched_at)
+         VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+         ON CONFLICT(name) DO UPDATE SET
+            description = excluded.description,
+            source_url = excluded.source_url,
+            fetched_at = excluded.fetched_at",
+        params![name, description, source_url],
+    )?;
+    Ok(())
+}
+
+pub fn delete_artist_info(db_path: &Path, name: &str) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute("DELETE FROM artist_info WHERE name = ?1", params![name])?;
+    Ok(())
+}
+
 pub struct CachedAlbumInfo {
     pub description: Option<String>,
     pub source_url: Option<String>,
@@ -428,6 +515,12 @@ pub fn cache_album_info(db_path: &Path, key: &str, info: Option<&CachedAlbumInfo
             fetched_at = excluded.fetched_at",
         params![key, description, source_url],
     )?;
+    Ok(())
+}
+
+pub fn delete_album_info(db_path: &Path, key: &str) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute("DELETE FROM album_info WHERE key = ?1", params![key])?;
     Ok(())
 }
 
@@ -531,7 +624,11 @@ pub fn load_playlists(db_path: &Path) -> Result<Vec<SavedPlaylist>> {
     Ok(playlists)
 }
 
-pub fn create_playlist(db_path: &Path, name: &str, track_paths: &[String]) -> Result<Vec<SavedPlaylist>> {
+pub fn create_playlist(
+    db_path: &Path,
+    name: &str,
+    track_paths: &[String],
+) -> Result<Vec<SavedPlaylist>> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         bail!("Playlist name cannot be empty");
@@ -573,7 +670,8 @@ pub fn delete_playlist(db_path: &Path, playlist_id: i64) -> Result<Vec<SavedPlay
         "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
         params![playlist_id],
     )?;
-    let deleted = transaction.execute("DELETE FROM playlists WHERE id = ?1", params![playlist_id])?;
+    let deleted =
+        transaction.execute("DELETE FROM playlists WHERE id = ?1", params![playlist_id])?;
     if deleted == 0 {
         return Err(anyhow!("Playlist not found"));
     }
@@ -662,7 +760,10 @@ pub fn set_album_primary_genre(
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
 
-    if let Some(value) = primary_genre.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(value) = primary_genre
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         transaction.execute(
             "INSERT INTO album_primary_genres (album, album_artist, primary_genre, updated_at)
              VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)

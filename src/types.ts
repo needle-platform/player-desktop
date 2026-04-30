@@ -43,6 +43,7 @@ export interface AppSettings {
   accent_color: string | null;
   equalizer_preset: EqualizerPreset;
   equalizer_bands: number[];
+  tracks_page_size: number;
   library_roots: string[];
 }
 

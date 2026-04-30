@@ -110,6 +110,18 @@ export interface ArtistImage {
 export const getArtistImage = (name: string) =>
   invoke<ArtistImage | null>('get_artist_image', { name });
 
+export interface ArtistInfo {
+  description: string | null;
+  source_url: string | null;
+  source: string;
+}
+
+export const getArtistInfo = (name: string) =>
+  invoke<ArtistInfo | null>('get_artist_info', { name });
+
+export const refreshArtistInfo = (name: string) =>
+  invoke<ArtistInfo | null>('refresh_artist_info', { name });
+
 export interface AlbumInfo {
   description: string | null;
   source_url: string | null;
@@ -118,3 +130,6 @@ export interface AlbumInfo {
 
 export const getAlbumInfo = (album: string, artist: string | null) =>
   invoke<AlbumInfo | null>('get_album_info', { album, artist });
+
+export const refreshAlbumInfo = (album: string, artist: string | null) =>
+  invoke<AlbumInfo | null>('refresh_album_info', { album, artist });

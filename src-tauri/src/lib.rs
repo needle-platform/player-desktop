@@ -491,6 +491,72 @@ async fn get_artist_image(
 }
 
 #[tauri::command]
+async fn get_artist_info(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<artist::ArtistInfo>, String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(cached) =
+        db::get_artist_info(&state.db_path, &trimmed).map_err(|error| error.to_string())?
+    {
+        return Ok(cached.map(|info| artist::ArtistInfo {
+            description: info.description,
+            source_url: info.source_url,
+            source: "cache".into(),
+        }));
+    }
+
+    match artist::fetch_artist_info(&trimmed).await {
+        Ok(Some(info)) => {
+            let cached = db::CachedArtistInfo {
+                description: info.description.clone(),
+                source_url: info.source_url.clone(),
+            };
+            let _ = db::cache_artist_info(&state.db_path, &trimmed, Some(&cached));
+            Ok(Some(info))
+        }
+        Ok(None) => {
+            let _ = db::cache_artist_info(&state.db_path, &trimmed, None);
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn refresh_artist_info(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<artist::ArtistInfo>, String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let _ = db::delete_artist_info(&state.db_path, &trimmed);
+
+    match artist::fetch_artist_info(&trimmed).await {
+        Ok(Some(info)) => {
+            let cached = db::CachedArtistInfo {
+                description: info.description.clone(),
+                source_url: info.source_url.clone(),
+            };
+            let _ = db::cache_artist_info(&state.db_path, &trimmed, Some(&cached));
+            Ok(Some(info))
+        }
+        Ok(None) => {
+            let _ = db::cache_artist_info(&state.db_path, &trimmed, None);
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
 async fn get_album_info(
     album: String,
     artist: Option<String>,
@@ -505,20 +571,32 @@ async fn get_album_info(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let key = format!(
-        "{}|{}",
-        album_trim.to_lowercase(),
-        artist_trim.as_deref().unwrap_or("").to_lowercase(),
-    );
+    let lookup_keys = album_info_lookup_keys(&album_trim, artist_trim.as_deref());
+    let primary_key = lookup_keys
+        .first()
+        .cloned()
+        .unwrap_or_else(|| album_info_cache_key(&album_trim, artist_trim.as_deref()));
 
-    if let Some(cached) =
-        db::get_album_info(&state.db_path, &key).map_err(|error| error.to_string())?
-    {
-        return Ok(cached.map(|info| album::AlbumInfo {
-            description: info.description,
-            source_url: info.source_url,
-            source: "cache".into(),
-        }));
+    let mut saw_uncached_lookup = false;
+    for lookup_key in &lookup_keys {
+        match db::get_album_info(&state.db_path, lookup_key).map_err(|error| error.to_string())? {
+            Some(Some(info)) => {
+                if lookup_key != &primary_key {
+                    let _ = db::cache_album_info(&state.db_path, &primary_key, Some(&info));
+                }
+                return Ok(Some(album::AlbumInfo {
+                    description: info.description,
+                    source_url: info.source_url,
+                    source: "cache".into(),
+                }));
+            }
+            Some(None) => {}
+            None => saw_uncached_lookup = true,
+        }
+    }
+
+    if !saw_uncached_lookup && !lookup_keys.is_empty() {
+        return Ok(None);
     }
 
     match album::fetch_album_info(&album_trim, artist_trim.as_deref()).await {
@@ -527,15 +605,78 @@ async fn get_album_info(
                 description: info.description.clone(),
                 source_url: info.source_url.clone(),
             };
-            let _ = db::cache_album_info(&state.db_path, &key, Some(&cached));
+            for lookup_key in &lookup_keys {
+                let _ = db::cache_album_info(&state.db_path, lookup_key, Some(&cached));
+            }
             Ok(Some(info))
         }
         Ok(None) => {
-            let _ = db::cache_album_info(&state.db_path, &key, None);
+            for lookup_key in &lookup_keys {
+                let _ = db::cache_album_info(&state.db_path, lookup_key, None);
+            }
             Ok(None)
         }
         Err(error) => Err(error.to_string()),
     }
+}
+
+#[tauri::command]
+async fn refresh_album_info(
+    album: String,
+    artist: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<album::AlbumInfo>, String> {
+    let album_trim = album.trim().to_string();
+    if album_trim.is_empty() {
+        return Ok(None);
+    }
+    let artist_trim = artist
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let lookup_keys = album_info_lookup_keys(&album_trim, artist_trim.as_deref());
+    for lookup_key in &lookup_keys {
+        let _ = db::delete_album_info(&state.db_path, lookup_key);
+    }
+
+    match album::fetch_album_info(&album_trim, artist_trim.as_deref()).await {
+        Ok(Some(info)) => {
+            let cached = db::CachedAlbumInfo {
+                description: info.description.clone(),
+                source_url: info.source_url.clone(),
+            };
+            for lookup_key in &lookup_keys {
+                let _ = db::cache_album_info(&state.db_path, lookup_key, Some(&cached));
+            }
+            Ok(Some(info))
+        }
+        Ok(None) => {
+            for lookup_key in &lookup_keys {
+                let _ = db::cache_album_info(&state.db_path, lookup_key, None);
+            }
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+const ALBUM_INFO_CACHE_VERSION: &str = "v2";
+
+fn album_info_cache_key(album: &str, artist: Option<&str>) -> String {
+    format!(
+        "{}|{}|{}",
+        ALBUM_INFO_CACHE_VERSION,
+        album.trim().to_lowercase(),
+        artist.unwrap_or("").trim().to_lowercase(),
+    )
+}
+
+fn album_info_lookup_keys(album: &str, artist: Option<&str>) -> Vec<String> {
+    album::lookup_title_candidates(album)
+        .into_iter()
+        .map(|title| album_info_cache_key(&title, artist))
+        .collect()
 }
 
 #[tauri::command]
@@ -630,7 +771,10 @@ pub fn run() {
             get_cover_art,
             record_play,
             get_artist_image,
-            get_album_info
+            get_artist_info,
+            refresh_artist_info,
+            get_album_info,
+            refresh_album_info
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
