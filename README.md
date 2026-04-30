@@ -83,6 +83,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
 - Artist-aware album matching improves lookups for releases with ambiguous or very common titles
+- Subtitle-aware fallback matching now also trims common edition markers after separators like `:` / `-`, helping releases such as anthology or deluxe variants resolve to the parent album article when MusicBrainz groups them that way
 - Cached in SQLite (`album_info`) so repeat opens are instant and we avoid repeat lookups
 - **Album page genres** are derived from the imported track tags already embedded in your files
 - **Primary genre override** lets you set a local album-level genre Needle should prefer for browsing, filtering, and smart-playlist logic without rewriting the source files

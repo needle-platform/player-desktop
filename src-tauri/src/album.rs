@@ -86,6 +86,7 @@ fn pick_release_group_id(results: &[Value], query_title: &str) -> Option<String>
 fn is_variant_suffix(value: &str) -> bool {
     let normalized = value.trim().to_ascii_lowercase();
     [
+        "anthology",
         "anniversary",
         "bonus",
         "collector",
@@ -124,15 +125,17 @@ fn strip_bracketed_variant_suffix(title: &str) -> Option<String> {
     None
 }
 
-fn strip_dash_variant_suffix(title: &str) -> Option<String> {
-    for separator in [" - ", " – ", " — "] {
-        let (base, suffix) = title.rsplit_once(separator)?;
+fn strip_separator_variant_suffix(title: &str) -> Option<String> {
+    for separator in [" - ", " – ", " — ", ": "] {
+        let Some((base, suffix)) = title.rsplit_once(separator) else {
+            continue;
+        };
         if !is_variant_suffix(suffix) {
-            return None;
+            continue;
         }
         let trimmed = base.trim_end();
         if trimmed.is_empty() {
-            return None;
+            continue;
         }
         return Some(trimmed.to_string());
     }
@@ -150,7 +153,7 @@ pub fn lookup_title_candidates(album: &str) -> Vec<String> {
 
     loop {
         let next = strip_bracketed_variant_suffix(&current)
-            .or_else(|| strip_dash_variant_suffix(&current));
+            .or_else(|| strip_separator_variant_suffix(&current));
         let Some(next) = next else {
             break;
         };
@@ -340,6 +343,13 @@ mod tests {
         assert_eq!(
             lookup_title_candidates("Future Nostalgia - Deluxe Edition"),
             vec!["Future Nostalgia - Deluxe Edition", "Future Nostalgia"]
+        );
+        assert_eq!(
+            lookup_title_candidates("THE TORTURED POETS DEPARTMENT: THE ANTHOLOGY"),
+            vec![
+                "THE TORTURED POETS DEPARTMENT: THE ANTHOLOGY",
+                "THE TORTURED POETS DEPARTMENT",
+            ]
         );
     }
 
