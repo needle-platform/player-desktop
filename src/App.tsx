@@ -14,6 +14,7 @@ import {
   insertQueueAt,
   moveQueueIndex as tauriMoveQueueIndex,
   movePlaylistTrack,
+  openExternalUrl,
   pausePlayback,
   playQueueIndex as tauriPlayQueueIndex,
   playQueue as tauriPlayQueue,
@@ -4979,14 +4980,12 @@ function AlbumDetailView({
           <p className="album-about-text">
             {info.description}
             {info.source_url && (
-              <a
+              <button
                 className="album-about-link"
-                href={info.source_url}
-                target="_blank"
-                rel="noreferrer"
+                onClick={() => void openExternalUrl(info.source_url ?? '')}
               >
                 Read more on Wikipedia →
-              </a>
+              </button>
             )}
           </p>
         ) : infoLoading ? (
@@ -5141,6 +5140,13 @@ function ArtistDetailView({
   onAddTrackToPlaylist,
 }: ArtistDetailViewProps) {
   const [isBioExpanded, setIsBioExpanded] = useState(false);
+  const [isImageMenuOpen, setIsImageMenuOpen] = useState(false);
+  const imageMenuRef = useRef<HTMLDivElement | null>(null);
+  const {
+    url: artistImageUrl,
+    retrying: artistImageRetrying,
+    retry: retryArtistImage,
+  } = useArtistImage(artist);
   const { info, loading: infoLoading, retrying: infoRetrying, retry: retryArtistInfo } = useArtistInfo(artist);
   const artistTracks = useMemo(
     () => tracks.filter((track) => track.artist === artist),
@@ -5177,10 +5183,37 @@ function ArtistDetailView({
     const last = years[years.length - 1];
     return first === last ? `${first}` : `${first}–${last}`;
   }, [artistTracks]);
+  const fallbackArtworkPath = artistAlbums[0]?.samplePath ?? artistTracks[0]?.path ?? null;
   const shouldClampBio = (info?.description?.length ?? 0) > 320;
+  const canRefreshBio = infoLoading || infoRetrying ? false : true;
   useEffect(() => {
     setIsBioExpanded(false);
+    setIsImageMenuOpen(false);
   }, [artist, info?.description]);
+
+  useEffect(() => {
+    if (!isImageMenuOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!imageMenuRef.current?.contains(event.target as Node)) {
+        setIsImageMenuOpen(false);
+      }
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsImageMenuOpen(false);
+      }
+    };
+
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isImageMenuOpen]);
 
   return (
     <div className="view artist-detail">
@@ -5189,7 +5222,53 @@ function ArtistDetailView({
       </button>
 
       <header className="artist-hero">
-        <ArtistAvatar name={artist} size="hero" />
+        <div
+          className="artist-hero-media"
+          ref={imageMenuRef}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setIsImageMenuOpen(true);
+          }}
+        >
+          <ArtistAvatar
+            name={artist}
+            size="hero"
+            urlOverride={artistImageUrl}
+            fallbackTrackPath={fallbackArtworkPath}
+          />
+          {artistImageRetrying && (
+            <div className="artist-image-refresh-overlay" aria-hidden="true">
+              <div className="artist-image-refresh-spinner" />
+              <div className="artist-image-refresh-label">Refreshing photo…</div>
+            </div>
+          )}
+          {isImageMenuOpen && (
+            <div className="artist-image-menu-panel" role="menu" aria-label={`Refresh options for ${artist}`}>
+              <button
+                className="artist-image-menu-option"
+                onClick={() => {
+                  setIsImageMenuOpen(false);
+                  void retryArtistImage();
+                }}
+                disabled={artistImageRetrying}
+                role="menuitem"
+              >
+                {artistImageRetrying ? 'Refreshing photo…' : 'Refresh photo'}
+              </button>
+              <button
+                className="artist-image-menu-option"
+                onClick={() => {
+                  setIsImageMenuOpen(false);
+                  void retryArtistInfo();
+                }}
+                disabled={!canRefreshBio}
+                role="menuitem"
+              >
+                {infoRetrying ? 'Refreshing bio…' : 'Refresh bio'}
+              </button>
+            </div>
+          )}
+        </div>
         <div className="artist-hero-meta">
           <div className="album-hero-eyebrow">Artist</div>
           <h1 className="album-hero-title">{artist}</h1>
@@ -5227,27 +5306,29 @@ function ArtistDetailView({
                   }`}
                 >
                   {info.description}
-                </p>
-                <div className="artist-about-actions">
                   {shouldClampBio && (
-                    <button
-                      className="album-about-retry artist-about-toggle"
-                      onClick={() => setIsBioExpanded((value) => !value)}
-                    >
-                      {isBioExpanded ? 'Show less' : 'Read more'}
-                    </button>
+                    <>
+                      {' '}
+                      <button
+                        className="album-about-retry artist-about-toggle"
+                        onClick={() => setIsBioExpanded((value) => !value)}
+                      >
+                        {isBioExpanded ? 'Show less' : 'Read more'}
+                      </button>
+                    </>
                   )}
                   {info.source_url && (
-                    <a
-                      className="album-about-link"
-                      href={info.source_url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Read more on Wikipedia →
-                    </a>
+                    <>
+                      {' '}
+                      <button
+                        className="album-about-link"
+                        onClick={() => void openExternalUrl(info.source_url ?? '')}
+                      >
+                        Read more on Wikipedia →
+                      </button>
+                    </>
                   )}
-                </div>
+                </p>
               </>
             ) : infoLoading ? (
               <p className="muted">Looking up artist info…</p>
@@ -5257,13 +5338,6 @@ function ArtistDetailView({
                   No background info found for this artist yet. (We currently pull these from
                   Wikipedia via MusicBrainz when linked metadata is available.)
                 </p>
-                <button
-                  className="album-about-retry"
-                  onClick={() => void retryArtistInfo()}
-                  disabled={infoRetrying}
-                >
-                  {infoRetrying ? 'Retrying…' : 'Retry lookup'}
-                </button>
               </div>
             )}
           </div>
@@ -5562,10 +5636,17 @@ function Cover({ trackPath, fallback, size }: CoverProps) {
 interface ArtistAvatarProps {
   name: string;
   size: 'sm' | 'lg' | 'hero';
+  urlOverride?: string | null;
+  fallbackTrackPath?: string | null;
 }
 
-function ArtistAvatar({ name, size }: ArtistAvatarProps) {
-  const url = useArtistImage(name);
+function ArtistAvatar({ name, size, urlOverride, fallbackTrackPath }: ArtistAvatarProps) {
+  const { url } = useArtistImage(urlOverride === undefined ? name : null);
+  const fallbackArtworkUrl = useCoverArt(fallbackTrackPath ?? null);
+  const resolvedUrl = urlOverride ?? url;
+  const [imageFailed, setImageFailed] = useState(false);
+  const [fallbackFailed, setFallbackFailed] = useState(false);
+  const displayUrl = !imageFailed && resolvedUrl ? resolvedUrl : !fallbackFailed ? fallbackArtworkUrl : null;
   const className =
     size === 'hero'
       ? 'artist-portrait'
@@ -5574,16 +5655,25 @@ function ArtistAvatar({ name, size }: ArtistAvatarProps) {
         : 'avatar';
   const initial = name[0]?.toUpperCase() ?? '?';
 
-  if (url) {
+  useEffect(() => {
+    setImageFailed(false);
+    setFallbackFailed(false);
+  }, [resolvedUrl, fallbackArtworkUrl, fallbackTrackPath]);
+
+  if (displayUrl) {
     return (
       <div className={className}>
         <img
-          src={url}
+          src={displayUrl}
           alt=""
           className="avatar-img"
           referrerPolicy="no-referrer"
-          onError={(event) => {
-            (event.currentTarget as HTMLImageElement).style.display = 'none';
+          onError={() => {
+            if (!imageFailed && resolvedUrl) {
+              setImageFailed(true);
+              return;
+            }
+            setFallbackFailed(true);
           }}
         />
       </div>

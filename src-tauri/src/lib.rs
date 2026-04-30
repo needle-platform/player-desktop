@@ -6,7 +6,7 @@ mod library;
 mod models;
 mod mpv;
 
-use std::{fs, path::Path, sync::Mutex};
+use std::{fs, path::Path, process::Command, sync::Mutex};
 
 use models::{AppSettings, BootstrapPayload, PlaybackSession, PlaybackState, RepeatMode};
 use mpv::MpvController;
@@ -51,6 +51,40 @@ fn migrate_legacy_app_data(app_data_dir: &Path) {
 #[tauri::command]
 fn bootstrap_app(state: tauri::State<'_, AppState>) -> Result<BootstrapPayload, String> {
     db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return Err("Only http:// and https:// URLs can be opened".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(trimmed);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", trimmed]);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(trimmed);
+        command
+    };
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Failed to open external URL: {error}"))
 }
 
 #[tauri::command]
@@ -491,6 +525,31 @@ async fn get_artist_image(
 }
 
 #[tauri::command]
+async fn refresh_artist_image(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<artist::ArtistImage>, String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let _ = db::delete_artist_image(&state.db_path, &trimmed);
+
+    match artist::fetch_artist_image(&trimmed).await {
+        Ok(Some(image)) => {
+            let _ = db::cache_artist_image(&state.db_path, &trimmed, Some(&image.url));
+            Ok(Some(image))
+        }
+        Ok(None) => {
+            let _ = db::cache_artist_image(&state.db_path, &trimmed, None);
+            Ok(None)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
 async fn get_artist_info(
     name: String,
     state: tauri::State<'_, AppState>,
@@ -737,6 +796,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap_app,
+            open_external_url,
             scan_library,
             save_settings,
             play_track,
@@ -771,6 +831,7 @@ pub fn run() {
             get_cover_art,
             record_play,
             get_artist_image,
+            refresh_artist_image,
             get_artist_info,
             refresh_artist_info,
             get_album_info,

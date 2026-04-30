@@ -3,6 +3,8 @@ import type { AppSettings, BootstrapPayload, PlaybackSession, PlaybackState, Rep
 
 export const bootstrapApp = () => invoke<BootstrapPayload>('bootstrap_app');
 
+export const openExternalUrl = (url: string) => invoke<void>('open_external_url', { url });
+
 export const scanLibrary = (folder: string) =>
   invoke<BootstrapPayload>('scan_library', { folder });
 
@@ -109,6 +111,9 @@ export interface ArtistImage {
 
 export const getArtistImage = (name: string) =>
   invoke<ArtistImage | null>('get_artist_image', { name });
+
+export const refreshArtistImage = (name: string) =>
+  invoke<ArtistImage | null>('refresh_artist_image', { name });
 
 export interface ArtistInfo {
   description: string | null;

@@ -418,6 +418,12 @@ pub fn get_artist_image(db_path: &Path, name: &str) -> Result<Option<Option<Stri
     Ok(None)
 }
 
+pub fn delete_artist_image(db_path: &Path, name: &str) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute("DELETE FROM artist_images WHERE name = ?1", params![name])?;
+    Ok(())
+}
+
 pub struct CachedArtistInfo {
     pub description: Option<String>,
     pub source_url: Option<String>,

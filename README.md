@@ -65,17 +65,19 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Artist portraits & bios
 - **Artist portraits** pulled for free via **MusicBrainz → Wikidata → Wikimedia Commons**
 - **Artist biographies** pulled via **MusicBrainz → Wikidata → Wikipedia** when linked metadata is available
+- **Artist photo fallback chain** now checks direct MusicBrainz image relations, Wikidata `P18`, and finally the linked Wikipedia page image when available
 - No API keys required; polite User-Agent + 1 req/sec serialization
 - Cached in SQLite (`artist_images`) for 30 days, including misses so we don't keep hammering the API
 - Cached in SQLite (`artist_info`) for 90 days, including misses, with manual retry from the artist page
-- Graceful fallback to a gradient initial when no portrait is found
+- **Artist-page recovery tools** are hidden behind a right-click menu on the hero portrait for Refresh photo / Refresh bio, with loading feedback during background refreshes
+- **Graceful artwork fallback** uses the artist's album art before falling back to a gradient initial when no portrait loads
 
 ### Views
 - **Dashboard** (default landing screen)
 - **Tracks** with live search, sorting, and filters for artist / genre / year range, plus album / artist / playlist context
 - **Albums** with cover art, sorting, and direct playlist actions
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
-- **Artists** with sorting, track counts, dedicated artist pages, biographies, album grids, and most-played-track actions
+- **Artists** with sorting, track counts, dedicated artist pages, biographies, album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
 - **Settings** with theme switcher, custom accent color, library folders, maintenance, live equalizer presets, and manual 10-band EQ
 
 ### Album info
@@ -91,6 +93,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Custom accent color** persisted in SQLite and applied across playback controls, queue highlights, buttons, and selection states
 - **Theme-aware branding** with separate light/dark app icons and a dock-tuned macOS icon set
 - **Mini player runtime dark override** keeps the compact artwork-first window in a dark presentation without changing the user's saved theme preference
+- **Wikipedia links** from album and artist metadata open in the system browser instead of relying on webview behavior
 - **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Vocal, Treble Boost, Lounge
 - **Manual 10-band EQ** with preset curve visualization; manual slider edits are applied on release to avoid playback stutter
 
@@ -118,16 +121,15 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - `src/App.tsx` — UI, layout, routing-by-state
 - `src/lib/tauri.ts` — typed wrappers around all Tauri commands
 - `src/lib/cover.ts` — cover-art hook with module-level cache
-- `src/lib/artistImage.ts` — artist portrait hook with module-level cache
+- `src/lib/artistImage.ts` — artist portrait hook with module-level cache, refresh support, and album-art fallback behavior
 - `src/lib/artistInfo.ts` — artist-info hook with module-level cache
 - `src/lib/albumInfo.ts` — album-info hook with module-level cache
 - `src/lib/playlists.ts` — auto-playlist generators from tags + heuristics
 - `src/styles.css` — full theming + layout
-- `src-tauri/src/lib.rs` — Tauri command surface and app setup
+- `src-tauri/src/lib.rs` — Tauri command surface, app setup, and native external-URL opening
 - `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, saved playlists, artist-image cache, artist-info cache, album-info cache, album primary-genre overrides
 - `src-tauri/src/library.rs` — folder scanner, dotfile filter, metadata via `lofty`
-- `src-tauri/src/cover.rs` — sidecar + embedded cover-art extraction
-- `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup + Wikipedia-backed artist biography lookup
+- `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup with Wikipedia image fallback + Wikipedia-backed artist biography lookup
 - `src-tauri/src/album.rs` — MusicBrainz → Wikidata → Wikipedia album lookup
 - `src-tauri/src/mpv.rs` — IPC controller, spawns mpv with `--no-video --idle=yes`
 
