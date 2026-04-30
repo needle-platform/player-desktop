@@ -9,6 +9,15 @@ use crate::models::{
     PlaybackSession, SavedPlaylist, ThemeMode, Track,
 };
 
+fn normalize_hex_color(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("#{}", hex.to_ascii_lowercase()))
+}
+
 pub fn init_database(db_path: &Path) -> Result<()> {
     let connection = Connection::open(db_path)?;
 
@@ -144,6 +153,15 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
         )
         .unwrap_or_else(|_| "flat".to_string());
 
+    let accent_color = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'accent_color'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|value| normalize_hex_color(&value));
+
     let equalizer_bands = connection
         .query_row(
             "SELECT value FROM settings WHERE key = 'equalizer_bands'",
@@ -165,6 +183,7 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
             "dark" => ThemeMode::Dark,
             _ => ThemeMode::System,
         },
+        accent_color,
         equalizer_preset: match equalizer_preset.as_str() {
             "bass_boost" => EqualizerPreset::BassBoost,
             "vocal" => EqualizerPreset::Vocal,
@@ -186,6 +205,20 @@ pub fn save_settings(db_path: &Path, settings: &AppSettings) -> Result<AppSettin
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params!["theme", theme_to_str(&settings.theme)],
     )?;
+
+    if let Some(accent_color) = settings
+        .accent_color
+        .as_deref()
+        .and_then(normalize_hex_color)
+    {
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params!["accent_color", accent_color],
+        )?;
+    } else {
+        connection.execute("DELETE FROM settings WHERE key = 'accent_color'", [])?;
+    }
 
     connection.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)

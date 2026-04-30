@@ -207,7 +207,9 @@ const allTrackFilterValue = 'all';
 const defaultVolumePercent = 80;
 const miniPlayerPinnedStorageKey = 'needle-mini-player-pinned';
 const miniPlayerBaseSize = { width: 380, height: 420 };
-const miniPlayerExpandedHeight = 704;
+const miniPlayerExpandedHeightDefault = 772;
+const miniPlayerExpandedHeightMin = 720;
+const miniPlayerExpandedHeightMax = 980;
 
 const formatDuration = (seconds: number | null | undefined) => {
   if (!seconds || seconds <= 0) return '—';
@@ -334,6 +336,50 @@ const displayedEqualizerBands = (settings: AppSettings) =>
   settings.equalizer_preset === 'manual'
     ? normalizeEqualizerBands(settings.equalizer_bands)
     : equalizerPresetBands[settings.equalizer_preset] ?? defaultEqualizerBands;
+type RgbColor = { r: number; g: number; b: number };
+
+const accentColorPattern = /^#?[0-9a-f]{6}$/i;
+const normalizeAccentColor = (value: string | null | undefined) => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!accentColorPattern.test(trimmed)) return null;
+  return `#${trimmed.replace(/^#/, '').toLowerCase()}`;
+};
+const defaultAccentForTheme = (theme: 'light' | 'dark') => (theme === 'dark' ? '#87a0ff' : '#5b7cff');
+const hexToRgb = (hex: string): RgbColor => {
+  const normalized = normalizeAccentColor(hex) ?? '#5b7cff';
+  const raw = normalized.slice(1);
+  return {
+    r: Number.parseInt(raw.slice(0, 2), 16),
+    g: Number.parseInt(raw.slice(2, 4), 16),
+    b: Number.parseInt(raw.slice(4, 6), 16),
+  };
+};
+const rgbToHex = ({ r, g, b }: RgbColor) =>
+  `#${[r, g, b]
+    .map((channel) => Math.max(0, Math.min(255, Math.round(channel))).toString(16).padStart(2, '0'))
+    .join('')}`;
+const mixRgb = (from: RgbColor, to: RgbColor, ratio: number): RgbColor => ({
+  r: from.r + (to.r - from.r) * ratio,
+  g: from.g + (to.g - from.g) * ratio,
+  b: from.b + (to.b - from.b) * ratio,
+});
+const rgbaString = ({ r, g, b }: RgbColor, alpha: number) => `rgba(${r}, ${g}, ${b}, ${alpha})`;
+const accentContrastColor = ({ r, g, b }: RgbColor) =>
+  (r * 0.299 + g * 0.587 + b * 0.114) / 255 > 0.62 ? '#11131a' : '#ffffff';
+const deriveAccentTheme = (accentColor: string, theme: 'light' | 'dark') => {
+  const base = hexToRgb(accentColor);
+  return {
+    accent: accentColor,
+    accent2:
+      theme === 'dark'
+        ? rgbToHex(mixRgb(base, { r: 255, g: 255, b: 255 }, 0.18))
+        : rgbToHex(mixRgb(base, { r: 0, g: 0, b: 0 }, 0.18)),
+    rowHover: rgbaString(base, 0.08),
+    rowCurrent: rgbaString(base, theme === 'dark' ? 0.18 : 0.16),
+    accentContrast: accentContrastColor(base),
+  };
+};
 const normalizeSession = (session?: Partial<PlaybackSession> | null): PlaybackSession => {
   const queuePaths = Array.isArray(session?.queue_paths) ? session.queue_paths.filter(Boolean) : [];
   const baseQueuePaths = Array.isArray(session?.base_queue_paths)
@@ -613,6 +659,7 @@ function App() {
     return window.localStorage.getItem(miniPlayerPinnedStorageKey) === 'true';
   });
   const [isMiniQueueExpanded, setIsMiniQueueExpanded] = useState(false);
+  const [miniPlayerExpandedHeight, setMiniPlayerExpandedHeight] = useState(miniPlayerExpandedHeightDefault);
   const [isBackendPlaybackLoaded, setIsBackendPlaybackLoaded] = useState(false);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -629,6 +676,12 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light');
   const effectiveTheme: 'light' | 'dark' = isMiniPlayer ? 'dark' : resolvedTheme;
+  const customAccentColor = useMemo(() => normalizeAccentColor(data?.settings.accent_color ?? null), [data?.settings.accent_color]);
+  const accentTheme = useMemo(
+    () => (customAccentColor ? deriveAccentTheme(customAccentColor, effectiveTheme) : null),
+    [customAccentColor, effectiveTheme],
+  );
+  const currentAccentColor = accentTheme?.accent ?? defaultAccentForTheme(effectiveTheme);
   const lastRecordedPath = useRef<string | null>(null);
   const suppressRecordPathRef = useRef<string | null>(null);
   const sessionHydratedRef = useRef(false);
@@ -640,6 +693,7 @@ function App() {
   const deviceMenuRef = useRef<HTMLDivElement | null>(null);
   const queueDrawerRef = useRef<HTMLElement | null>(null);
   const windowRestoreStateRef = useRef<WindowRestoreState | null>(null);
+  const miniQueueResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
 
   const syncConfirmedPlaybackState = () => {
     setIsPlaying(
@@ -666,11 +720,9 @@ function App() {
     setTrackYearFromFilter(allTrackFilterValue);
     setTrackYearToFilter(allTrackFilterValue);
   };
-  const resizeMiniPlayerWindow = async (expanded: boolean) => {
+  const resizeMiniPlayerWindow = async (height: number) => {
     const appWindow = getCurrentWindow();
-    await appWindow.setSize(
-      new LogicalSize(miniPlayerBaseSize.width, expanded ? miniPlayerExpandedHeight : miniPlayerBaseSize.height),
-    );
+    await appWindow.setSize(new LogicalSize(miniPlayerBaseSize.width, height));
   };
   const enterMiniPlayer = async () => {
     try {
@@ -690,6 +742,7 @@ function App() {
       setIsQueueOpen(false);
       setIsDeviceMenuOpen(false);
       setIsMiniQueueExpanded(false);
+      setMiniPlayerExpandedHeight(miniPlayerExpandedHeightDefault);
       await appWindow.setResizable(false);
       await appWindow.setSize(new LogicalSize(miniPlayerBaseSize.width, miniPlayerBaseSize.height));
       await appWindow.setAlwaysOnTop(isMiniPlayerPinned);
@@ -735,11 +788,24 @@ function App() {
     setIsMiniQueueExpanded(nextExpanded);
     if (!isMiniPlayer) return;
     try {
-      await resizeMiniPlayerWindow(nextExpanded);
+      await resizeMiniPlayerWindow(nextExpanded ? miniPlayerExpandedHeight : miniPlayerBaseSize.height);
     } catch (error) {
       setIsMiniQueueExpanded(!nextExpanded);
       setStatus(error instanceof Error ? error.message : String(error));
     }
+  };
+  const startMiniPlayerWindowDrag = async () => {
+    try {
+      await getCurrentWindow().startDragging();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const startMiniQueueResize = (clientY: number) => {
+    miniQueueResizeRef.current = {
+      startY: clientY,
+      startHeight: miniPlayerExpandedHeight,
+    };
   };
   const updateTrackYearFromFilter = (value: TrackYearBoundaryFilter) => {
     setTrackYearFromFilter(value);
@@ -873,6 +939,32 @@ function App() {
   }, [isMiniPlayerPinned]);
 
   useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const resizeState = miniQueueResizeRef.current;
+      if (!resizeState || !isMiniPlayer || !isMiniQueueExpanded) return;
+
+      const nextHeight = Math.max(
+        miniPlayerExpandedHeightMin,
+        Math.min(miniPlayerExpandedHeightMax, resizeState.startHeight + (event.clientY - resizeState.startY)),
+      );
+      setMiniPlayerExpandedHeight(nextHeight);
+      void resizeMiniPlayerWindow(nextHeight);
+    };
+
+    const handlePointerUp = () => {
+      miniQueueResizeRef.current = null;
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [isMiniPlayer, isMiniQueueExpanded]);
+
+  useEffect(() => {
     let cancelled = false;
 
     void (async () => {
@@ -901,12 +993,18 @@ function App() {
     void (async () => {
       try {
         const appWindow = getCurrentWindow();
-        const [size, resizable] = await Promise.all([appWindow.innerSize(), appWindow.isResizable()]);
+        const [size, resizable, scaleFactor] = await Promise.all([
+          appWindow.innerSize(),
+          appWindow.isResizable(),
+          appWindow.scaleFactor(),
+        ]);
         if (cancelled || isMiniPlayer) return;
+        const logicalSize = size.toLogical(scaleFactor);
 
         const isMiniSized =
-          size.width === miniPlayerBaseSize.width &&
-          (size.height === miniPlayerBaseSize.height || size.height === miniPlayerExpandedHeight);
+          Math.round(logicalSize.width) === miniPlayerBaseSize.width &&
+          Math.round(logicalSize.height) >= miniPlayerBaseSize.height &&
+          Math.round(logicalSize.height) <= miniPlayerExpandedHeightMax;
 
         if (!resizable || isMiniSized) {
           await appWindow.setAlwaysOnTop(false);
@@ -940,6 +1038,24 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = effectiveTheme;
   }, [effectiveTheme]);
+
+  useEffect(() => {
+    const rootStyle = document.documentElement.style;
+    if (!accentTheme) {
+      rootStyle.removeProperty('--accent');
+      rootStyle.removeProperty('--accent-2');
+      rootStyle.removeProperty('--row-hover');
+      rootStyle.removeProperty('--row-current');
+      rootStyle.removeProperty('--accent-contrast');
+      return;
+    }
+
+    rootStyle.setProperty('--accent', accentTheme.accent);
+    rootStyle.setProperty('--accent-2', accentTheme.accent2);
+    rootStyle.setProperty('--row-hover', accentTheme.rowHover);
+    rootStyle.setProperty('--row-current', accentTheme.rowCurrent);
+    rootStyle.setProperty('--accent-contrast', accentTheme.accentContrast);
+  }, [accentTheme]);
 
   useEffect(() => {
     if (!isDeviceMenuOpen) return;
@@ -1448,9 +1564,13 @@ function App() {
 
   const updateSettings = async (next: AppSettings) => {
     if (!data) return;
-    setData({ ...data, settings: next });
+    const normalizedSettings = {
+      ...next,
+      accent_color: normalizeAccentColor(next.accent_color),
+    };
+    setData({ ...data, settings: normalizedSettings });
     try {
-      await saveSettings(next);
+      await saveSettings(normalizedSettings);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -2593,7 +2713,6 @@ function App() {
     return (
       <MiniPlayerView
         currentTrack={currentTrack}
-        currentAlbumKey={currentAlbumKey}
         currentPath={currentPath}
         isPlaying={isPlaying}
         isPinned={isMiniPlayerPinned}
@@ -2605,13 +2724,7 @@ function App() {
         remainingSeconds={remainingSeconds}
         effectiveDuration={effectiveDuration}
         progressStyle={progressStyle}
-        onOpenAlbum={() => {
-          void exitMiniPlayer({ quiet: true }).then(() => {
-            if (currentAlbumKey) {
-              openAlbum(currentAlbumKey);
-            }
-          });
-        }}
+        onStartDragging={() => void startMiniPlayerWindowDrag()}
         onExit={() => void exitMiniPlayer()}
         onTogglePin={() => void toggleMiniPlayerPinned()}
         onToggleQueue={() => void toggleMiniQueueExpanded()}
@@ -2626,6 +2739,7 @@ function App() {
           }
         }}
         onClearQueue={() => void clearQueue()}
+        onQueueResizeStart={startMiniQueueResize}
         onScrubChange={updateScrubPosition}
         onCommitScrub={() => void commitSeek(scrubPositionRef.current)}
       />
@@ -2993,6 +3107,7 @@ function App() {
         {view === 'settings' && (
           <SettingsView
             settings={data.settings}
+            currentAccentColor={currentAccentColor}
             onChange={updateSettings}
             onAddFolder={importFolder}
             onMaintenance={maintenance}
@@ -3753,7 +3868,6 @@ function QueueDrawer({
 
 interface MiniPlayerViewProps {
   currentTrack: Track | null;
-  currentAlbumKey: string | null;
   currentPath: string | null;
   isPlaying: boolean;
   isPinned: boolean;
@@ -3765,7 +3879,7 @@ interface MiniPlayerViewProps {
   remainingSeconds: number | null;
   effectiveDuration: number;
   progressStyle: CSSProperties;
-  onOpenAlbum: () => void;
+  onStartDragging: () => void;
   onExit: () => void;
   onTogglePin: () => void;
   onToggleQueue: () => void;
@@ -3775,13 +3889,13 @@ interface MiniPlayerViewProps {
   onStop: () => void;
   onPlayTrack: (track: Track) => void;
   onClearQueue: () => void;
+  onQueueResizeStart: (clientY: number) => void;
   onScrubChange: (value: number) => void;
   onCommitScrub: () => void;
 }
 
 function MiniPlayerView({
   currentTrack,
-  currentAlbumKey,
   currentPath,
   isPlaying,
   isPinned,
@@ -3793,7 +3907,7 @@ function MiniPlayerView({
   remainingSeconds,
   effectiveDuration,
   progressStyle,
-  onOpenAlbum,
+  onStartDragging,
   onExit,
   onTogglePin,
   onToggleQueue,
@@ -3803,6 +3917,7 @@ function MiniPlayerView({
   onStop,
   onPlayTrack,
   onClearQueue,
+  onQueueResizeStart,
   onScrubChange,
   onCommitScrub,
 }: MiniPlayerViewProps) {
@@ -3820,19 +3935,22 @@ function MiniPlayerView({
             fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
             size="mini"
           />
-          {currentAlbumKey && (
-            <button
-              className="mini-player-artwork-hitarea"
-              onClick={onOpenAlbum}
-              title={`Open album · ${albumLabel}`}
-              aria-label={`Open album · ${albumLabel}`}
-            />
-          )}
+          <div
+            className="mini-player-drag-surface"
+            onMouseDown={(event) => {
+              if (event.button !== 0) return;
+              void onStartDragging();
+            }}
+            title="Drag to move mini player"
+            aria-hidden="true"
+          />
           <div className="mini-player-topbar">
             <div className="mini-player-brand">Needle</div>
             <div className="mini-player-topbar-actions">
               <button
-                className={`ctrl mini-player-chrome-button ${isPinned ? 'is-active' : ''}`}
+                className={`ctrl mini-player-chrome-button mini-player-pin-button ${
+                  isPinned ? 'is-active is-pinned' : 'is-unpinned'
+                }`}
                 onClick={onTogglePin}
                 title={isPinned ? 'Unpin mini player' : 'Pin mini player'}
                 aria-label={isPinned ? 'Unpin mini player' : 'Pin mini player'}
@@ -3962,6 +4080,18 @@ function MiniPlayerView({
                 })}
               </div>
             )}
+            <div
+              className="mini-player-queue-resize-handle"
+              onMouseDown={(event) => {
+                if (event.button !== 0) return;
+                event.preventDefault();
+                onQueueResizeStart(event.clientY);
+              }}
+              title="Drag to resize Up Next"
+              aria-hidden="true"
+            >
+              <span className="mini-player-queue-resize-grip" />
+            </div>
           </section>
         )}
       </div>
@@ -4877,6 +5007,7 @@ function ArtistsView({ artists, sortValue, onSortChange, onSelect }: ArtistsView
 
 interface SettingsViewProps {
   settings: AppSettings;
+  currentAccentColor: string;
   onChange: (next: AppSettings) => void;
   onAddFolder: () => void;
   onMaintenance: () => void;
@@ -4884,8 +5015,17 @@ interface SettingsViewProps {
   busy: boolean;
 }
 
-function SettingsView({ settings, onChange, onAddFolder, onMaintenance, onRemoveRoot, busy }: SettingsViewProps) {
+function SettingsView({
+  settings,
+  currentAccentColor,
+  onChange,
+  onAddFolder,
+  onMaintenance,
+  onRemoveRoot,
+  busy,
+}: SettingsViewProps) {
   const isManualEqualizer = settings.equalizer_preset === 'manual';
+  const accentColorValue = normalizeAccentColor(settings.accent_color) ?? currentAccentColor;
   const [manualBandsDraft, setManualBandsDraft] = useState(() =>
     normalizeEqualizerBands(settings.equalizer_bands),
   );
@@ -4962,6 +5102,39 @@ function SettingsView({ settings, onChange, onAddFolder, onMaintenance, onRemove
                     {opt.label}
                   </button>
                 ))}
+              </div>
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <label className="settings-label">Accent color</label>
+              <p className="settings-hint">
+                Pick a custom accent for playback controls, buttons, queue highlights, and selection states across Needle.
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <div className="settings-accent-control">
+                <input
+                  className="settings-accent-input"
+                  type="color"
+                  value={accentColorValue}
+                  onChange={(event) =>
+                    onChange({
+                      ...settings,
+                      accent_color: normalizeAccentColor(event.currentTarget.value),
+                    })
+                  }
+                  aria-label="Accent color"
+                />
+                <div className="settings-accent-meta">
+                  <div className="settings-accent-value">{accentColorValue.toUpperCase()}</div>
+                  <div className="settings-accent-note">
+                    {settings.accent_color ? 'Custom accent active' : 'Using theme default'}
+                  </div>
+                </div>
+                <button className="ghost-button" onClick={() => onChange({ ...settings, accent_color: null })} disabled={!settings.accent_color}>
+                  Reset
+                </button>
               </div>
             </div>
           </div>

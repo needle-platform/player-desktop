@@ -12,6 +12,7 @@
   --muted: #7a8295;
   --accent: #5b7cff;
   --accent-2: #3c61ff;
+  --accent-contrast: #ffffff;
   --danger: #e2495a;
   --row-hover: rgba(91, 124, 255, 0.08);
   --row-current: rgba(91, 124, 255, 0.16);
@@ -32,6 +33,7 @@
   --muted: #8892a8;
   --accent: #87a0ff;
   --accent-2: #a6b8ff;
+  --accent-contrast: #ffffff;
   --danger: #ff6f7d;
   --row-hover: rgba(135, 160, 255, 0.08);
   --row-current: rgba(135, 160, 255, 0.18);
@@ -152,11 +154,7 @@ input, select {
   --text: #eef2ff;
   --text-2: #c1c8da;
   --muted: #8892a8;
-  --accent: #87a0ff;
-  --accent-2: #a6b8ff;
   --danger: #ff6f7d;
-  --row-hover: rgba(135, 160, 255, 0.08);
-  --row-current: rgba(135, 160, 255, 0.18);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.45);
   --player-surface: rgba(20, 23, 31, 0.68);
@@ -199,11 +197,15 @@ input, select {
   font-weight: 600;
 }
 
-.mini-player-artwork-hitarea {
+.mini-player-drag-surface {
   position: absolute;
-  inset: 0;
-  z-index: 1;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 52%;
+  z-index: 2;
   background: transparent;
+  cursor: grab;
 }
 
 .mini-player-topbar {
@@ -257,6 +259,18 @@ input, select {
   background: color-mix(in srgb, black 40%, transparent);
   border-color: color-mix(in srgb, white 20%, transparent);
   color: white;
+}
+
+.mini-player-pin-button svg {
+  transition: transform 140ms ease;
+}
+
+.mini-player-pin-button.is-unpinned svg {
+  transform: rotate(28deg);
+}
+
+.mini-player-pin-button.is-pinned svg {
+  transform: rotate(0deg);
 }
 
 .mini-player-overlay {
@@ -372,6 +386,23 @@ input, select {
   border: 1px solid color-mix(in srgb, var(--border) 88%, white 8%);
   box-shadow: var(--shadow-sm);
   overflow: hidden;
+}
+
+.mini-player-queue-resize-handle {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 4px;
+  margin-top: 2px;
+  cursor: ns-resize;
+}
+
+.mini-player-queue-resize-grip {
+  width: 44px;
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
 }
 
 .mini-player-queue-head {
@@ -1329,7 +1360,7 @@ input, select {
   height: 40px;
   border-radius: 50%;
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast);
   font-size: 14px;
   display: grid;
   place-items: center;
@@ -1619,10 +1650,10 @@ input, select {
 .ctrl-primary {
   width: 58px;
   height: 58px;
-  background: var(--text);
-  color: var(--panel);
+  background: var(--accent);
+  color: var(--accent-contrast);
   border-color: transparent;
-  box-shadow: 0 10px 24px color-mix(in srgb, var(--text) 18%, transparent);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 26%, transparent);
 }
 .ctrl-primary svg {
   width: 24px;
@@ -1630,8 +1661,8 @@ input, select {
   stroke-width: 2.1;
 }
 .ctrl-primary:hover:not(:disabled) {
-  background: var(--accent);
-  color: white;
+  background: var(--accent-2, var(--accent));
+  color: var(--accent-contrast);
   border-color: transparent;
   box-shadow: 0 12px 28px color-mix(in srgb, var(--accent) 26%, transparent);
 }
@@ -1654,7 +1685,7 @@ input, select {
   padding: 0 2px;
   border-radius: 999px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast);
   font-size: 9px;
   line-height: 12px;
   text-align: center;
@@ -1693,7 +1724,7 @@ input, select {
   padding: 0 5px;
   border-radius: 999px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast);
   display: inline-grid;
   place-items: center;
   font-size: 10px;
@@ -2026,6 +2057,54 @@ input, select {
   flex-shrink: 0;
 }
 
+.settings-accent-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-2);
+}
+
+.settings-accent-input {
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.settings-accent-input::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.settings-accent-input::-webkit-color-swatch,
+.settings-accent-input::-moz-color-swatch {
+  border: none;
+  border-radius: 12px;
+}
+
+.settings-accent-meta {
+  min-width: 96px;
+}
+
+.settings-accent-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-accent-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .settings-row-block {
   align-items: stretch;
   flex-direction: column;
@@ -2222,14 +2301,14 @@ input, select {
 }
 .seg-btn:hover { color: var(--text); }
 .seg-btn.on {
-  background: var(--panel);
-  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  color: var(--accent);
   box-shadow: var(--shadow-sm);
 }
 
 .primary {
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast);
   padding: 9px 14px;
   border-radius: 8px;
   font-size: 13px;
@@ -2565,7 +2644,7 @@ input, select {
 }
 
 .dashboard-hero .primary {
-  box-shadow: 0 10px 24px -18px rgba(44, 80, 255, 0.8);
+  box-shadow: 0 10px 24px -18px color-mix(in srgb, var(--accent) 72%, transparent);
 }
 
 .dashboard-stats {
@@ -2719,7 +2798,7 @@ input, select {
   height: 36px;
   border-radius: 50%;
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast);
   font-size: 13px;
   display: grid;
   place-items: center;
@@ -3057,7 +3136,7 @@ input, select {
 
 .primary-button {
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast);
   border-radius: 999px;
   padding: 10px 22px;
   font-weight: 600;

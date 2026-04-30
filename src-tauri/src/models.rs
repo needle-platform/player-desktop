@@ -63,6 +63,8 @@ pub struct LibraryData {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppSettings {
     pub theme: ThemeMode,
+    #[serde(default)]
+    pub accent_color: Option<String>,
     pub equalizer_preset: EqualizerPreset,
     #[serde(default = "default_equalizer_bands")]
     pub equalizer_bands: [f32; 10],

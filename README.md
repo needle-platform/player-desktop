@@ -39,7 +39,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Safe relaunch behavior** restores the last session in a stopped state, never surprise-autoplays on app launch
 - **Repeat modes**: off · one · all
 - **Shuffle state** is visible and persistent
-- **Artwork-first mini player** with full-bleed cover art, pinned always-on-top mode, a bottom-right Up Next toggle, and a scrollable expanded queue
+- **Artwork-first mini player** with full-bleed cover art, drag-to-move behavior, pinned always-on-top mode, and an expandable / resizable Up Next queue
 - **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
@@ -74,7 +74,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Albums** with cover art, sorting, and direct playlist actions
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, full track list, and background album info when available
 - **Artists** with sorting and track counts
-- **Settings** with theme switcher, library folders, maintenance, live equalizer presets, and manual 10-band EQ
+- **Settings** with theme switcher, custom accent color, library folders, maintenance, live equalizer presets, and manual 10-band EQ
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
@@ -85,6 +85,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 
 ### Themes & UX
 - **Themes**: System, Light, Dark
+- **Custom accent color** persisted in SQLite and applied across playback controls, queue highlights, buttons, and selection states
 - **Theme-aware branding** with separate light/dark app icons and a dock-tuned macOS icon set
 - **Mini player runtime dark override** keeps the compact artwork-first window in a dark presentation without changing the user's saved theme preference
 - **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Vocal, Treble Boost, Lounge

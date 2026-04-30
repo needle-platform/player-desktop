@@ -40,6 +40,7 @@ export interface LibraryData {
 
 export interface AppSettings {
   theme: ThemeMode;
+  accent_color: string | null;
   equalizer_preset: EqualizerPreset;
   equalizer_bands: number[];
   library_roots: string[];
