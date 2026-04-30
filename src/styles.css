@@ -269,7 +269,7 @@ input, select {
   flex-direction: column;
   gap: 14px;
   padding: 54px 18px 18px;
-  background: linear-gradient(180deg, transparent 0%, rgba(10, 12, 18, 0.16) 22%, rgba(10, 12, 18, 0.82) 100%);
+  background: linear-gradient(180deg, rgba(6, 8, 12, 0) 0%, rgba(6, 8, 12, 0.28) 18%, rgba(6, 8, 12, 0.72) 58%, rgba(6, 8, 12, 0.94) 100%);
 }
 
 .mini-player-copy {
@@ -288,6 +288,7 @@ input, select {
   font-weight: 600;
   letter-spacing: -0.02em;
   color: white;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.42);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -297,6 +298,7 @@ input, select {
   margin-top: 6px;
   font-size: 13px;
   color: rgba(255, 255, 255, 0.78);
+  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.38);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
