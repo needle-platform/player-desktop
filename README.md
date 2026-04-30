@@ -39,6 +39,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Safe relaunch behavior** restores the last session in a stopped state, never surprise-autoplays on app launch
 - **Repeat modes**: off · one · all
 - **Shuffle state** is visible and persistent
+- **Artwork-first mini player** with full-bleed cover art, pinned always-on-top mode, a bottom-right Up Next toggle, and a scrollable expanded queue
 - **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
@@ -85,6 +86,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Themes & UX
 - **Themes**: System, Light, Dark
 - **Theme-aware branding** with separate light/dark app icons and a dock-tuned macOS icon set
+- **Mini player runtime dark override** keeps the compact artwork-first window in a dark presentation without changing the user's saved theme preference
 - **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Vocal, Treble Boost, Lounge
 - **Manual 10-band EQ** with preset curve visualization; manual slider edits are applied on release to avoid playback stutter
 

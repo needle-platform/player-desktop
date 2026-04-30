@@ -1,5 +1,7 @@
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
+import { LogicalSize, PhysicalSize } from '@tauri-apps/api/dpi';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { CSSProperties, RefObject } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -109,6 +111,14 @@ type ArtistSummary = {
   count: number;
   addedAt: string | null;
 };
+type WindowRestoreState = {
+  size: {
+    width: number;
+    height: number;
+  };
+  alwaysOnTop: boolean;
+  resizable: boolean;
+};
 
 const greeting = (): string => {
   const h = new Date().getHours();
@@ -195,6 +205,9 @@ const artistSortOptions: Array<{ value: ArtistSortOption; label: string }> = [
 ];
 const allTrackFilterValue = 'all';
 const defaultVolumePercent = 80;
+const miniPlayerPinnedStorageKey = 'needle-mini-player-pinned';
+const miniPlayerBaseSize = { width: 380, height: 420 };
+const miniPlayerExpandedHeight = 704;
 
 const formatDuration = (seconds: number | null | undefined) => {
   if (!seconds || seconds <= 0) return '—';
@@ -482,6 +495,36 @@ function QueueIcon() {
   );
 }
 
+function MiniPlayerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="5" width="18" height="14" rx="3" />
+      <path d="M3 10h18" />
+      <path d="m10 12 5 3-5 3z" />
+    </svg>
+  );
+}
+
+function RestoreWindowIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 7h10v10H7z" />
+      <path d="M11 3h10v10" />
+      <path d="M11 3H7a4 4 0 0 0-4 4v4" />
+    </svg>
+  );
+}
+
+function PinIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 4h6" />
+      <path d="M10 4v5l-3 4v1h10v-1l-3-4V4" />
+      <path d="M12 14v6" />
+    </svg>
+  );
+}
+
 function PlaylistIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -564,6 +607,12 @@ function App() {
   const [repeatMode, setRepeatMode] = useState<RepeatMode>('off');
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [isQueueOpen, setIsQueueOpen] = useState(false);
+  const [isMiniPlayer, setIsMiniPlayer] = useState(false);
+  const [isMiniPlayerPinned, setIsMiniPlayerPinned] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.localStorage.getItem(miniPlayerPinnedStorageKey) === 'true';
+  });
+  const [isMiniQueueExpanded, setIsMiniQueueExpanded] = useState(false);
   const [isBackendPlaybackLoaded, setIsBackendPlaybackLoaded] = useState(false);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -579,6 +628,7 @@ function App() {
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
   const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light');
+  const effectiveTheme: 'light' | 'dark' = isMiniPlayer ? 'dark' : resolvedTheme;
   const lastRecordedPath = useRef<string | null>(null);
   const suppressRecordPathRef = useRef<string | null>(null);
   const sessionHydratedRef = useRef(false);
@@ -589,6 +639,7 @@ function App() {
   const albumReturnView = useRef<View>('albums');
   const deviceMenuRef = useRef<HTMLDivElement | null>(null);
   const queueDrawerRef = useRef<HTMLElement | null>(null);
+  const windowRestoreStateRef = useRef<WindowRestoreState | null>(null);
 
   const syncConfirmedPlaybackState = () => {
     setIsPlaying(
@@ -614,6 +665,81 @@ function App() {
     setTrackGenreFilter(allTrackFilterValue);
     setTrackYearFromFilter(allTrackFilterValue);
     setTrackYearToFilter(allTrackFilterValue);
+  };
+  const resizeMiniPlayerWindow = async (expanded: boolean) => {
+    const appWindow = getCurrentWindow();
+    await appWindow.setSize(
+      new LogicalSize(miniPlayerBaseSize.width, expanded ? miniPlayerExpandedHeight : miniPlayerBaseSize.height),
+    );
+  };
+  const enterMiniPlayer = async () => {
+    try {
+      const appWindow = getCurrentWindow();
+      if (!windowRestoreStateRef.current) {
+        const [size, alwaysOnTop, resizable] = await Promise.all([
+          appWindow.innerSize(),
+          appWindow.isAlwaysOnTop(),
+          appWindow.isResizable(),
+        ]);
+        windowRestoreStateRef.current = {
+          size: { width: size.width, height: size.height },
+          alwaysOnTop,
+          resizable,
+        };
+      }
+      setIsQueueOpen(false);
+      setIsDeviceMenuOpen(false);
+      setIsMiniQueueExpanded(false);
+      await appWindow.setResizable(false);
+      await appWindow.setSize(new LogicalSize(miniPlayerBaseSize.width, miniPlayerBaseSize.height));
+      await appWindow.setAlwaysOnTop(isMiniPlayerPinned);
+      setIsMiniPlayer(true);
+      setStatus('Mini player on');
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const exitMiniPlayer = async (options?: { quiet?: boolean }) => {
+    try {
+      const appWindow = getCurrentWindow();
+      const restoreState = windowRestoreStateRef.current;
+      setIsMiniQueueExpanded(false);
+      setIsMiniPlayer(false);
+      await appWindow.setAlwaysOnTop(restoreState?.alwaysOnTop ?? false);
+      await appWindow.setResizable(restoreState?.resizable ?? true);
+      if (restoreState) {
+        await appWindow.setSize(new PhysicalSize(restoreState.size.width, restoreState.size.height));
+      }
+      windowRestoreStateRef.current = null;
+      if (!options?.quiet) {
+        setStatus('Mini player off');
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const toggleMiniPlayerPinned = async () => {
+    const nextPinned = !isMiniPlayerPinned;
+    setIsMiniPlayerPinned(nextPinned);
+    if (!isMiniPlayer) return;
+    try {
+      await getCurrentWindow().setAlwaysOnTop(nextPinned);
+      setStatus(nextPinned ? 'Mini player pinned' : 'Mini player unpinned');
+    } catch (error) {
+      setIsMiniPlayerPinned(!nextPinned);
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const toggleMiniQueueExpanded = async () => {
+    const nextExpanded = !isMiniQueueExpanded;
+    setIsMiniQueueExpanded(nextExpanded);
+    if (!isMiniPlayer) return;
+    try {
+      await resizeMiniPlayerWindow(nextExpanded);
+    } catch (error) {
+      setIsMiniQueueExpanded(!nextExpanded);
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
   };
   const updateTrackYearFromFilter = (value: TrackYearBoundaryFilter) => {
     setTrackYearFromFilter(value);
@@ -742,6 +868,11 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(miniPlayerPinnedStorageKey, String(isMiniPlayerPinned));
+  }, [isMiniPlayerPinned]);
+
+  useEffect(() => {
     let cancelled = false;
 
     void (async () => {
@@ -765,17 +896,50 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const appWindow = getCurrentWindow();
+        const [size, resizable] = await Promise.all([appWindow.innerSize(), appWindow.isResizable()]);
+        if (cancelled || isMiniPlayer) return;
+
+        const isMiniSized =
+          size.width === miniPlayerBaseSize.width &&
+          (size.height === miniPlayerBaseSize.height || size.height === miniPlayerExpandedHeight);
+
+        if (!resizable || isMiniSized) {
+          await appWindow.setAlwaysOnTop(false);
+          await appWindow.setResizable(true);
+          if (isMiniSized) {
+            await appWindow.setSize(new LogicalSize(1440, 960));
+          }
+          windowRestoreStateRef.current = null;
+        }
+      } catch {
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isMiniPlayer]);
+
+  useEffect(() => {
     if (!data) return;
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const apply = () => {
       const t = data.settings.theme === 'system' ? (media.matches ? 'dark' : 'light') : data.settings.theme;
-      document.documentElement.dataset.theme = t;
       setResolvedTheme(t);
     };
     apply();
     media.addEventListener('change', apply);
     return () => media.removeEventListener('change', apply);
   }, [data]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = effectiveTheme;
+  }, [effectiveTheme]);
 
   useEffect(() => {
     if (!isDeviceMenuOpen) return;
@@ -2425,13 +2589,56 @@ function App() {
 
   const lib = data.library;
 
+  if (isMiniPlayer) {
+    return (
+      <MiniPlayerView
+        currentTrack={currentTrack}
+        currentAlbumKey={currentAlbumKey}
+        currentPath={currentPath}
+        isPlaying={isPlaying}
+        isPinned={isMiniPlayerPinned}
+        isQueueExpanded={isMiniQueueExpanded}
+        queueTracks={visibleQueueTracks}
+        upNextCount={upNextCount}
+        progressMax={progressMax}
+        clampedPosition={clampedPosition}
+        remainingSeconds={remainingSeconds}
+        effectiveDuration={effectiveDuration}
+        progressStyle={progressStyle}
+        onOpenAlbum={() => {
+          void exitMiniPlayer({ quiet: true }).then(() => {
+            if (currentAlbumKey) {
+              openAlbum(currentAlbumKey);
+            }
+          });
+        }}
+        onExit={() => void exitMiniPlayer()}
+        onTogglePin={() => void toggleMiniPlayerPinned()}
+        onToggleQueue={() => void toggleMiniQueueExpanded()}
+        onPlayPause={togglePlayPause}
+        onPrevious={() => void skip(-1)}
+        onNext={() => void skip(1)}
+        onStop={() => void stop()}
+        onPlayTrack={(track) => {
+          const index = queueTracks.findIndex((item) => item.path === track.path);
+          if (index >= 0) {
+            void jumpToQueueIndex(index, `Playing ${track.title}`);
+          }
+        }}
+        onClearQueue={() => void clearQueue()}
+        onScrubChange={updateScrubPosition}
+        onCommitScrub={() => void commitSeek(scrubPositionRef.current)}
+      />
+    );
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
           <img
             className="brand-mark"
-            src={resolvedTheme === 'dark' ? needleBrandMarkDark : needleBrandMarkLight}
+            src={effectiveTheme === 'dark' ? needleBrandMarkDark : needleBrandMarkLight}
             alt=""
           />
           <div>
@@ -2961,6 +3168,14 @@ function App() {
         </div>
 
         <div className="player-extra">
+          <button
+            className="ctrl"
+            onClick={() => void enterMiniPlayer()}
+            title="Open mini player"
+            aria-label="Open mini player"
+          >
+            <MiniPlayerIcon />
+          </button>
           <button
             className={`ctrl ctrl-queue ${isQueueOpen ? 'is-open' : ''}`}
             onClick={() => setIsQueueOpen((open) => !open)}
@@ -3533,6 +3748,224 @@ function QueueDrawer({
         </div>
       )}
     </aside>
+  );
+}
+
+interface MiniPlayerViewProps {
+  currentTrack: Track | null;
+  currentAlbumKey: string | null;
+  currentPath: string | null;
+  isPlaying: boolean;
+  isPinned: boolean;
+  isQueueExpanded: boolean;
+  queueTracks: Track[];
+  upNextCount: number;
+  progressMax: number;
+  clampedPosition: number;
+  remainingSeconds: number | null;
+  effectiveDuration: number;
+  progressStyle: CSSProperties;
+  onOpenAlbum: () => void;
+  onExit: () => void;
+  onTogglePin: () => void;
+  onToggleQueue: () => void;
+  onPlayPause: () => void;
+  onPrevious: () => void;
+  onNext: () => void;
+  onStop: () => void;
+  onPlayTrack: (track: Track) => void;
+  onClearQueue: () => void;
+  onScrubChange: (value: number) => void;
+  onCommitScrub: () => void;
+}
+
+function MiniPlayerView({
+  currentTrack,
+  currentAlbumKey,
+  currentPath,
+  isPlaying,
+  isPinned,
+  isQueueExpanded,
+  queueTracks,
+  upNextCount,
+  progressMax,
+  clampedPosition,
+  remainingSeconds,
+  effectiveDuration,
+  progressStyle,
+  onOpenAlbum,
+  onExit,
+  onTogglePin,
+  onToggleQueue,
+  onPlayPause,
+  onPrevious,
+  onNext,
+  onStop,
+  onPlayTrack,
+  onClearQueue,
+  onScrubChange,
+  onCommitScrub,
+}: MiniPlayerViewProps) {
+  const albumLabel = currentTrack?.album ?? 'Nothing playing';
+  const subtitle = currentTrack
+    ? `${currentTrack.artist ?? 'Unknown artist'}${currentTrack.album ? ` — ${currentTrack.album}` : ''}`
+    : 'Pick a track from your library';
+
+  return (
+    <div className={`mini-player ${isQueueExpanded ? 'is-queue-expanded' : ''}`}>
+      <div className="mini-player-shell">
+        <div className="mini-player-stage">
+          <Cover
+            trackPath={currentTrack?.path ?? null}
+            fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
+            size="mini"
+          />
+          {currentAlbumKey && (
+            <button
+              className="mini-player-artwork-hitarea"
+              onClick={onOpenAlbum}
+              title={`Open album · ${albumLabel}`}
+              aria-label={`Open album · ${albumLabel}`}
+            />
+          )}
+          <div className="mini-player-topbar">
+            <div className="mini-player-brand">Needle</div>
+            <div className="mini-player-topbar-actions">
+              <button
+                className={`ctrl mini-player-chrome-button ${isPinned ? 'is-active' : ''}`}
+                onClick={onTogglePin}
+                title={isPinned ? 'Unpin mini player' : 'Pin mini player'}
+                aria-label={isPinned ? 'Unpin mini player' : 'Pin mini player'}
+              >
+                <PinIcon />
+              </button>
+              <button
+                className="ctrl mini-player-chrome-button"
+                onClick={onExit}
+                title="Return to full player"
+                aria-label="Return to full player"
+              >
+                <RestoreWindowIcon />
+              </button>
+            </div>
+          </div>
+          <div className="mini-player-overlay">
+            <div className="mini-player-copy">
+              <div className="mini-player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
+              <div className="mini-player-sub">{subtitle}</div>
+            </div>
+            <div className="mini-player-overlay-actions">
+              <div className="mini-player-controls">
+                <button className="ctrl mini-player-control" onClick={onPrevious} disabled={!currentTrack} title="Previous">
+                  <PreviousIcon />
+                </button>
+                <button
+                  className="ctrl ctrl-primary mini-player-primary"
+                  onClick={onPlayPause}
+                  title={isPlaying ? 'Pause' : 'Play'}
+                  aria-label={isPlaying ? 'Pause' : 'Play'}
+                >
+                  {isPlaying ? <PauseIcon /> : <PlayIcon />}
+                </button>
+                <button className="ctrl mini-player-control" onClick={onNext} disabled={!currentTrack} title="Next">
+                  <NextIcon />
+                </button>
+                <button className="ctrl mini-player-control" onClick={onStop} disabled={!currentTrack} title="Stop">
+                  <StopIcon />
+                </button>
+              </div>
+              <button
+                className={`ctrl mini-player-control mini-player-queue-button ${isQueueExpanded ? 'is-active' : ''}`}
+                onClick={onToggleQueue}
+                title={isQueueExpanded ? 'Hide Up Next' : 'Show Up Next'}
+                aria-label={isQueueExpanded ? 'Hide Up Next' : 'Show Up Next'}
+              >
+                <QueueIcon />
+                {queueTracks.length > 0 && <span className="ctrl-badge">{upNextCount}</span>}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="mini-player-progress-block">
+          <div className="mini-player-progress-meta">
+            <span>{currentTrack ? formatDuration(clampedPosition) : '—'}</span>
+            <span>{currentTrack && remainingSeconds != null ? `-${formatDuration(remainingSeconds)}` : '—'}</span>
+          </div>
+          <input
+            className="player-progress-input mini-player-progress-input"
+            type="range"
+            min={0}
+            max={progressMax}
+            step={0.1}
+            value={currentTrack ? clampedPosition : 0}
+            disabled={!currentTrack || effectiveDuration <= 0}
+            onChange={(event) => onScrubChange(Number(event.currentTarget.value))}
+            onMouseUp={onCommitScrub}
+            onTouchEnd={onCommitScrub}
+            onKeyUp={(event) => {
+              if (
+                ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(
+                  event.key,
+                )
+              ) {
+                onCommitScrub();
+              }
+            }}
+            onBlur={onCommitScrub}
+            style={progressStyle}
+          />
+        </div>
+
+        {isQueueExpanded && (
+          <section className="mini-player-queue">
+            <div className="mini-player-queue-head">
+              <div>
+                <div className="mini-player-queue-label">Up Next</div>
+                <div className="mini-player-queue-copy">
+                  {queueTracks.length === 0
+                    ? 'Nothing queued yet.'
+                    : `${Math.max(queueTracks.length - 1, 0)} upcoming track${
+                        Math.max(queueTracks.length - 1, 0) === 1 ? '' : 's'
+                      }`}
+                </div>
+              </div>
+              <button className="ghost-button" onClick={onClearQueue} disabled={queueTracks.length === 0}>
+                Clear
+              </button>
+            </div>
+            {queueTracks.length === 0 ? (
+              <div className="mini-player-queue-empty">Start a track, album, artist mix, or playlist to build a queue.</div>
+            ) : (
+              <div className="mini-player-queue-list">
+                {queueTracks.map((track, index) => {
+                  const isCurrent = track.path === currentPath;
+                  return (
+                    <button
+                      key={track.path}
+                      className={`mini-player-queue-row ${isCurrent ? 'is-current' : ''}`}
+                      onClick={() => onPlayTrack(track)}
+                    >
+                      <span className="mini-player-queue-index">
+                        {isCurrent ? (isPlaying ? <PlayingIndicator /> : 'Now') : index + 1}
+                      </span>
+                      <Cover trackPath={track.path} fallback={track.title[0]?.toUpperCase() ?? '♪'} size="queue" />
+                      <span className="mini-player-queue-copy-block">
+                        <span className="mini-player-queue-title">{track.title}</span>
+                        <span className="mini-player-queue-sub">
+                          {(track.artist ?? 'Unknown artist') + ' — ' + (track.album ?? 'Unknown album')}
+                        </span>
+                      </span>
+                      <span className="mini-player-queue-time">{formatDuration(track.duration_seconds)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -4331,7 +4764,7 @@ function AlbumsView({
 interface CoverProps {
   trackPath: string | null;
   fallback: string;
-  size: 'md' | 'card' | 'hero' | 'queue';
+  size: 'md' | 'card' | 'hero' | 'queue' | 'mini';
 }
 
 function Cover({ trackPath, fallback, size }: CoverProps) {
@@ -4339,6 +4772,8 @@ function Cover({ trackPath, fallback, size }: CoverProps) {
   const className =
     size === 'hero'
       ? 'cover-hero'
+      : size === 'mini'
+        ? 'mini-player-artwork'
       : size === 'card'
         ? 'card-art'
         : size === 'queue'
