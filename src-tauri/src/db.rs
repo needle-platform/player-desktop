@@ -70,6 +70,14 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             PRIMARY KEY (playlist_id, track_path),
             UNIQUE (playlist_id, position)
         );
+
+        CREATE TABLE IF NOT EXISTS album_primary_genres (
+            album TEXT NOT NULL,
+            album_artist TEXT NOT NULL,
+            primary_genre TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (album, album_artist)
+        );
         ",
     )?;
 
@@ -606,21 +614,75 @@ pub fn move_playlist_track(
     load_playlists(db_path)
 }
 
+pub fn set_album_primary_genre(
+    db_path: &Path,
+    album: &str,
+    album_artist: Option<&str>,
+    primary_genre: Option<&str>,
+) -> Result<()> {
+    let normalized_album = album.trim();
+    if normalized_album.is_empty() {
+        bail!("Album name is required");
+    }
+
+    let normalized_album_artist = album_artist.unwrap_or("").trim();
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+
+    if let Some(value) = primary_genre.map(str::trim).filter(|value| !value.is_empty()) {
+        transaction.execute(
+            "INSERT INTO album_primary_genres (album, album_artist, primary_genre, updated_at)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+             ON CONFLICT(album, album_artist) DO UPDATE SET
+                primary_genre = excluded.primary_genre,
+                updated_at = CURRENT_TIMESTAMP",
+            params![normalized_album, normalized_album_artist, value],
+        )?;
+    } else {
+        transaction.execute(
+            "DELETE FROM album_primary_genres WHERE album = ?1 AND album_artist = ?2",
+            params![normalized_album, normalized_album_artist],
+        )?;
+    }
+
+    transaction.commit()?;
+    Ok(())
+}
+
 pub fn load_library(db_path: &Path) -> Result<LibraryData> {
     let connection = Connection::open(db_path)?;
 
     let mut statement = connection.prepare(
         "
-        SELECT id, path, title, artist, album, album_artist, duration_seconds, format, sample_rate, bit_depth,
-               disc_number, track_number, genre, year, added_at, play_count, last_played_at
-        FROM tracks
+        SELECT t.id,
+               t.path,
+               t.title,
+               t.artist,
+               t.album,
+               t.album_artist,
+               t.duration_seconds,
+               t.format,
+               t.sample_rate,
+               t.bit_depth,
+               t.disc_number,
+               t.track_number,
+               t.genre,
+               apg.primary_genre,
+               t.year,
+               t.added_at,
+               t.play_count,
+               t.last_played_at
+        FROM tracks t
+        LEFT JOIN album_primary_genres apg
+          ON apg.album = COALESCE(t.album, '')
+         AND apg.album_artist = COALESCE(t.album_artist, t.artist, '')
         ORDER BY
-            COALESCE(album_artist, artist, ''),
-            COALESCE(album, ''),
-            COALESCE(disc_number, 0),
-            COALESCE(track_number, 0),
-            title,
-            path
+            COALESCE(t.album_artist, t.artist, ''),
+            COALESCE(t.album, ''),
+            COALESCE(t.disc_number, 0),
+            COALESCE(t.track_number, 0),
+            t.title,
+            t.path
         ",
     )?;
 
@@ -640,10 +702,11 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                 disc_number: row.get(10)?,
                 track_number: row.get(11)?,
                 genre: row.get(12)?,
-                year: row.get(13)?,
-                added_at: row.get(14)?,
-                play_count: row.get::<_, i64>(15)?,
-                last_played_at: row.get(16)?,
+                primary_genre: row.get(13)?,
+                year: row.get(14)?,
+                added_at: row.get(15)?,
+                play_count: row.get::<_, i64>(16)?,
+                last_played_at: row.get(17)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

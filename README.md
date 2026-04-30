@@ -2,7 +2,7 @@
 
 A local-first, hi-fi music player for macOS built with **Tauri**, **React + TypeScript**, and **Rust**. Audio playback is handled by **mpv** through its JSON IPC, so lossless formats (FLAC, ALAC, WAV, AIFF) sound exactly the way they should.
 
-> Status: actively usable local-first player — library, queue, saved playlists, playback persistence, and equalizer are all in place, with smart playlists and deeper library tooling continuing to grow.
+> Status: actively usable local-first player — library, queue, saved playlists, playback persistence, equalizer, and richer library curation tools are all in place, with smarter playlisting and metadata refinement continuing to grow.
 
 ## Features
 
@@ -53,7 +53,10 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Playlists
 - **Sidebar Playlists section** with saved playlists and smart playlists
 - **Manual playlists** stored in SQLite and editable in-app
-- **Save visible track sets** from the Tracks view or album pages as playlists
+- **Empty playlist creation** directly from the sidebar
+- **Add to playlist** actions on tracks and albums, with in-app creation of a new playlist during the add flow
+- **Save visible track sets** from the Tracks view or album pages as playlist snapshots
+- **Filtered playlist creation** from library metadata such as artist and genre
 - **Playlist management**: rename, delete, reorder tracks, remove tracks
 - **Smart playlists** surfaced as first-class library views generated from your collection and listening history
 
@@ -65,16 +68,17 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 
 ### Views
 - **Dashboard** (default landing screen)
-- **Tracks** with live search and filterable by album / artist / playlist
-- **Albums** (cards with cover art)
+- **Tracks** with live search, sorting, and filters for artist / genre / year, plus album / artist / playlist context
+- **Albums** with cover art, sorting, and direct playlist actions
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, full track list, and background album info when available
-- **Artists** (list with track counts)
+- **Artists** with sorting and track counts
 - **Settings** with theme switcher, library folders, maintenance, live equalizer presets, and manual 10-band EQ
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
 - Cached in SQLite (`album_info`) so repeat opens are instant and we avoid repeat lookups
-- **Album page genres** are derived from the imported track tags already embedded in your files; we currently do not fetch canonical album genres from Wikipedia / MusicBrainz
+- **Album page genres** are derived from the imported track tags already embedded in your files
+- **Primary genre override** lets you set a local album-level genre Needle should prefer for browsing, filtering, and smart-playlist logic without rewriting the source files
 - Graceful fallback when no article exists for obscure releases, compilations, or local-only metadata
 
 ### Themes & UX
@@ -159,8 +163,14 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 
 - **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
 - **Library state** (`play_count = 0`) drives Needs a first spin
-- **Tags** (genre) drive one top-genre mix when your collection has a clear favorite
+- **Tags** and local overrides (`primary_genre`) drive one top-genre mix when your collection has a clear favorite
 - **`added_at`** (preserved across rescans) drives the Recently added albums row
+
+Needle treats imported metadata as a starting point, not untouchable truth:
+
+- **Raw embedded tags** stay preserved exactly as imported
+- **Local overrides** can refine how the app interprets your library without modifying audio files
+- **Album-level primary genre** currently flows down to tracks from that album for filtering and smarter playlist generation
 
 Real **BPM and key analysis** would unlock proper mood detection (energy, workout, slow groove). It's tractable in Rust via onset-detection / autocorrelation, but it's CPU-heavy and best done as an opt-in background "Analyze library" maintenance step. Tracked in the roadmap.
 
@@ -169,7 +179,6 @@ Real **BPM and key analysis** would unlock proper mood detection (energy, workou
 - BPM + key analysis as an opt-in background step, with cached `audio_features` table
 - Gapless playback hand-off
 - Watch folders with incremental rescans
-- Add tracks/albums to existing saved playlists from more entry points
 - Custom smart-playlist rules and editor
 - Smarter sidecar handling (hidden FLAC metadata files, `.cue` sheets)
 - Proper macOS / Windows / Linux icon set

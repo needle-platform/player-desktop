@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { CSSProperties, RefObject } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  appendTracksToPlaylist,
   appendQueue,
   bootstrapApp,
   createPlaylist,
@@ -23,6 +24,7 @@ import {
   resumePlayback,
   runMaintenance,
   setAudioDevice as setPlaybackAudioDevice,
+  setAlbumPrimaryGenre as persistAlbumPrimaryGenre,
   setPlaybackMuted,
   setPlaybackVolume as setPlaybackVolumeLevel,
   setRepeatMode as tauriSetRepeatMode,
@@ -54,6 +56,38 @@ import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'settings';
 type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: number };
+type TrackSortOption = 'title' | 'artist' | 'album' | 'recent' | 'plays' | 'duration';
+type AlbumSortOption = 'album' | 'artist' | 'recent' | 'tracks';
+type ArtistSortOption = 'artist' | 'tracks' | 'recent';
+type TrackYearFilterOption = 'all' | 'unknown' | string;
+type PlaylistCreateSource = {
+  id: string;
+  label: string;
+  description: string;
+  suggestedName: string;
+  tracks: Track[];
+};
+type PlaylistComposerState = {
+  sources: PlaylistCreateSource[];
+  selectedSourceId: string;
+  libraryTracks: Track[];
+  artistOptions: string[];
+  genreOptions: string[];
+  initialArtist: string;
+  initialGenre: string;
+};
+type PlaylistTargetState = {
+  title: string;
+  description: string;
+  trackPaths: string[];
+  suggestedName: string;
+};
+type AlbumGenreEditorState = {
+  album: string;
+  albumArtist: string | null;
+  currentPrimaryGenre: string | null;
+  suggestedGenres: string[];
+};
 type ResolvedPlaylist = {
   id: string;
   kind: 'smart' | 'manual';
@@ -68,6 +102,11 @@ type AlbumSummary = {
   artist: string | null;
   count: number;
   samplePath: string;
+  addedAt: string | null;
+};
+type ArtistSummary = {
+  artist: string;
+  count: number;
   addedAt: string | null;
 };
 
@@ -135,6 +174,27 @@ const themeOptions: Array<{ value: ThemeMode; label: string }> = [
   { value: 'light', label: 'Light' },
   { value: 'dark', label: 'Dark' },
 ];
+const trackSortOptions: Array<{ value: TrackSortOption; label: string }> = [
+  { value: 'title', label: 'Title (A-Z)' },
+  { value: 'artist', label: 'Artist (A-Z)' },
+  { value: 'album', label: 'Album (A-Z)' },
+  { value: 'recent', label: 'Recently added' },
+  { value: 'plays', label: 'Most played' },
+  { value: 'duration', label: 'Longest first' },
+];
+const albumSortOptions: Array<{ value: AlbumSortOption; label: string }> = [
+  { value: 'album', label: 'Album (A-Z)' },
+  { value: 'artist', label: 'Artist (A-Z)' },
+  { value: 'recent', label: 'Recently added' },
+  { value: 'tracks', label: 'Most tracks' },
+];
+const artistSortOptions: Array<{ value: ArtistSortOption; label: string }> = [
+  { value: 'artist', label: 'Artist (A-Z)' },
+  { value: 'tracks', label: 'Most tracks' },
+  { value: 'recent', label: 'Recently added' },
+];
+const allTrackFilterValue = 'all';
+const unknownTrackFilterValue = 'unknown';
 const defaultVolumePercent = 80;
 
 const formatDuration = (seconds: number | null | undefined) => {
@@ -143,6 +203,13 @@ const formatDuration = (seconds: number | null | undefined) => {
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
+const filteredPlaylistName = (artist: string, genre: string) => {
+  const parts = [artist, genre].filter(Boolean);
+  return parts.length > 0 ? `${parts.join(' · ')} mix` : 'Filtered mix';
+};
+const effectiveTrackGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
+const uniqueSorted = (values: string[]) =>
+  Array.from(new Set(values.filter(Boolean))).sort((a, b) => compareText(a, b));
 
 const formatQuality = (track: Track) => {
   const parts = [
@@ -160,6 +227,8 @@ const clampIndex = (index: number, length: number) =>
   length <= 0 ? 0 : Math.max(0, Math.min(index, length - 1));
 const audioDeviceKey = (description: string) => description.trim().toLowerCase();
 const albumIdentitySeparator = '\u0000';
+const compareText = (a: string | null | undefined, b: string | null | undefined) =>
+  (a ?? '').localeCompare(b ?? '', undefined, { sensitivity: 'base' });
 const albumArtistForTrack = (track: Pick<Track, 'album_artist' | 'artist'>) =>
   track.album_artist ?? track.artist ?? null;
 const albumKey = (album: string | null | undefined, albumArtist: string | null | undefined) =>
@@ -167,11 +236,64 @@ const albumKey = (album: string | null | undefined, albumArtist: string | null |
 const trackAlbumKey = (track: Pick<Track, 'album' | 'album_artist' | 'artist'>) =>
   track.album ? albumKey(track.album, albumArtistForTrack(track)) : null;
 const albumTitleFromKey = (key: string) => key.split(albumIdentitySeparator)[0] ?? key;
+const splitTrackGenres = (genre: string | null | undefined) =>
+  (genre ?? '')
+    .split(/[;,/]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+const timestampValue = (iso: string | null | undefined) => {
+  if (!iso) return 0;
+  const parsed = Date.parse(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`);
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
 const compareAlbumTracks = (a: Track, b: Track) =>
   (a.disc_number ?? 1) - (b.disc_number ?? 1) ||
   (a.track_number ?? 9999) - (b.track_number ?? 9999) ||
-  a.title.localeCompare(b.title) ||
-  a.path.localeCompare(b.path);
+  compareText(a.title, b.title) ||
+  compareText(a.path, b.path);
+const compareTracksBySort = (sort: TrackSortOption) => (a: Track, b: Track) => {
+  if (sort === 'artist') {
+    return (
+      compareText(a.artist, b.artist) ||
+      compareText(a.album, b.album) ||
+      compareAlbumTracks(a, b)
+    );
+  }
+  if (sort === 'album') {
+    return (
+      compareText(a.album, b.album) ||
+      compareText(albumArtistForTrack(a), albumArtistForTrack(b)) ||
+      compareAlbumTracks(a, b)
+    );
+  }
+  if (sort === 'recent') {
+    return (
+      timestampValue(b.added_at) - timestampValue(a.added_at) ||
+      compareText(a.title, b.title) ||
+      compareText(a.path, b.path)
+    );
+  }
+  if (sort === 'plays') {
+    return (
+      (b.play_count ?? 0) - (a.play_count ?? 0) ||
+      timestampValue(b.last_played_at) - timestampValue(a.last_played_at) ||
+      compareText(a.title, b.title)
+    );
+  }
+  if (sort === 'duration') {
+    return (
+      (b.duration_seconds ?? 0) - (a.duration_seconds ?? 0) ||
+      compareText(a.title, b.title) ||
+      compareText(a.path, b.path)
+    );
+  }
+  return (
+    compareText(a.title, b.title) ||
+    compareText(a.artist, b.artist) ||
+    compareText(a.album, b.album) ||
+    compareText(a.path, b.path)
+  );
+};
 const clampEqualizerGain = (value: number) => Math.max(-maxEqualizerGain, Math.min(maxEqualizerGain, value));
 const normalizeEqualizerBands = (bands: number[] | null | undefined) => {
   const next = defaultEqualizerBands.slice();
@@ -347,6 +469,37 @@ function QueueIcon() {
   );
 }
 
+function PlaylistIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h11" />
+      <path d="M4 12h8" />
+      <path d="M4 17h8" />
+      <path d="M18 10v8" />
+      <path d="M14 14h8" />
+    </svg>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="m16 16 4 4" />
+    </svg>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m4 20 4.5-1 9-9-3.5-3.5-9 9z" />
+      <path d="m13.5 6.5 3.5 3.5" />
+      <path d="M19 8l1.5-1.5a1.4 1.4 0 0 0 0-2L19.5 3a1.4 1.4 0 0 0-2 0L16 4.5" />
+    </svg>
+  );
+}
+
 function ShuffleIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -379,9 +532,18 @@ function App() {
   const [view, setView] = useState<View>('dashboard');
   const [featuredSeed, setFeaturedSeed] = useState(0);
   const [search, setSearch] = useState('');
+  const [trackSort, setTrackSort] = useState<TrackSortOption>('title');
+  const [trackArtistFilter, setTrackArtistFilter] = useState(allTrackFilterValue);
+  const [trackGenreFilter, setTrackGenreFilter] = useState(allTrackFilterValue);
+  const [trackYearFilter, setTrackYearFilter] = useState<TrackYearFilterOption>(allTrackFilterValue);
+  const [albumSort, setAlbumSort] = useState<AlbumSortOption>('album');
+  const [artistSort, setArtistSort] = useState<ArtistSortOption>('artist');
   const [selectedAlbum, setSelectedAlbum] = useState<string | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<PlaylistSelection | null>(null);
+  const [playlistComposer, setPlaylistComposer] = useState<PlaylistComposerState | null>(null);
+  const [playlistTarget, setPlaylistTarget] = useState<PlaylistTargetState | null>(null);
+  const [albumGenreEditor, setAlbumGenreEditor] = useState<AlbumGenreEditorState | null>(null);
   const [queuePaths, setQueuePaths] = useState<string[]>([]);
   const [baseQueuePaths, setBaseQueuePaths] = useState<string[]>([]);
   const [currentQueueIndex, setCurrentQueueIndex] = useState(0);
@@ -432,6 +594,11 @@ function App() {
     setSelectedAlbum(null);
     setSelectedArtist(null);
     setSelectedPlaylist(null);
+  };
+  const clearTrackFilters = () => {
+    setTrackArtistFilter(allTrackFilterValue);
+    setTrackGenreFilter(allTrackFilterValue);
+    setTrackYearFilter(allTrackFilterValue);
   };
 
   useEffect(() => {
@@ -794,11 +961,43 @@ function App() {
       saved: playlist,
     };
   }, [manualPlaylists, selectedPlaylist, smartPlaylists, trackByPath]);
+  const selectedManualPlaylist =
+    selectedPlaylistData?.kind === 'manual' ? selectedPlaylistData.saved ?? null : null;
 
-  const filteredTracks = useMemo(() => {
+  const scopedTracks = useMemo(() => {
     let list: Track[] = selectedPlaylistData ? selectedPlaylistData.tracks : allTracks;
     if (selectedAlbum) list = list.filter((t) => trackAlbumKey(t) === selectedAlbum);
     if (selectedArtist) list = list.filter((t) => t.artist === selectedArtist);
+    return list;
+  }, [allTracks, selectedAlbum, selectedArtist, selectedPlaylistData]);
+  const trackArtistOptions = useMemo(
+    () => uniqueSorted(scopedTracks.map((track) => track.artist ?? '').filter(Boolean)),
+    [scopedTracks],
+  );
+  const trackGenreOptions = useMemo(
+    () => uniqueSorted(scopedTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
+    [scopedTracks],
+  );
+  const trackYearOptions = useMemo(
+    () =>
+      Array.from(new Set(scopedTracks.map((track) => track.year).filter((year): year is number => year != null)))
+        .sort((a, b) => b - a)
+        .map(String),
+    [scopedTracks],
+  );
+  const filteredTracks = useMemo(() => {
+    let list = scopedTracks;
+    if (trackArtistFilter !== allTrackFilterValue) {
+      list = list.filter((track) => (track.artist ?? '') === trackArtistFilter);
+    }
+    if (trackGenreFilter !== allTrackFilterValue) {
+      list = list.filter((track) => splitTrackGenres(effectiveTrackGenre(track)).includes(trackGenreFilter));
+    }
+    if (trackYearFilter !== allTrackFilterValue) {
+      list = list.filter((track) =>
+        trackYearFilter === unknownTrackFilterValue ? track.year == null : String(track.year ?? '') === trackYearFilter,
+      );
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(
@@ -809,7 +1008,13 @@ function App() {
       );
     }
     return list;
-  }, [allTracks, search, selectedAlbum, selectedArtist, selectedPlaylistData]);
+  }, [scopedTracks, trackArtistFilter, trackGenreFilter, trackYearFilter, search]);
+  const sortedTracks = useMemo(() => {
+    if (selectedManualPlaylist) {
+      return filteredTracks;
+    }
+    return filteredTracks.slice().sort(compareTracksBySort(trackSort));
+  }, [filteredTracks, selectedManualPlaylist, trackSort]);
 
   useEffect(() => {
     if (!selectedPlaylist) return;
@@ -847,10 +1052,38 @@ function App() {
         });
       }
     }
-    return Array.from(map.values()).sort(
-      (a, b) => a.album.localeCompare(b.album) || (a.artist ?? '').localeCompare(b.artist ?? ''),
-    );
+    return Array.from(map.values());
   }, [allTracks]);
+  const sortedAlbums = useMemo(() => {
+    return albums.slice().sort((a, b) => {
+      if (albumSort === 'artist') {
+        return (
+          compareText(a.artist, b.artist) ||
+          compareText(a.album, b.album) ||
+          compareText(a.key, b.key)
+        );
+      }
+      if (albumSort === 'recent') {
+        return (
+          timestampValue(b.addedAt) - timestampValue(a.addedAt) ||
+          compareText(a.album, b.album) ||
+          compareText(a.key, b.key)
+        );
+      }
+      if (albumSort === 'tracks') {
+        return (
+          b.count - a.count ||
+          compareText(a.album, b.album) ||
+          compareText(a.key, b.key)
+        );
+      }
+      return (
+        compareText(a.album, b.album) ||
+        compareText(a.artist, b.artist) ||
+        compareText(a.key, b.key)
+      );
+    });
+  }, [albumSort, albums]);
 
   const recentAlbums = useMemo(() => {
     const withDate = albums.filter((a) => Boolean(a.addedAt));
@@ -858,27 +1091,68 @@ function App() {
     return withDate.slice().sort((a, b) => (b.addedAt ?? '').localeCompare(a.addedAt ?? '')).slice(0, 8);
   }, [albums]);
 
-  const artists = useMemo(() => {
-    const map = new Map<string, number>();
+  const artists = useMemo<ArtistSummary[]>(() => {
+    const map = new Map<string, { count: number; addedAt: string | null }>();
     for (const t of allTracks) {
       if (!t.artist) continue;
-      map.set(t.artist, (map.get(t.artist) ?? 0) + 1);
+      const existing = map.get(t.artist);
+      if (existing) {
+        existing.count += 1;
+        if (t.added_at && (!existing.addedAt || t.added_at > existing.addedAt)) {
+          existing.addedAt = t.added_at;
+        }
+      } else {
+        map.set(t.artist, { count: 1, addedAt: t.added_at ?? null });
+      }
     }
-    return Array.from(map.entries())
-      .map(([artist, count]) => ({ artist, count }))
-      .sort((a, b) => a.artist.localeCompare(b.artist));
+    return Array.from(map.entries()).map(([artist, meta]) => ({
+      artist,
+      count: meta.count,
+      addedAt: meta.addedAt,
+    }));
   }, [allTracks]);
+  const sortedArtists = useMemo(() => {
+    return artists.slice().sort((a, b) => {
+      if (artistSort === 'tracks') {
+        return (
+          b.count - a.count ||
+          compareText(a.artist, b.artist)
+        );
+      }
+      if (artistSort === 'recent') {
+        return (
+          timestampValue(b.addedAt) - timestampValue(a.addedAt) ||
+          compareText(a.artist, b.artist)
+        );
+      }
+      return compareText(a.artist, b.artist);
+    });
+  }, [artistSort, artists]);
 
   const currentTrack = useMemo(
     () => (currentPath ? trackByPath.get(currentPath) ?? null : currentQueueTrack),
     [currentPath, currentQueueTrack, trackByPath],
   );
-  const selectedManualPlaylist =
-    selectedPlaylistData?.kind === 'manual' ? selectedPlaylistData.saved ?? null : null;
   const selectedAlbumSummary = useMemo(
     () => albums.find((album) => album.key === selectedAlbum) ?? null,
     [albums, selectedAlbum],
   );
+  const visibleTracksForPlaylist = selectedManualPlaylist ? filteredTracks : sortedTracks;
+  const hasTrackFilters =
+    trackArtistFilter !== allTrackFilterValue ||
+    trackGenreFilter !== allTrackFilterValue ||
+    trackYearFilter !== allTrackFilterValue;
+  const activeTrackFilterSummary = [
+    trackArtistFilter !== allTrackFilterValue ? trackArtistFilter : null,
+    trackGenreFilter !== allTrackFilterValue ? trackGenreFilter : null,
+    trackYearFilter === unknownTrackFilterValue
+      ? 'Unknown year'
+      : trackYearFilter !== allTrackFilterValue
+        ? trackYearFilter
+        : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   const selectedRawOutputDevice = useMemo(
     () => audioDevices.find((device) => device.name === selectedAudioDevice) ?? null,
@@ -1009,15 +1283,7 @@ function App() {
     }
   };
 
-  const promptPlaylistName = (initialValue: string) => {
-    const value = window.prompt('Playlist name', initialValue)?.trim();
-    return value ? value : null;
-  };
-
-  const createManualPlaylist = async (trackPaths: string[], suggestedName: string) => {
-    const name = promptPlaylistName(suggestedName);
-    if (!name) return;
-
+  const createManualPlaylist = async (name: string, trackPaths: string[]) => {
     try {
       setBusy('Saving playlist…');
       const next = await createPlaylist(name, trackPaths);
@@ -1030,11 +1296,18 @@ function App() {
         setView('tracks');
       }
       setStatus(`Saved playlist · ${name}`);
+      return true;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       setBusy(null);
     }
+  };
+
+  const promptPlaylistName = (initialValue: string) => {
+    const value = window.prompt('Playlist name', initialValue)?.trim();
+    return value ? value : null;
   };
 
   const renameManualPlaylist = async (playlist: SavedPlaylist) => {
@@ -1070,11 +1343,201 @@ function App() {
       setBusy(null);
     }
   };
+  const tracksForAlbum = (albumKeyValue: string) =>
+    allTracks
+      .filter((t) => trackAlbumKey(t) === albumKeyValue)
+      .slice()
+      .sort(compareAlbumTracks);
 
-  const saveVisibleTracksAsPlaylist = async (tracks: Track[], suggestedName: string) => {
-    const paths = tracks.map((track) => track.path);
-    if (paths.length === 0) return;
-    await createManualPlaylist(paths, suggestedName);
+  const currentPlaylistSource = useMemo<PlaylistCreateSource | null>(() => {
+    if (view === 'album' && selectedAlbumSummary) {
+      const albumTracks = tracksForAlbum(selectedAlbumSummary.key);
+      return {
+        id: 'album',
+        label: selectedAlbumSummary.album,
+        description: `${albumTracks.length} track${albumTracks.length === 1 ? '' : 's'} from this album`,
+        suggestedName: selectedAlbumSummary.album,
+        tracks: albumTracks,
+      };
+    }
+
+    if (view === 'tracks' && filteredTracks.length > 0) {
+      if (selectedPlaylistData) {
+        return {
+          id: 'current-playlist',
+          label: selectedPlaylistData.name,
+          description: `${visibleTracksForPlaylist.length} track${visibleTracksForPlaylist.length === 1 ? '' : 's'} from this ${selectedPlaylistData.kind === 'smart' ? 'smart ' : ''}playlist`,
+          suggestedName:
+            selectedPlaylistData.kind === 'manual'
+              ? `${selectedPlaylistData.name} copy`
+              : selectedPlaylistData.name,
+          tracks: visibleTracksForPlaylist,
+        };
+      }
+      if (selectedArtist) {
+        return {
+          id: 'artist',
+          label: activeTrackFilterSummary ? `${selectedArtist} · filtered` : selectedArtist,
+          description: `${visibleTracksForPlaylist.length} track${visibleTracksForPlaylist.length === 1 ? '' : 's'} by this artist${activeTrackFilterSummary ? ` · ${activeTrackFilterSummary}` : ''}`,
+          suggestedName: activeTrackFilterSummary ? `${selectedArtist} mix` : `${selectedArtist} mix`,
+          tracks: visibleTracksForPlaylist,
+        };
+      }
+      if (hasTrackFilters) {
+        return {
+          id: 'filtered-tracks',
+          label: 'Filtered tracks',
+          description: `${visibleTracksForPlaylist.length} track${visibleTracksForPlaylist.length === 1 ? '' : 's'} · ${activeTrackFilterSummary}`,
+          suggestedName: `${activeTrackFilterSummary} mix`,
+          tracks: visibleTracksForPlaylist,
+        };
+      }
+      if (search.trim()) {
+        const query = search.trim();
+        return {
+          id: 'search',
+          label: `Search: ${query}`,
+          description: `${visibleTracksForPlaylist.length} matching track${visibleTracksForPlaylist.length === 1 ? '' : 's'}`,
+          suggestedName: `${query} mix`,
+          tracks: visibleTracksForPlaylist,
+        };
+      }
+      return {
+        id: 'tracks',
+        label: 'All tracks',
+        description: `${visibleTracksForPlaylist.length} track${visibleTracksForPlaylist.length === 1 ? '' : 's'} from your library`,
+        suggestedName: `Playlist ${new Date().toLocaleDateString()}`,
+        tracks: visibleTracksForPlaylist,
+      };
+    }
+
+    return null;
+  }, [
+    filteredTracks.length,
+    hasTrackFilters,
+    search,
+    activeTrackFilterSummary,
+    selectedAlbumSummary,
+    selectedArtist,
+    selectedPlaylistData,
+    view,
+    visibleTracksForPlaylist,
+  ]);
+  const openPlaylistComposer = (preferredSource: 'current' | 'custom' = 'current') => {
+    const sortedLibraryTracks = allTracks.slice().sort(compareTracksBySort(trackSort));
+    if (sortedLibraryTracks.length === 0) {
+      setStatus('No tracks available to turn into a playlist yet');
+      return;
+    }
+
+    const dedupedCurrentSource =
+      currentPlaylistSource &&
+      !(
+        currentPlaylistSource.tracks.length === sortedLibraryTracks.length &&
+        currentPlaylistSource.tracks.every((track, index) => track.path === sortedLibraryTracks[index]?.path)
+      )
+        ? currentPlaylistSource
+        : null;
+    const sources = [
+      dedupedCurrentSource,
+      {
+        id: 'custom',
+        label: 'Filtered library',
+        description: 'Build a playlist from artist and genre filters.',
+        suggestedName: 'Filtered mix',
+        tracks: sortedLibraryTracks,
+      },
+    ].filter((source): source is PlaylistCreateSource => Boolean(source));
+    const artistOptions = Array.from(
+      new Set(sortedLibraryTracks.map((track) => track.artist).filter((artist): artist is string => Boolean(artist))),
+    ).sort((a, b) => compareText(a, b));
+    const genreOptions = Array.from(
+      new Set(sortedLibraryTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
+    ).sort((a, b) => compareText(a, b));
+    const sourceId =
+      preferredSource === 'current' && dedupedCurrentSource ? dedupedCurrentSource.id : 'custom';
+
+    setPlaylistComposer({
+      sources,
+      selectedSourceId: sourceId,
+      libraryTracks: sortedLibraryTracks,
+      artistOptions,
+      genreOptions,
+      initialArtist: selectedArtist ?? dedupedCurrentSource?.tracks[0]?.artist ?? '',
+      initialGenre: '',
+    });
+  };
+  const submitPlaylistComposer = async (name: string, tracks: Track[]) => {
+    if (tracks.length === 0) return;
+    const created = await createManualPlaylist(
+      name,
+      tracks.map((track) => track.path),
+    );
+    if (created) {
+      setPlaylistComposer(null);
+    }
+  };
+  const addTracksToManualPlaylist = async (playlist: SavedPlaylist, trackPaths: string[]) => {
+    if (trackPaths.length === 0) return false;
+    try {
+      setBusy('Updating playlist…');
+      const next = await appendTracksToPlaylist(playlist.id, trackPaths);
+      setData(next);
+      setSelectedPlaylist({ kind: 'manual', id: playlist.id });
+      setView('tracks');
+      setStatus(`Added to playlist · ${playlist.name}`);
+      return true;
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
+  const openPlaylistTarget = (tracks: Track[], options?: { label?: string; suggestedName?: string }) => {
+    const dedupedPaths = Array.from(new Set(tracks.map((track) => track.path)));
+    setPlaylistTarget({
+      title: dedupedPaths.length === 0 ? 'New playlist' : 'Add to playlist',
+      description:
+        dedupedPaths.length === 0
+          ? 'Start with an empty playlist and fill it up whenever you like.'
+          : `${dedupedPaths.length} item${dedupedPaths.length === 1 ? '' : 's'} ready to add${
+              options?.label ? ` · ${options.label}` : ''
+            }`,
+      trackPaths: dedupedPaths,
+      suggestedName:
+        options?.suggestedName ??
+        (dedupedPaths.length === 0 ? `Playlist ${new Date().toLocaleDateString()}` : 'New playlist'),
+    });
+  };
+  const submitPlaylistTargetCreate = async (name: string, trackPaths: string[]) => {
+    const created = await createManualPlaylist(name, trackPaths);
+    if (created) {
+      setPlaylistTarget(null);
+    }
+  };
+  const submitPlaylistTargetAppend = async (playlist: SavedPlaylist, trackPaths: string[]) => {
+    const appended = await addTracksToManualPlaylist(playlist, trackPaths);
+    if (appended) {
+      setPlaylistTarget(null);
+    }
+  };
+  const saveAlbumPrimaryGenre = async (
+    album: string,
+    albumArtist: string | null,
+    primaryGenre: string | null,
+  ) => {
+    try {
+      setBusy('Saving primary genre…');
+      const next = await persistAlbumPrimaryGenre(album, albumArtist, primaryGenre);
+      setData(next);
+      setAlbumGenreEditor(null);
+      setStatus(primaryGenre ? `Primary genre · ${primaryGenre}` : `Cleared primary genre · ${album}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
   };
 
   const moveManualPlaylistTrack = async (playlistId: number, fromIndex: number, toIndex: number) => {
@@ -1298,12 +1761,6 @@ function App() {
   ) => {
     await startQueue(queue, label, options);
   };
-
-  const tracksForAlbum = (albumKeyValue: string) =>
-    allTracks
-      .filter((t) => trackAlbumKey(t) === albumKeyValue)
-      .slice()
-      .sort(compareAlbumTracks);
 
   const playAlbum = (albumKeyValue: string) => {
     const tracks = tracksForAlbum(albumKeyValue);
@@ -1801,6 +2258,33 @@ function App() {
     ) : (
       <VolumeHighIcon />
     );
+  const hasLibraryTracks = allTracks.length > 0;
+  const tracksEmptyTitle = !hasLibraryTracks
+    ? 'No tracks yet'
+    : selectedManualPlaylist
+      ? 'No tracks in this playlist'
+      : hasTrackFilters
+        ? 'No tracks match these filters'
+      : search.trim()
+        ? 'No matching tracks'
+        : selectedArtist
+          ? 'No tracks for this artist'
+          : selectedPlaylistData
+            ? 'No tracks in this playlist'
+            : 'No tracks found';
+  const tracksEmptyMessage = !hasLibraryTracks
+    ? 'Add a folder from the sidebar to import FLAC, ALAC, WAV, MP3, OGG, M4A, and more.'
+    : selectedManualPlaylist
+      ? 'This saved playlist is empty right now.'
+      : hasTrackFilters
+        ? 'Try widening the artist, genre, or year filters.'
+      : search.trim()
+        ? `Try a different search than “${search.trim()}”.`
+        : selectedArtist
+          ? `No imported tracks are currently linked to ${selectedArtist}.`
+          : selectedPlaylistData
+            ? 'This playlist does not have any tracks available right now.'
+            : 'There is nothing to show in this view yet.';
 
   if (loading) {
     return <div className="fullscreen-message">Loading…</div>;
@@ -1862,8 +2346,11 @@ function App() {
 
         <nav className="nav-section">
           <div className="nav-label">Playlists</div>
+          <button className="nav-button" onClick={() => openPlaylistTarget([])}>
+            + New playlist
+          </button>
           <div className="nav-sub-label">Saved</div>
-          {manualPlaylists.length === 0 && <div className="nav-empty">Save a track list to create one</div>}
+          {manualPlaylists.length === 0 && <div className="nav-empty">No saved playlists yet</div>}
           {manualPlaylists.map((playlist) => (
             <button
               key={playlist.id}
@@ -1969,9 +2456,22 @@ function App() {
 
         {view === 'tracks' && (
           <TracksView
-            tracks={filteredTracks}
+            tracks={sortedTracks}
             search={search}
             onSearch={setSearch}
+            sortValue={selectedManualPlaylist ? undefined : trackSort}
+            onSortChange={selectedManualPlaylist ? undefined : setTrackSort}
+            artistFilterValue={trackArtistFilter}
+            onArtistFilterChange={setTrackArtistFilter}
+            artistFilterOptions={trackArtistOptions}
+            genreFilterValue={trackGenreFilter}
+            onGenreFilterChange={setTrackGenreFilter}
+            genreFilterOptions={trackGenreOptions}
+            yearFilterValue={trackYearFilter}
+            onYearFilterChange={setTrackYearFilter}
+            yearFilterOptions={trackYearOptions}
+            hasTrackFilters={hasTrackFilters}
+            onClearTrackFilters={clearTrackFilters}
             currentPath={currentPath}
             isPlaying={isPlaying}
             onPlay={play}
@@ -1995,14 +2495,13 @@ function App() {
             onDeletePlaylist={
               selectedManualPlaylist ? () => void deleteManualPlaylistById(selectedManualPlaylist) : undefined
             }
-            onSaveAsPlaylist={() =>
-              void saveVisibleTracksAsPlaylist(
-                filteredTracks,
-                selectedAlbumSummary?.album ??
-                  selectedArtist ??
-                  selectedPlaylistData?.name ??
-                  `Playlist ${new Date().toLocaleDateString()}`,
-              )
+            onSaveAsPlaylist={() => openPlaylistComposer('current')}
+            saveActionLabel="+ Save view as playlist"
+            onAddTrackToPlaylist={(track) =>
+              openPlaylistTarget([track], {
+                label: track.title,
+                suggestedName: `${track.title} picks`,
+              })
             }
             title={
               selectedPlaylistData
@@ -2019,19 +2518,32 @@ function App() {
                     : `${lib.track_count} tracks in your library`
             }
             onClearFilter={
-              selectedAlbum || selectedArtist || selectedPlaylistData
-                ? () => clearBrowsingFilters()
+              selectedAlbum || selectedArtist || selectedPlaylistData || hasTrackFilters
+                ? () => {
+                    clearBrowsingFilters();
+                    clearTrackFilters();
+                  }
                 : undefined
             }
+            emptyTitle={tracksEmptyTitle}
+            emptyMessage={tracksEmptyMessage}
           />
         )}
 
         {view === 'albums' && (
           <AlbumsView
-            albums={albums}
+            albums={sortedAlbums}
+            sortValue={albumSort}
+            onSortChange={setAlbumSort}
             onSelect={openAlbum}
             onPlayNextAlbum={playAlbumNext}
             onAddAlbumToQueue={addAlbumToQueue}
+            onAddAlbumToPlaylist={(albumKeyValue) =>
+              openPlaylistTarget(tracksForAlbum(albumKeyValue), {
+                label: albumTitleFromKey(albumKeyValue),
+                suggestedName: albumTitleFromKey(albumKeyValue),
+              })
+            }
           />
         )}
 
@@ -2054,11 +2566,25 @@ function App() {
             onAddToQueue={addToQueue}
             onPlayAlbumNext={() => playAlbumNext(selectedAlbum)}
             onAddAlbumToQueue={() => addAlbumToQueue(selectedAlbum)}
-            onSaveAsPlaylist={() =>
-              void saveVisibleTracksAsPlaylist(
-                tracksForAlbum(selectedAlbum),
-                selectedAlbumSummary.album,
-              )
+            onAddAlbumToPlaylist={() =>
+              openPlaylistTarget(tracksForAlbum(selectedAlbum), {
+                label: selectedAlbumSummary.album,
+                suggestedName: selectedAlbumSummary.album,
+              })
+            }
+            onAddTrackToPlaylist={(track) =>
+              openPlaylistTarget([track], {
+                label: track.title,
+                suggestedName: `${selectedAlbumSummary.album} picks`,
+              })
+            }
+            onEditPrimaryGenre={(currentPrimaryGenre, suggestedGenres) =>
+              setAlbumGenreEditor({
+                album: selectedAlbumSummary.album,
+                albumArtist: selectedAlbumSummary.artist,
+                currentPrimaryGenre,
+                suggestedGenres,
+              })
             }
             onPlayAlbum={() => {
       if (currentAlbumKey === selectedAlbum) {
@@ -2085,7 +2611,9 @@ function App() {
 
         {view === 'artists' && (
           <ArtistsView
-            artists={artists}
+            artists={sortedArtists}
+            sortValue={artistSort}
+            onSortChange={setArtistSort}
             onSelect={(artist) => {
               setSelectedArtist(artist);
               setSelectedAlbum(null);
@@ -2105,6 +2633,41 @@ function App() {
           />
         )}
       </main>
+
+      {playlistComposer && (
+        <PlaylistComposerModal
+          composer={playlistComposer}
+          busy={busy === 'Saving playlist…'}
+          onClose={() => setPlaylistComposer(null)}
+          onSubmit={(name, tracks) => void submitPlaylistComposer(name, tracks)}
+        />
+      )}
+
+      {playlistTarget && (
+        <PlaylistTargetModal
+          state={playlistTarget}
+          playlists={manualPlaylists}
+          busy={busy === 'Saving playlist…' || busy === 'Updating playlist…'}
+          onClose={() => setPlaylistTarget(null)}
+          onCreate={(name, trackPaths) => void submitPlaylistTargetCreate(name, trackPaths)}
+          onAppend={(playlist, trackPaths) => void submitPlaylistTargetAppend(playlist, trackPaths)}
+        />
+      )}
+
+      {albumGenreEditor && (
+        <AlbumGenreEditorModal
+          state={albumGenreEditor}
+          busy={busy === 'Saving primary genre…'}
+          onClose={() => setAlbumGenreEditor(null)}
+          onSubmit={(primaryGenre) =>
+            void saveAlbumPrimaryGenre(
+              albumGenreEditor.album,
+              albumGenreEditor.albumArtist,
+              primaryGenre,
+            )
+          }
+        />
+      )}
 
       {isQueueOpen && (
         <QueueDrawer
@@ -2306,6 +2869,407 @@ function App() {
   );
 }
 
+interface PlaylistComposerModalProps {
+  composer: PlaylistComposerState;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (name: string, tracks: Track[]) => void;
+}
+
+function PlaylistComposerModal({ composer, busy, onClose, onSubmit }: PlaylistComposerModalProps) {
+  const selectedSource =
+    composer.sources.find((source) => source.id === composer.selectedSourceId) ?? composer.sources[0];
+  const [name, setName] = useState(selectedSource?.suggestedName ?? '');
+  const [sourceId, setSourceId] = useState(selectedSource?.id ?? '');
+  const [artistFilter, setArtistFilter] = useState(composer.initialArtist);
+  const [genreFilter, setGenreFilter] = useState(composer.initialGenre);
+  const lastAutoNameRef = useRef(selectedSource?.suggestedName ?? '');
+
+  useEffect(() => {
+    const nextSelectedSource =
+      composer.sources.find((source) => source.id === composer.selectedSourceId) ?? composer.sources[0];
+    setName(nextSelectedSource?.suggestedName ?? '');
+    setSourceId(nextSelectedSource?.id ?? '');
+    setArtistFilter(composer.initialArtist);
+    setGenreFilter(composer.initialGenre);
+    lastAutoNameRef.current = nextSelectedSource?.suggestedName ?? '';
+  }, [composer]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) {
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [busy, onClose]);
+
+  const activeSource = composer.sources.find((source) => source.id === sourceId) ?? selectedSource;
+  const activeSuggestedName =
+    sourceId === 'custom'
+      ? filteredPlaylistName(artistFilter, genreFilter)
+      : (activeSource?.suggestedName ?? 'Playlist');
+  const filteredTracks = useMemo(() => {
+    if (sourceId !== 'custom') {
+      return activeSource?.tracks ?? [];
+    }
+
+    return composer.libraryTracks.filter((track) => {
+      if (artistFilter && track.artist !== artistFilter) {
+        return false;
+      }
+      if (genreFilter && !splitTrackGenres(effectiveTrackGenre(track)).includes(genreFilter)) {
+        return false;
+      }
+      return true;
+    });
+  }, [activeSource?.tracks, artistFilter, composer.libraryTracks, genreFilter, sourceId]);
+  useEffect(() => {
+    if (!name.trim() || name === lastAutoNameRef.current) {
+      setName(activeSuggestedName);
+    }
+    lastAutoNameRef.current = activeSuggestedName;
+  }, [activeSuggestedName, name]);
+  const trimmedName = name.trim();
+  const isCustomSource = sourceId === 'custom';
+  const selectedArtistLabel = artistFilter || 'Any artist';
+  const selectedGenreLabel = genreFilter || 'Any genre';
+
+  return (
+    <div className="modal-scrim" onClick={() => !busy && onClose()}>
+      <div
+        className="modal-card playlist-composer"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="playlist-composer-title"
+      >
+        <div className="modal-head">
+          <div>
+            <div className="view-eyebrow">Playlists</div>
+            <h2 className="modal-title" id="playlist-composer-title">
+              Create playlist
+            </h2>
+            <p className="modal-copy">Pick the tracks to save, then give the playlist a name.</p>
+          </div>
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+        </div>
+
+        <label className="field">
+          <span className="field-label">Name</span>
+          <input
+            className="field-input"
+            value={name}
+            onChange={(event) => setName(event.currentTarget.value)}
+            placeholder="Late night rotation"
+            autoFocus
+          />
+        </label>
+
+        <div className="field">
+          <div className="field-label">Tracks to include</div>
+          <div className="source-list">
+            {composer.sources.map((source) => (
+              <label key={source.id} className={`source-option ${source.id === sourceId ? 'is-selected' : ''}`}>
+                <input
+                  className="sr-only"
+                  type="radio"
+                  name="playlist-source"
+                  value={source.id}
+                  checked={source.id === sourceId}
+                  onChange={() => setSourceId(source.id)}
+                />
+                <span className="source-option-title">{source.label}</span>
+                <span className="source-option-copy">{source.description}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {isCustomSource && (
+          <div className="field">
+            <div className="field-label">Filter the library</div>
+            <div className="filter-grid">
+              <label className="field">
+                <span className="field-hint">Artist</span>
+                <select
+                  className="view-select field-input"
+                  value={artistFilter}
+                  onChange={(event) => setArtistFilter(event.currentTarget.value)}
+                >
+                  <option value="">Any artist</option>
+                  {composer.artistOptions.map((artist) => (
+                    <option key={artist} value={artist}>
+                      {artist}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-hint">Genre</span>
+                <select
+                  className="view-select field-input"
+                  value={genreFilter}
+                  onChange={(event) => setGenreFilter(event.currentTarget.value)}
+                >
+                  <option value="">Any genre</option>
+                  {composer.genreOptions.map((genre) => (
+                    <option key={genre} value={genre}>
+                      {genre}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
+        )}
+
+        {activeSource && (
+          <div className="playlist-composer-summary">
+            {filteredTracks.length} track{filteredTracks.length === 1 ? '' : 's'} will be saved
+            {isCustomSource ? ` · ${selectedArtistLabel} · ${selectedGenreLabel}` : ''}.
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            className="primary-button"
+            onClick={() => onSubmit(trimmedName, filteredTracks)}
+            disabled={!trimmedName || filteredTracks.length === 0 || busy}
+          >
+            {busy ? 'Creating…' : 'Create playlist'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface PlaylistTargetModalProps {
+  state: PlaylistTargetState;
+  playlists: SavedPlaylist[];
+  busy: boolean;
+  onClose: () => void;
+  onCreate: (name: string, trackPaths: string[]) => void;
+  onAppend: (playlist: SavedPlaylist, trackPaths: string[]) => void;
+}
+
+function PlaylistTargetModal({
+  state,
+  playlists,
+  busy,
+  onClose,
+  onCreate,
+  onAppend,
+}: PlaylistTargetModalProps) {
+  const [name, setName] = useState(state.suggestedName);
+
+  useEffect(() => {
+    setName(state.suggestedName);
+  }, [state.suggestedName]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) {
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [busy, onClose]);
+
+  const trimmedName = name.trim();
+  const hasTracks = state.trackPaths.length > 0;
+
+  return (
+    <div className="modal-scrim" onClick={() => !busy && onClose()}>
+      <div
+        className="modal-card playlist-target"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="playlist-target-title"
+      >
+        <div className="modal-head">
+          <div>
+            <div className="view-eyebrow">Playlists</div>
+            <h2 className="modal-title" id="playlist-target-title">
+              {state.title}
+            </h2>
+            <p className="modal-copy">{state.description}</p>
+          </div>
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+        </div>
+
+        {hasTracks && (
+          <div className="playlist-target-section">
+            <div className="field-label">Add to an existing playlist</div>
+            {playlists.length === 0 ? (
+              <div className="playlist-target-empty">No saved playlists yet. Create one below.</div>
+            ) : (
+              <div className="playlist-target-list">
+                {playlists.map((playlist) => (
+                  <div key={playlist.id} className="playlist-target-row">
+                    <div className="playlist-target-copy">
+                      <div className="playlist-target-name">{playlist.name}</div>
+                      <div className="playlist-target-meta">
+                        {playlist.track_paths.length} track{playlist.track_paths.length === 1 ? '' : 's'}
+                      </div>
+                    </div>
+                    <button
+                      className="row-action-button"
+                      onClick={() => onAppend(playlist, state.trackPaths)}
+                      disabled={busy}
+                    >
+                      Add here
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="playlist-target-section">
+          <div className="field-label">{hasTracks ? 'Or create a new playlist' : 'Create an empty playlist'}</div>
+          <label className="field">
+            <span className="field-hint">Playlist name</span>
+            <input
+              className="field-input"
+              value={name}
+              onChange={(event) => setName(event.currentTarget.value)}
+              placeholder="Late night rotation"
+              autoFocus
+            />
+          </label>
+        </div>
+
+        <div className="modal-actions">
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            className="primary-button"
+            onClick={() => onCreate(trimmedName, state.trackPaths)}
+            disabled={!trimmedName || busy}
+          >
+            {busy ? 'Saving…' : hasTracks ? 'Create and add' : 'Create playlist'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface AlbumGenreEditorModalProps {
+  state: AlbumGenreEditorState;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (primaryGenre: string | null) => void;
+}
+
+function AlbumGenreEditorModal({ state, busy, onClose, onSubmit }: AlbumGenreEditorModalProps) {
+  const [value, setValue] = useState(state.currentPrimaryGenre ?? state.suggestedGenres[0] ?? '');
+
+  useEffect(() => {
+    setValue(state.currentPrimaryGenre ?? state.suggestedGenres[0] ?? '');
+  }, [state]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) {
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [busy, onClose]);
+
+  const trimmedValue = value.trim();
+  const suggestedGenres = Array.from(
+    new Set([state.currentPrimaryGenre, ...state.suggestedGenres].filter(Boolean)),
+  ) as string[];
+
+  return (
+    <div className="modal-scrim" onClick={() => !busy && onClose()}>
+      <div
+        className="modal-card genre-editor"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="album-genre-editor-title"
+      >
+        <div className="modal-head">
+          <div>
+            <div className="view-eyebrow">Metadata</div>
+            <h2 className="modal-title" id="album-genre-editor-title">
+              Primary genre
+            </h2>
+            <p className="modal-copy">
+              Needle will use this for this album before falling back to the imported tags.
+            </p>
+          </div>
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+        </div>
+
+        {suggestedGenres.length > 0 && (
+          <div className="field">
+            <div className="field-label">Suggestions from your files</div>
+            <div className="genre-choice-grid">
+              {suggestedGenres.map((genre) => (
+                <button
+                  key={genre}
+                  className={`genre-choice ${trimmedValue === genre ? 'is-selected' : ''}`}
+                  onClick={() => setValue(genre)}
+                >
+                  {genre}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <label className="field">
+          <span className="field-label">Genre Needle should use</span>
+          <input
+            className="field-input"
+            value={value}
+            onChange={(event) => setValue(event.currentTarget.value)}
+            placeholder="Electronic"
+            autoFocus
+          />
+        </label>
+
+        <div className="modal-actions">
+          <button className="ghost-button" onClick={() => onSubmit(null)} disabled={!state.currentPrimaryGenre || busy}>
+            Clear override
+          </button>
+          <button
+            className="primary-button"
+            onClick={() => onSubmit(trimmedValue || null)}
+            disabled={!trimmedValue || busy}
+          >
+            {busy ? 'Saving…' : 'Save primary genre'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface QueueDrawerProps {
   drawerRef: RefObject<HTMLElement>;
   tracks: Track[];
@@ -2415,6 +3379,19 @@ interface TracksViewProps {
   tracks: Track[];
   search: string;
   onSearch: (value: string) => void;
+  sortValue?: TrackSortOption;
+  onSortChange?: (value: TrackSortOption) => void;
+  artistFilterValue: string;
+  onArtistFilterChange: (value: string) => void;
+  artistFilterOptions: string[];
+  genreFilterValue: string;
+  onGenreFilterChange: (value: string) => void;
+  genreFilterOptions: string[];
+  yearFilterValue: TrackYearFilterOption;
+  onYearFilterChange: (value: TrackYearFilterOption) => void;
+  yearFilterOptions: string[];
+  hasTrackFilters: boolean;
+  onClearTrackFilters: () => void;
   currentPath: string | null;
   isPlaying: boolean;
   onPlay: (track: Track) => void;
@@ -2427,15 +3404,32 @@ interface TracksViewProps {
   onRenamePlaylist?: () => void;
   onDeletePlaylist?: () => void;
   onSaveAsPlaylist?: () => void;
+  saveActionLabel?: string;
+  onAddTrackToPlaylist?: (track: Track) => void;
   title: string;
   subtitle: string;
   onClearFilter?: () => void;
+  emptyTitle: string;
+  emptyMessage: string;
 }
 
 function TracksView({
   tracks,
   search,
   onSearch,
+  sortValue,
+  onSortChange,
+  artistFilterValue,
+  onArtistFilterChange,
+  artistFilterOptions,
+  genreFilterValue,
+  onGenreFilterChange,
+  genreFilterOptions,
+  yearFilterValue,
+  onYearFilterChange,
+  yearFilterOptions,
+  hasTrackFilters,
+  onClearTrackFilters,
   currentPath,
   isPlaying,
   onPlay,
@@ -2448,26 +3442,25 @@ function TracksView({
   onRenamePlaylist,
   onDeletePlaylist,
   onSaveAsPlaylist,
+  saveActionLabel,
+  onAddTrackToPlaylist,
   title,
   subtitle,
   onClearFilter,
+  emptyTitle,
+  emptyMessage,
 }: TracksViewProps) {
   return (
     <div className="view">
-      <header className="view-header">
+      <header className="view-header tracks-view-header">
         <div>
           <div className="view-eyebrow">{subtitle}</div>
           <h1 className="view-title">{title}</h1>
         </div>
-        <div className="view-actions">
+        <div className="view-actions tracks-header-actions">
           {onClearFilter && (
             <button className="ghost-button" onClick={onClearFilter}>
               ← All tracks
-            </button>
-          )}
-          {onSaveAsPlaylist && !playlistMode && (
-            <button className="ghost-button" onClick={onSaveAsPlaylist} disabled={tracks.length === 0}>
-              + Save as playlist
             </button>
           )}
           {playlistMode && onRenamePlaylist && (
@@ -2480,20 +3473,112 @@ function TracksView({
               Delete
             </button>
           )}
-          <input
-            className="search"
-            placeholder="Search title, artist, album…"
-            value={search}
-            onChange={(e) => onSearch(e.target.value)}
-          />
         </div>
       </header>
+      <section className={`tracks-toolbar ${playlistMode ? 'is-playlist-mode' : ''}`}>
+        <div className="tracks-toolbar-main">
+          <label className="tracks-search-wrap">
+            <SearchIcon />
+            <input
+              className="search tracks-search"
+              placeholder="Search title, artist, album…"
+              value={search}
+              onChange={(e) => onSearch(e.target.value)}
+            />
+          </label>
+          {sortValue && onSortChange && (
+            <label className="tracks-toolbar-control tracks-toolbar-sort">
+              <span className="view-select-label">Sort</span>
+              <select
+                className="view-select tracks-select"
+                value={sortValue}
+                onChange={(event) => onSortChange(event.currentTarget.value as TrackSortOption)}
+              >
+                {trackSortOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+        {!playlistMode && (
+          <>
+            <div className="tracks-filter-grid">
+              <label className="tracks-filter-card">
+                <span className="view-select-label">Artist</span>
+                <select
+                  className="view-select tracks-select"
+                  value={artistFilterValue}
+                  onChange={(event) => onArtistFilterChange(event.currentTarget.value)}
+                >
+                  <option value={allTrackFilterValue}>All artists</option>
+                  {artistFilterOptions.map((artist) => (
+                    <option key={artist} value={artist}>
+                      {artist}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="tracks-filter-card">
+                <span className="view-select-label">Genre</span>
+                <select
+                  className="view-select tracks-select"
+                  value={genreFilterValue}
+                  onChange={(event) => onGenreFilterChange(event.currentTarget.value)}
+                >
+                  <option value={allTrackFilterValue}>All genres</option>
+                  {genreFilterOptions.map((genre) => (
+                    <option key={genre} value={genre}>
+                      {genre}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="tracks-filter-card">
+                <span className="view-select-label">Year</span>
+                <select
+                  className="view-select tracks-select"
+                  value={yearFilterValue}
+                  onChange={(event) => onYearFilterChange(event.currentTarget.value as TrackYearFilterOption)}
+                >
+                  <option value={allTrackFilterValue}>All years</option>
+                  <option value={unknownTrackFilterValue}>Unknown year</option>
+                  {yearFilterOptions.map((year) => (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="tracks-toolbar-footer">
+              <span className="tracks-filter-status">
+                {hasTrackFilters ? 'Filters are shaping this view' : 'Save this filtered view as a playlist snapshot'}
+              </span>
+              <div className="tracks-toolbar-footer-actions">
+                {hasTrackFilters && (
+                  <button className="ghost-button" onClick={onClearTrackFilters}>
+                    Clear filters
+                  </button>
+                )}
+                {onSaveAsPlaylist && (
+                  <button className="ghost-button" onClick={onSaveAsPlaylist} disabled={tracks.length === 0}>
+                    {saveActionLabel ?? '+ Save as playlist'}
+                  </button>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </section>
 
       {tracks.length === 0 ? (
         <div className="empty">
           <div className="empty-icon">♪</div>
-          <h2>No tracks yet</h2>
-          <p>Add a folder from the sidebar to import FLAC, ALAC, WAV, MP3, OGG, M4A, and more.</p>
+          <h2>{emptyTitle}</h2>
+          <p>{emptyMessage}</p>
         </div>
       ) : (
         <div className="track-list">
@@ -2504,26 +3589,27 @@ function TracksView({
             <span>Album</span>
             <span className="num">Time</span>
             <span>Quality</span>
-            <span className="track-actions-head">Queue</span>
+            <span className="track-actions-head">Actions</span>
           </div>
           {tracks.map((track, index) => {
             const isCurrent = track.path === currentPath;
             const isQueued = queuePaths.includes(track.path);
             return (
-              <button
-                key={track.id}
-                className={`track-row ${isCurrent ? 'is-current' : ''}`}
-                onDoubleClick={() => onPlay(track)}
-                onClick={() => onPlay(track)}
-              >
-                <span className="track-index">
-                  {isCurrent ? <PlayingIndicator /> : index + 1}
-                </span>
-                <span className="track-title">{track.title}</span>
-                <span className="track-cell">{track.artist ?? '—'}</span>
-                <span className="track-cell">{track.album ?? '—'}</span>
-                <span className="track-cell num">{formatDuration(track.duration_seconds)}</span>
-                <span className="track-cell muted">{formatQuality(track)}</span>
+              <div key={track.id} className={`track-row ${isCurrent ? 'is-current' : ''}`}>
+                <button
+                  className="track-row-main"
+                  onDoubleClick={() => onPlay(track)}
+                  onClick={() => onPlay(track)}
+                >
+                  <span className="track-index">
+                    {isCurrent ? <PlayingIndicator /> : index + 1}
+                  </span>
+                  <span className="track-title">{track.title}</span>
+                  <span className="track-cell">{track.artist ?? '—'}</span>
+                  <span className="track-cell">{track.album ?? '—'}</span>
+                  <span className="track-cell num">{formatDuration(track.duration_seconds)}</span>
+                  <span className="track-cell muted">{formatQuality(track)}</span>
+                </button>
                 <span className="track-row-actions">
                   {playlistMode ? (
                     <>
@@ -2564,27 +3650,44 @@ function TracksView({
                     <>
                       {isQueued && <span className="queue-pill">Queued</span>}
                       <button
-                        className="row-action-button"
+                        className="row-icon-button"
                         onClick={(event) => {
                           event.stopPropagation();
                           void onPlayNext(track);
                         }}
+                        title={`Play ${track.title} next`}
+                        aria-label={`Play ${track.title} next`}
                       >
-                        Play next
+                        <NextIcon />
                       </button>
                       <button
-                        className="row-action-button"
+                        className="row-icon-button"
                         onClick={(event) => {
                           event.stopPropagation();
                           void onAddToQueue(track);
                         }}
+                        title={`Add ${track.title} to queue`}
+                        aria-label={`Add ${track.title} to queue`}
                       >
-                        Add
+                        <QueueIcon />
                       </button>
+                      {onAddTrackToPlaylist && (
+                        <button
+                          className="row-icon-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onAddTrackToPlaylist(track);
+                          }}
+                          title={`Add ${track.title} to a playlist`}
+                          aria-label={`Add ${track.title} to a playlist`}
+                        >
+                          <PlaylistIcon />
+                        </button>
+                      )}
                     </>
                   )}
                 </span>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -2608,7 +3711,9 @@ interface AlbumDetailViewProps {
   onAddToQueue: (track: Track) => void;
   onPlayAlbumNext: () => void;
   onAddAlbumToQueue: () => void;
-  onSaveAsPlaylist: () => void;
+  onAddAlbumToPlaylist: () => void;
+  onAddTrackToPlaylist: (track: Track) => void;
+  onEditPrimaryGenre: (currentPrimaryGenre: string | null, suggestedGenres: string[]) => void;
   onPlayAlbum: () => void;
   onShuffleAlbum: () => void;
   onOpenArtist: (artist: string) => void;
@@ -2629,7 +3734,9 @@ function AlbumDetailView({
   onAddToQueue,
   onPlayAlbumNext,
   onAddAlbumToQueue,
-  onSaveAsPlaylist,
+  onAddAlbumToPlaylist,
+  onAddTrackToPlaylist,
+  onEditPrimaryGenre,
   onPlayAlbum,
   onShuffleAlbum,
   onOpenArtist,
@@ -2689,13 +3796,17 @@ function AlbumDetailView({
     const set = new Set<string>();
     for (const t of albumTracks) {
       if (!t.genre) continue;
-      for (const part of t.genre.split(/[;,/]/)) {
-        const trimmed = part.trim();
-        if (trimmed) set.add(trimmed);
+      for (const part of splitTrackGenres(t.genre)) {
+        set.add(part);
       }
     }
     return Array.from(set).slice(0, 5);
   }, [albumTracks]);
+  const primaryGenre = albumTracks.find((track) => track.primary_genre)?.primary_genre ?? null;
+  const secondaryGenres = useMemo(
+    () => (primaryGenre ? genres.filter((genre) => compareText(genre, primaryGenre) !== 0) : genres),
+    [genres, primaryGenre],
+  );
 
   const qualityHint = useMemo(() => {
     if (albumTracks.length === 0) return null;
@@ -2760,9 +3871,23 @@ function AlbumDetailView({
               .filter(Boolean)
               .join(' · ')}
           </div>
-          {genres.length > 0 && (
+          <div className="album-primary-genre">
+            <span className="album-primary-genre-label">Primary genre</span>
+            <span className={`album-primary-genre-pill ${primaryGenre ? 'is-set' : ''}`}>
+              {primaryGenre ?? 'Not set'}
+            </span>
+            <button
+              className="album-primary-genre-edit"
+              onClick={() => onEditPrimaryGenre(primaryGenre, genres)}
+              title={primaryGenre ? `Edit primary genre · ${primaryGenre}` : 'Set primary genre'}
+              aria-label={primaryGenre ? `Edit primary genre · ${primaryGenre}` : 'Set primary genre'}
+            >
+              <PencilIcon />
+            </button>
+          </div>
+          {secondaryGenres.length > 0 && (
             <div className="album-hero-genres">
-              {genres.map((g) => (
+              {secondaryGenres.map((g) => (
                 <span key={g} className="album-genre-pill">
                   {g}
                 </span>
@@ -2779,8 +3904,8 @@ function AlbumDetailView({
             <button className="ghost-button" onClick={onAddAlbumToQueue}>
               + Add to queue
             </button>
-            <button className="ghost-button" onClick={onSaveAsPlaylist}>
-              + Save as playlist
+            <button className="ghost-button" onClick={onAddAlbumToPlaylist}>
+              + Add to playlist
             </button>
             <button className="ghost-button" onClick={onShuffleAlbum}>
               ⤮ Shuffle
@@ -2827,43 +3952,62 @@ function AlbumDetailView({
                   const isCurrent = currentPath === t.path;
                   const isQueued = queuePaths.includes(t.path);
                   return (
-                    <button
+                    <div
                       key={t.id}
                       className={`album-track-row ${isCurrent ? 'playing' : ''}`}
-                      onClick={() => onPlayTrack(t)}
                     >
-                      <span className="album-track-num">
-                        {isCurrent ? <PlayingIndicator /> : (t.track_number ?? '—')}
-                      </span>
-                      <span className="album-track-title">{t.title}</span>
-                      <span className="album-track-meta muted">
-                        {formatQuality(t)}
-                      </span>
-                      <span className="album-track-duration">
-                        {formatDuration(t.duration_seconds)}
-                      </span>
+                      <button
+                        className="album-track-row-main"
+                        onClick={() => onPlayTrack(t)}
+                      >
+                        <span className="album-track-num">
+                          {isCurrent ? <PlayingIndicator /> : (t.track_number ?? '—')}
+                        </span>
+                        <span className="album-track-title">{t.title}</span>
+                        <span className="album-track-meta muted">
+                          {formatQuality(t)}
+                        </span>
+                        <span className="album-track-duration">
+                          {formatDuration(t.duration_seconds)}
+                        </span>
+                      </button>
                       <span className="album-track-actions">
                         {isQueued && <span className="queue-pill">Queued</span>}
                         <button
-                          className="row-action-button"
+                          className="row-icon-button"
                           onClick={(event) => {
                             event.stopPropagation();
                             void onPlayNext(t);
                           }}
+                          title={`Play ${t.title} next`}
+                          aria-label={`Play ${t.title} next`}
                         >
-                          Next
+                          <NextIcon />
                         </button>
                         <button
-                          className="row-action-button"
+                          className="row-icon-button"
                           onClick={(event) => {
                             event.stopPropagation();
                             void onAddToQueue(t);
                           }}
+                          title={`Add ${t.title} to queue`}
+                          aria-label={`Add ${t.title} to queue`}
                         >
-                          Add
+                          <QueueIcon />
+                        </button>
+                        <button
+                          className="row-icon-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onAddTrackToPlaylist(t);
+                          }}
+                          title={`Add ${t.title} to a playlist`}
+                          aria-label={`Add ${t.title} to a playlist`}
+                        >
+                          <PlaylistIcon />
                         </button>
                       </span>
-                    </button>
+                    </div>
                   );
                 })}
               </div>
@@ -2877,18 +4021,45 @@ function AlbumDetailView({
 
 interface AlbumsViewProps {
   albums: AlbumSummary[];
+  sortValue: AlbumSortOption;
+  onSortChange: (value: AlbumSortOption) => void;
   onSelect: (albumKey: string) => void;
   onPlayNextAlbum: (albumKey: string) => void;
   onAddAlbumToQueue: (albumKey: string) => void;
+  onAddAlbumToPlaylist: (albumKey: string) => void;
 }
 
-function AlbumsView({ albums, onSelect, onPlayNextAlbum, onAddAlbumToQueue }: AlbumsViewProps) {
+function AlbumsView({
+  albums,
+  sortValue,
+  onSortChange,
+  onSelect,
+  onPlayNextAlbum,
+  onAddAlbumToQueue,
+  onAddAlbumToPlaylist,
+}: AlbumsViewProps) {
   return (
     <div className="view">
       <header className="view-header">
         <div>
           <div className="view-eyebrow">Library</div>
           <h1 className="view-title">Albums</h1>
+        </div>
+        <div className="view-actions">
+          <label className="view-select-wrap">
+            <span className="view-select-label">Sort</span>
+            <select
+              className="view-select"
+              value={sortValue}
+              onChange={(event) => onSortChange(event.currentTarget.value as AlbumSortOption)}
+            >
+              {albumSortOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       </header>
       {albums.length === 0 ? (
@@ -2915,15 +4086,25 @@ function AlbumsView({ albums, onSelect, onPlayNextAlbum, onAddAlbumToQueue }: Al
                   className="card-mini-action"
                   onClick={() => onPlayNextAlbum(a.key)}
                   title={`Play ${a.album} next`}
+                  aria-label={`Play ${a.album} next`}
                 >
-                  Next
+                  <NextIcon />
                 </button>
                 <button
                   className="card-mini-action"
                   onClick={() => onAddAlbumToQueue(a.key)}
                   title={`Add ${a.album} to queue`}
+                  aria-label={`Add ${a.album} to queue`}
                 >
-                  + Queue
+                  <QueueIcon />
+                </button>
+                <button
+                  className="card-mini-action"
+                  onClick={() => onAddAlbumToPlaylist(a.key)}
+                  title={`Add ${a.album} to a playlist`}
+                  aria-label={`Add ${a.album} to a playlist`}
+                >
+                  <PlaylistIcon />
                 </button>
               </div>
             </div>
@@ -2992,17 +4173,35 @@ function ArtistAvatar({ name, size }: ArtistAvatarProps) {
 }
 
 interface ArtistsViewProps {
-  artists: Array<{ artist: string; count: number }>;
+  artists: ArtistSummary[];
+  sortValue: ArtistSortOption;
+  onSortChange: (value: ArtistSortOption) => void;
   onSelect: (artist: string) => void;
 }
 
-function ArtistsView({ artists, onSelect }: ArtistsViewProps) {
+function ArtistsView({ artists, sortValue, onSortChange, onSelect }: ArtistsViewProps) {
   return (
     <div className="view">
       <header className="view-header">
         <div>
           <div className="view-eyebrow">Library</div>
           <h1 className="view-title">Artists</h1>
+        </div>
+        <div className="view-actions">
+          <label className="view-select-wrap">
+            <span className="view-select-label">Sort</span>
+            <select
+              className="view-select"
+              value={sortValue}
+              onChange={(event) => onSortChange(event.currentTarget.value as ArtistSortOption)}
+            >
+              {artistSortOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       </header>
       {artists.length === 0 ? (
@@ -3453,15 +4652,17 @@ function DashboardView({
                     className="card-mini-action"
                     onClick={() => onPlayNextAlbum(a.key)}
                     title={`Play ${a.album} next`}
+                    aria-label={`Play ${a.album} next`}
                   >
-                    Next
+                    <NextIcon />
                   </button>
                   <button
                     className="card-mini-action"
                     onClick={() => onAddAlbumToQueue(a.key)}
                     title={`Add ${a.album} to queue`}
+                    aria-label={`Add ${a.album} to queue`}
                   >
-                    + Queue
+                    <QueueIcon />
                   </button>
                 </div>
               </div>
@@ -3543,15 +4744,17 @@ function DashboardView({
                     className="card-mini-action"
                     onClick={() => onPlayNextAlbum(a.key)}
                     title={`Play ${a.album} next`}
+                    aria-label={`Play ${a.album} next`}
                   >
-                    Next
+                    <NextIcon />
                   </button>
                   <button
                     className="card-mini-action"
                     onClick={() => onAddAlbumToQueue(a.key)}
                     title={`Add ${a.album} to queue`}
+                    aria-label={`Add ${a.album} to queue`}
                   >
-                    + Queue
+                    <QueueIcon />
                   </button>
                 </div>
               </div>

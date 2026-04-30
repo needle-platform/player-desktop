@@ -34,6 +34,7 @@ const splitGenres = (raw: string): string[] =>
     .split(/[;,/]/)
     .map((s) => s.trim())
     .filter(Boolean);
+const effectiveGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
 
 const REDISCOVER_AFTER_DAYS = 30;
 const dayMs = 24 * 60 * 60 * 1000;
@@ -168,8 +169,9 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
   // One top-genre mix, not a wall of genre cards.
   const genreBuckets = new Map<string, Track[]>();
   for (const t of tracks) {
-    if (!t.genre) continue;
-    for (const g of splitGenres(t.genre)) {
+    const rawGenre = effectiveGenre(t);
+    if (!rawGenre) continue;
+    for (const g of splitGenres(rawGenre)) {
       const key = titleCase(g);
       const existing = genreBuckets.get(key);
       if (existing) existing.push(t);

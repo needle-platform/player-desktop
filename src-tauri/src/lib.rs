@@ -375,6 +375,23 @@ fn move_playlist_track(
 }
 
 #[tauri::command]
+fn set_album_primary_genre(
+    album: String,
+    album_artist: Option<String>,
+    primary_genre: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::set_album_primary_genre(
+        &state.db_path,
+        &album,
+        album_artist.as_deref(),
+        primary_genre.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn set_playback_volume(
     volume_percent: f64,
     state: tauri::State<'_, AppState>,
@@ -603,6 +620,7 @@ pub fn run() {
             replace_playlist_tracks,
             remove_playlist_track,
             move_playlist_track,
+            set_album_primary_genre,
             set_playback_volume,
             set_playback_muted,
             set_audio_device,

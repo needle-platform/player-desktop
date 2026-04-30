@@ -86,6 +86,12 @@ export const removePlaylistTrack = (playlistId: number, index: number) =>
 export const movePlaylistTrack = (playlistId: number, fromIndex: number, toIndex: number) =>
   invoke<BootstrapPayload>('move_playlist_track', { playlistId, fromIndex, toIndex });
 
+export const setAlbumPrimaryGenre = (
+  album: string,
+  albumArtist: string | null,
+  primaryGenre: string | null,
+) => invoke<BootstrapPayload>('set_album_primary_genre', { album, albumArtist, primaryGenre });
+
 export interface CoverArt {
   data_url: string;
   source: string;

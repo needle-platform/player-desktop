@@ -45,6 +45,7 @@ pub struct Track {
     pub disc_number: Option<i64>,
     pub track_number: Option<i64>,
     pub genre: Option<String>,
+    pub primary_genre: Option<String>,
     pub year: Option<i64>,
     pub added_at: Option<String>,
     pub play_count: i64,

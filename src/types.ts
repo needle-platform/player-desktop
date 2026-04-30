@@ -24,6 +24,7 @@ export interface Track {
   disc_number: number | null;
   track_number: number | null;
   genre: string | null;
+  primary_genre: string | null;
   year: number | null;
   added_at: string | null;
   play_count: number;

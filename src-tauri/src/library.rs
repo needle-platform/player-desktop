@@ -108,6 +108,7 @@ fn read_track(path: &Path) -> Track {
         disc_number,
         track_number,
         genre,
+        primary_genre: None,
         year,
         added_at: None,
         play_count: 0,
