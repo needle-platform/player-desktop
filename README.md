@@ -70,14 +70,14 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - Cached in SQLite (`artist_images`) for 30 days, including misses so we don't keep hammering the API
 - Cached in SQLite (`artist_info`) for 90 days, including misses, with manual retry from the artist page
 - **Artist-page recovery tools** are hidden behind a right-click menu on the hero portrait for Refresh photo / Refresh bio, with loading feedback during background refreshes
-- **Graceful artwork fallback** uses the artist's album art before falling back to a gradient initial when no portrait loads
+- **Graceful artwork fallback** uses the artist's album art across the artist page and Artists browser before falling back to a gradient initial when no portrait loads
 
 ### Views
 - **Dashboard** (default landing screen)
 - **Tracks** with live search, sorting, and filters for artist / genre / year range, plus album / artist / playlist context
 - **Albums** with cover art, sorting, and direct playlist actions
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
-- **Artists** with sorting, track counts, dedicated artist pages, biographies, album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
+- **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
 - **Settings** with theme switcher, custom accent color, library folders, maintenance, live equalizer presets, and manual 10-band EQ
 
 ### Album info

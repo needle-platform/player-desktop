@@ -63,6 +63,8 @@ type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: n
 type TrackSortOption = 'title' | 'artist' | 'album' | 'recent' | 'plays' | 'duration';
 type AlbumSortOption = 'album' | 'artist' | 'recent' | 'tracks';
 type ArtistSortOption = 'artist' | 'tracks' | 'recent';
+type ArtistBrowseMode = 'album' | 'all';
+type ArtistLayoutMode = 'list' | 'grid';
 type TrackYearBoundaryFilter = 'all' | string;
 type PlaylistCreateSource = {
   id: string;
@@ -104,6 +106,7 @@ type AlbumSummary = {
   key: string;
   album: string;
   artist: string | null;
+  year: number | null;
   count: number;
   samplePath: string;
   addedAt: string | null;
@@ -111,6 +114,8 @@ type AlbumSummary = {
 type ArtistSummary = {
   artist: string;
   count: number;
+  albumCount: number;
+  samplePath: string;
   addedAt: string | null;
 };
 type WindowRestoreState = {
@@ -205,6 +210,10 @@ const artistSortOptions: Array<{ value: ArtistSortOption; label: string }> = [
   { value: 'tracks', label: 'Most tracks' },
   { value: 'recent', label: 'Recently added' },
 ];
+const artistBrowseModeOptions: Array<{ value: ArtistBrowseMode; label: string }> = [
+  { value: 'album', label: 'Album artists' },
+  { value: 'all', label: 'All artists' },
+];
 const trackPageSizeOptions = [25, 50, 100] as const;
 const defaultTracksPageSize = 50;
 const allTrackFilterValue = 'all';
@@ -263,6 +272,8 @@ const compareText = (a: string | null | undefined, b: string | null | undefined)
   (a ?? '').localeCompare(b ?? '', undefined, { sensitivity: 'base' });
 const albumArtistForTrack = (track: Pick<Track, 'album_artist' | 'artist'>) =>
   track.album_artist ?? track.artist ?? null;
+const artistNameForTrack = (track: Pick<Track, 'artist' | 'album_artist'>, mode: ArtistBrowseMode) =>
+  mode === 'album' ? albumArtistForTrack(track) : track.artist;
 const albumKey = (album: string | null | undefined, albumArtist: string | null | undefined) =>
   `${album ?? ''}${albumIdentitySeparator}${albumArtist ?? ''}`;
 const trackAlbumKey = (track: Pick<Track, 'album' | 'album_artist' | 'artist'>) =>
@@ -278,6 +289,8 @@ const timestampValue = (iso: string | null | undefined) => {
   const parsed = Date.parse(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`);
   return Number.isNaN(parsed) ? 0 : parsed;
 };
+const formatArtistCounts = (albumCount: number, trackCount: number) =>
+  `${albumCount} album${albumCount === 1 ? '' : 's'} · ${trackCount} track${trackCount === 1 ? '' : 's'}`;
 const compareAlbumTracks = (a: Track, b: Track) =>
   (a.disc_number ?? 1) - (b.disc_number ?? 1) ||
   (a.track_number ?? 9999) - (b.track_number ?? 9999) ||
@@ -598,6 +611,30 @@ function SearchIcon() {
   );
 }
 
+function ListLayoutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 7h11" />
+      <path d="M9 12h11" />
+      <path d="M9 17h11" />
+      <circle cx="5" cy="7" r="1.2" />
+      <circle cx="5" cy="12" r="1.2" />
+      <circle cx="5" cy="17" r="1.2" />
+    </svg>
+  );
+}
+
+function GridLayoutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="4" width="6" height="6" rx="1.2" />
+      <rect x="14" y="4" width="6" height="6" rx="1.2" />
+      <rect x="4" y="14" width="6" height="6" rx="1.2" />
+      <rect x="14" y="14" width="6" height="6" rx="1.2" />
+    </svg>
+  );
+}
+
 function PencilIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -647,9 +684,14 @@ function App() {
   const [trackYearToFilter, setTrackYearToFilter] = useState<TrackYearBoundaryFilter>(allTrackFilterValue);
   const [albumSort, setAlbumSort] = useState<AlbumSortOption>('album');
   const [artistSort, setArtistSort] = useState<ArtistSortOption>('artist');
+  const [artistSearch, setArtistSearch] = useState('');
+  const [artistBrowseMode, setArtistBrowseMode] = useState<ArtistBrowseMode>('album');
+  const [artistLayoutMode, setArtistLayoutMode] = useState<ArtistLayoutMode>('list');
   const [selectedAlbum, setSelectedAlbum] = useState<string | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
+  const [selectedArtistMode, setSelectedArtistMode] = useState<ArtistBrowseMode>('all');
   const [selectedArtistProfile, setSelectedArtistProfile] = useState<string | null>(null);
+  const [selectedArtistProfileMode, setSelectedArtistProfileMode] = useState<ArtistBrowseMode>('all');
   const [selectedPlaylist, setSelectedPlaylist] = useState<PlaylistSelection | null>(null);
   const [tracksPage, setTracksPage] = useState(1);
   const [playlistComposer, setPlaylistComposer] = useState<PlaylistComposerState | null>(null);
@@ -719,16 +761,18 @@ function App() {
     setView('album');
   };
 
-  const openArtist = (artist: string) => {
+  const openArtist = (artist: string, mode: ArtistBrowseMode = 'all') => {
     artistReturnView.current = view;
     setSelectedArtistProfile(artist);
+    setSelectedArtistProfileMode(mode);
     setSelectedAlbum(null);
     setSelectedPlaylist(null);
     setView('artist');
   };
 
-  const openArtistTracks = (artist: string) => {
+  const openArtistTracks = (artist: string, mode: ArtistBrowseMode = 'all') => {
     setSelectedArtist(artist);
+    setSelectedArtistMode(mode);
     setSelectedAlbum(null);
     setSelectedPlaylist(null);
     setView('tracks');
@@ -1307,9 +1351,9 @@ function App() {
   const scopedTracks = useMemo(() => {
     let list: Track[] = selectedPlaylistData ? selectedPlaylistData.tracks : allTracks;
     if (selectedAlbum) list = list.filter((t) => trackAlbumKey(t) === selectedAlbum);
-    if (selectedArtist) list = list.filter((t) => t.artist === selectedArtist);
+    if (selectedArtist) list = list.filter((t) => artistNameForTrack(t, selectedArtistMode) === selectedArtist);
     return list;
-  }, [allTracks, selectedAlbum, selectedArtist, selectedPlaylistData]);
+  }, [allTracks, selectedAlbum, selectedArtist, selectedArtistMode, selectedPlaylistData]);
   const trackArtistOptions = useMemo(
     () => uniqueSorted(scopedTracks.map((track) => track.artist ?? '').filter(Boolean)),
     [scopedTracks],
@@ -1386,11 +1430,15 @@ function App() {
         if (t.added_at && (!existing.addedAt || t.added_at > existing.addedAt)) {
           existing.addedAt = t.added_at;
         }
+        if (existing.year == null && t.year != null) {
+          existing.year = t.year;
+        }
       } else {
         map.set(key, {
           key,
           album: t.album,
           artist: albumArtistForTrack(t),
+          year: t.year ?? null,
           count: 1,
           samplePath: t.path,
           addedAt: t.added_at ?? null,
@@ -1436,28 +1484,48 @@ function App() {
     return withDate.slice().sort((a, b) => (b.addedAt ?? '').localeCompare(a.addedAt ?? '')).slice(0, 8);
   }, [albums]);
 
-  const artists = useMemo<ArtistSummary[]>(() => {
-    const map = new Map<string, { count: number; addedAt: string | null }>();
+  const buildArtistSummaries = (mode: ArtistBrowseMode): ArtistSummary[] => {
+    const map = new Map<string, { count: number; addedAt: string | null; albumKeys: Set<string>; samplePath: string }>();
     for (const t of allTracks) {
-      if (!t.artist) continue;
-      const existing = map.get(t.artist);
+      const artist = artistNameForTrack(t, mode);
+      if (!artist) continue;
+      const existing = map.get(artist);
+      const albumKeyValue = trackAlbumKey(t);
       if (existing) {
         existing.count += 1;
+        if (albumKeyValue) {
+          existing.albumKeys.add(albumKeyValue);
+        }
         if (t.added_at && (!existing.addedAt || t.added_at > existing.addedAt)) {
           existing.addedAt = t.added_at;
         }
       } else {
-        map.set(t.artist, { count: 1, addedAt: t.added_at ?? null });
+        map.set(artist, {
+          count: 1,
+          addedAt: t.added_at ?? null,
+          albumKeys: new Set(albumKeyValue ? [albumKeyValue] : []),
+          samplePath: t.path,
+        });
       }
     }
     return Array.from(map.entries()).map(([artist, meta]) => ({
       artist,
       count: meta.count,
+      albumCount: meta.albumKeys.size,
+      samplePath: meta.samplePath,
       addedAt: meta.addedAt,
     }));
-  }, [allTracks]);
+  };
+  const allArtists = useMemo<ArtistSummary[]>(() => buildArtistSummaries('all'), [allTracks]);
+  const albumArtists = useMemo<ArtistSummary[]>(() => buildArtistSummaries('album'), [allTracks]);
+  const artists = artistBrowseMode === 'album' ? albumArtists : allArtists;
+  const filteredArtists = useMemo(() => {
+    if (!artistSearch.trim()) return artists;
+    const query = artistSearch.trim().toLowerCase();
+    return artists.filter((artist) => artist.artist.toLowerCase().includes(query));
+  }, [artistSearch, artists]);
   const sortedArtists = useMemo(() => {
-    return artists.slice().sort((a, b) => {
+    return filteredArtists.slice().sort((a, b) => {
       if (artistSort === 'tracks') {
         return (
           b.count - a.count ||
@@ -1472,7 +1540,7 @@ function App() {
       }
       return compareText(a.artist, b.artist);
     });
-  }, [artistSort, artists]);
+  }, [artistSort, filteredArtists]);
 
   const currentTrack = useMemo(
     () => (currentPath ? trackByPath.get(currentPath) ?? null : currentQueueTrack),
@@ -1483,8 +1551,11 @@ function App() {
     [albums, selectedAlbum],
   );
   const selectedArtistProfileSummary = useMemo(
-    () => artists.find((artist) => artist.artist === selectedArtistProfile) ?? null,
-    [artists, selectedArtistProfile],
+    () =>
+      (selectedArtistProfileMode === 'album' ? albumArtists : allArtists).find(
+        (artist) => artist.artist === selectedArtistProfile,
+      ) ?? null,
+    [albumArtists, allArtists, selectedArtistProfile, selectedArtistProfileMode],
   );
   const visibleTracksForPlaylist = selectedManualPlaylist ? filteredTracks : sortedTracks;
   const playlistSourceTrackIndices = useMemo(() => {
@@ -1558,6 +1629,7 @@ function App() {
     trackYearToFilter,
     selectedAlbum,
     selectedArtist,
+    selectedArtistMode,
     selectedPlaylist?.kind,
     selectedPlaylist?.id,
   ]);
@@ -1880,7 +1952,7 @@ function App() {
       libraryTracks: sortedLibraryTracks,
       artistOptions,
       genreOptions,
-      initialArtist: selectedArtist ?? dedupedCurrentSource?.tracks[0]?.artist ?? '',
+      initialArtist: selectedArtistMode === 'all' ? (selectedArtist ?? dedupedCurrentSource?.tracks[0]?.artist ?? '') : '',
       initialGenre: '',
     });
   };
@@ -2202,8 +2274,14 @@ function App() {
     });
   };
 
-  const playArtist = (artistName: string) => {
-    const pool = allTracks.filter((t) => t.artist === artistName);
+  const tracksForArtist = (artistName: string, mode: ArtistBrowseMode = 'all') =>
+    allTracks.filter((track) => artistNameForTrack(track, mode) === artistName);
+  const topTracksForArtist = (artistName: string, mode: ArtistBrowseMode = 'all') =>
+    tracksForArtist(artistName, mode).slice().sort(compareTracksBySort('plays')).slice(0, 10);
+
+  const playArtist = (artistName: string, mode: ArtistBrowseMode = 'all') => {
+    const pool = tracksForArtist(artistName, mode);
+    if (pool.length === 0) return;
     const shuffled = shuffleList(pool).slice(0, 50);
     const selected = new Set(shuffled.map((track) => track.path));
     void playQueue(shuffled, `Artist mix · ${artistName}`, {
@@ -2942,7 +3020,7 @@ function App() {
             tracks={allTracks}
             albums={albums}
             recentAlbums={recentAlbums}
-            artists={artists}
+            artists={allArtists}
             playlists={smartPlaylists}
             currentTrack={currentTrack}
             isPlaying={isPlaying}
@@ -3088,7 +3166,9 @@ function App() {
                 : selectedAlbum
                   ? (selectedAlbumSummary?.artist ? `Album · ${selectedAlbumSummary.artist}` : 'Album')
                   : selectedArtist
-                    ? 'Artist'
+                    ? selectedArtistMode === 'album'
+                      ? 'Album artist'
+                      : 'Artist'
                     : `${lib.track_count} tracks in your library`
             }
             onClearFilter={
@@ -3186,13 +3266,20 @@ function App() {
             artists={sortedArtists}
             sortValue={artistSort}
             onSortChange={setArtistSort}
-            onSelect={openArtist}
+            search={artistSearch}
+            onSearch={setArtistSearch}
+            browseMode={artistBrowseMode}
+            onBrowseModeChange={setArtistBrowseMode}
+            layoutMode={artistLayoutMode}
+            onLayoutModeChange={setArtistLayoutMode}
+            onSelect={(artist) => openArtist(artist, artistBrowseMode)}
           />
         )}
 
         {view === 'artist' && selectedArtistProfile && (
           <ArtistDetailView
             artist={selectedArtistProfile}
+            mode={selectedArtistProfileMode}
             summary={selectedArtistProfileSummary}
             tracks={allTracks}
             albums={albums}
@@ -3204,22 +3291,22 @@ function App() {
             onPlayTrack={play}
             onPlayNext={playNext}
             onAddToQueue={addToQueue}
-            onPlayArtist={() => playArtist(selectedArtistProfile)}
+            onPlayArtist={() => playArtist(selectedArtistProfile, selectedArtistProfileMode)}
             onPlayArtistNext={() => {
               void queueTrackCollection(
-                allTracks.filter((track) => track.artist === selectedArtistProfile),
+                tracksForArtist(selectedArtistProfile, selectedArtistProfileMode),
                 selectedArtistProfile,
                 'next',
               );
             }}
             onAddArtistToQueue={() => {
               void queueTrackCollection(
-                allTracks.filter((track) => track.artist === selectedArtistProfile),
+                tracksForArtist(selectedArtistProfile, selectedArtistProfileMode),
                 selectedArtistProfile,
                 'queue',
               );
             }}
-            onViewTracks={() => openArtistTracks(selectedArtistProfile)}
+            onViewTracks={() => openArtistTracks(selectedArtistProfile, selectedArtistProfileMode)}
             onOpenAlbum={openAlbum}
             onPlayAlbum={playAlbum}
             onPlayAlbumNext={playAlbumNext}
@@ -3231,22 +3318,14 @@ function App() {
               })
             }
             onPlayTopTracks={() => {
-              const artistTopTracks = allTracks
-                .filter((track) => track.artist === selectedArtistProfile)
-                .slice()
-                .sort(compareTracksBySort('plays'))
-                .slice(0, 10);
+              const artistTopTracks = topTracksForArtist(selectedArtistProfile, selectedArtistProfileMode);
               if (artistTopTracks.length === 0) return;
               void playQueue(artistTopTracks, `Top tracks · ${selectedArtistProfile}`, {
                 baseTracks: artistTopTracks,
               });
             }}
             onShuffleTopTracks={() => {
-              const artistTopTracks = allTracks
-                .filter((track) => track.artist === selectedArtistProfile)
-                .slice()
-                .sort(compareTracksBySort('plays'))
-                .slice(0, 10);
+              const artistTopTracks = topTracksForArtist(selectedArtistProfile, selectedArtistProfileMode);
               if (artistTopTracks.length === 0) return;
               void playQueue(shuffleList(artistTopTracks), `Shuffle top tracks · ${selectedArtistProfile}`, {
                 baseTracks: artistTopTracks,
@@ -3254,19 +3333,11 @@ function App() {
               });
             }}
             onPlayTopTracksNext={() => {
-              const artistTopTracks = allTracks
-                .filter((track) => track.artist === selectedArtistProfile)
-                .slice()
-                .sort(compareTracksBySort('plays'))
-                .slice(0, 10);
+              const artistTopTracks = topTracksForArtist(selectedArtistProfile, selectedArtistProfileMode);
               void queueTrackCollection(artistTopTracks, `${selectedArtistProfile} top tracks`, 'next');
             }}
             onAddTopTracksToQueue={() => {
-              const artistTopTracks = allTracks
-                .filter((track) => track.artist === selectedArtistProfile)
-                .slice()
-                .sort(compareTracksBySort('plays'))
-                .slice(0, 10);
+              const artistTopTracks = topTracksForArtist(selectedArtistProfile, selectedArtistProfileMode);
               void queueTrackCollection(artistTopTracks, `${selectedArtistProfile} top tracks`, 'queue');
             }}
             onAddTrackToPlaylist={(track) =>
@@ -5088,6 +5159,7 @@ function AlbumDetailView({
 
 interface ArtistDetailViewProps {
   artist: string;
+  mode: ArtistBrowseMode;
   summary: ArtistSummary | null;
   tracks: Track[];
   albums: AlbumSummary[];
@@ -5115,6 +5187,7 @@ interface ArtistDetailViewProps {
 
 function ArtistDetailView({
   artist,
+  mode,
   summary,
   tracks,
   albums,
@@ -5149,21 +5222,25 @@ function ArtistDetailView({
   } = useArtistImage(artist);
   const { info, loading: infoLoading, retrying: infoRetrying, retry: retryArtistInfo } = useArtistInfo(artist);
   const artistTracks = useMemo(
-    () => tracks.filter((track) => track.artist === artist),
-    [artist, tracks],
+    () => tracks.filter((track) => artistNameForTrack(track, mode) === artist),
+    [artist, mode, tracks],
+  );
+  const artistAlbumKeys = useMemo(
+    () => new Set(artistTracks.map((track) => trackAlbumKey(track)).filter((key): key is string => Boolean(key))),
+    [artistTracks],
   );
   const artistAlbums = useMemo(
     () =>
       albums
-        .filter((album) => album.artist === artist)
+        .filter((album) => artistAlbumKeys.has(album.key))
         .slice()
         .sort(
           (a, b) =>
-            timestampValue(b.addedAt) - timestampValue(a.addedAt) ||
+            (b.year ?? Number.NEGATIVE_INFINITY) - (a.year ?? Number.NEGATIVE_INFINITY) ||
             compareText(a.album, b.album) ||
             compareText(a.key, b.key),
         ),
-    [albums, artist],
+    [albums, artistAlbumKeys],
   );
   const topTracks = useMemo(
     () => artistTracks.slice().sort(compareTracksBySort('plays')).slice(0, 10),
@@ -5274,7 +5351,7 @@ function ArtistDetailView({
           <h1 className="album-hero-title">{artist}</h1>
           <div className="artist-hero-line">
             {[
-              `${artistAlbums.length} album${artistAlbums.length === 1 ? '' : 's'}`,
+              `${summary?.albumCount ?? artistAlbums.length} album${(summary?.albumCount ?? artistAlbums.length) === 1 ? '' : 's'}`,
               `${summary?.count ?? artistTracks.length} track${(summary?.count ?? artistTracks.length) === 1 ? '' : 's'}`,
               totalPlays > 0 ? `${totalPlays} play${totalPlays === 1 ? '' : 's'}` : null,
               yearLine,
@@ -5376,7 +5453,7 @@ function ArtistDetailView({
                     size="card"
                   />
                   <div className="card-title">{album.album}</div>
-                  <div className="card-sub">{relativeAdded(album.addedAt)}</div>
+                  <div className="card-sub">{album.year ?? relativeAdded(album.addedAt)}</div>
                   <div className="card-meta">{album.count} tracks</div>
                 </button>
                 <div className="card-actions">
@@ -5687,47 +5764,133 @@ interface ArtistsViewProps {
   artists: ArtistSummary[];
   sortValue: ArtistSortOption;
   onSortChange: (value: ArtistSortOption) => void;
+  search: string;
+  onSearch: (value: string) => void;
+  browseMode: ArtistBrowseMode;
+  onBrowseModeChange: (value: ArtistBrowseMode) => void;
+  layoutMode: ArtistLayoutMode;
+  onLayoutModeChange: (value: ArtistLayoutMode) => void;
   onSelect: (artist: string) => void;
 }
 
-function ArtistsView({ artists, sortValue, onSortChange, onSelect }: ArtistsViewProps) {
+function ArtistsView({
+  artists,
+  sortValue,
+  onSortChange,
+  search,
+  onSearch,
+  browseMode,
+  onBrowseModeChange,
+  layoutMode,
+  onLayoutModeChange,
+  onSelect,
+}: ArtistsViewProps) {
+  const scopeLabel = browseMode === 'album' ? 'Album artists' : 'All artists';
+  const emptyTitle = search.trim() ? 'No matching artists' : `No ${browseMode === 'album' ? 'album artists' : 'artists'}`;
+  const emptyMessage = search.trim()
+    ? `Try a different search than “${search.trim()}”.`
+    : browseMode === 'album'
+      ? 'No album artists are available from your imported library yet.'
+      : 'No artists are available from your imported library yet.';
+
   return (
     <div className="view">
       <header className="view-header">
         <div>
-          <div className="view-eyebrow">Library</div>
+          <div className="view-eyebrow">{scopeLabel}</div>
           <h1 className="view-title">Artists</h1>
         </div>
-        <div className="view-actions">
-          <label className="view-select-wrap">
-            <span className="view-select-label">Sort</span>
-            <select
-              className="view-select"
-              value={sortValue}
-              onChange={(event) => onSortChange(event.currentTarget.value as ArtistSortOption)}
-            >
-              {artistSortOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
       </header>
+      <section className="tracks-toolbar artists-toolbar">
+        <div className="tracks-toolbar-main artists-toolbar-main">
+          <label className="tracks-search-wrap">
+            <SearchIcon />
+            <input
+              className="search tracks-search"
+              placeholder={`Search ${browseMode === 'album' ? 'album artists' : 'artists'}…`}
+              value={search}
+              onChange={(event) => onSearch(event.currentTarget.value)}
+            />
+          </label>
+          <div className="tracks-toolbar-actions artists-toolbar-actions">
+            <label className="tracks-toolbar-control">
+              <span className="view-select-label">Show</span>
+              <select
+                className="view-select tracks-select"
+                value={browseMode}
+                onChange={(event) => onBrowseModeChange(event.currentTarget.value as ArtistBrowseMode)}
+              >
+                {artistBrowseModeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="tracks-toolbar-control">
+              <span className="view-select-label">Sort</span>
+              <select
+                className="view-select tracks-select"
+                value={sortValue}
+                onChange={(event) => onSortChange(event.currentTarget.value as ArtistSortOption)}
+              >
+                {artistSortOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+      </section>
+      <div className="section-head artist-browser-head">
+        <h2 className="section-title">{artists.length} shown</h2>
+        <div className="artist-browser-layout-toggle" role="group" aria-label="Artist layout">
+          <button
+            className={`row-icon-button artist-layout-button ${layoutMode === 'list' ? 'is-active' : ''}`}
+            onClick={() => onLayoutModeChange('list')}
+            aria-label="List view"
+            aria-pressed={layoutMode === 'list'}
+            title="List view"
+          >
+            <ListLayoutIcon />
+          </button>
+          <button
+            className={`row-icon-button artist-layout-button ${layoutMode === 'grid' ? 'is-active' : ''}`}
+            onClick={() => onLayoutModeChange('grid')}
+            aria-label="Grid view"
+            aria-pressed={layoutMode === 'grid'}
+            title="Grid view"
+          >
+            <GridLayoutIcon />
+          </button>
+        </div>
+      </div>
       {artists.length === 0 ? (
         <div className="empty">
           <div className="empty-icon">☻</div>
-          <h2>No artists</h2>
+          <h2>{emptyTitle}</h2>
+          <p className="muted">{emptyMessage}</p>
+        </div>
+      ) : layoutMode === 'grid' ? (
+        <div className="artist-row artist-browser-grid">
+          {artists.map((artist) => (
+            <button key={artist.artist} className="artist-tile artist-browser-tile" onClick={() => onSelect(artist.artist)}>
+              <ArtistAvatar name={artist.artist} size="lg" fallbackTrackPath={artist.samplePath} />
+              <div className="artist-tile-name">{artist.artist}</div>
+              <div className="artist-tile-meta">{formatArtistCounts(artist.albumCount, artist.count)}</div>
+            </button>
+          ))}
         </div>
       ) : (
         <div className="list">
-          {artists.map((a) => (
-            <button key={a.artist} className="list-row" onClick={() => onSelect(a.artist)}>
-              <ArtistAvatar name={a.artist} size="sm" />
+          {artists.map((artist) => (
+            <button key={artist.artist} className="list-row" onClick={() => onSelect(artist.artist)}>
+              <ArtistAvatar name={artist.artist} size="sm" fallbackTrackPath={artist.samplePath} />
               <div className="list-main">
-                <div className="list-title">{a.artist}</div>
-                <div className="list-sub">{a.count} tracks</div>
+                <div className="list-title">{artist.artist}</div>
+                <div className="list-sub">{formatArtistCounts(artist.albumCount, artist.count)}</div>
               </div>
               <span className="chev">›</span>
             </button>
