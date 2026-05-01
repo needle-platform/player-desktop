@@ -1,0 +1,38 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+This changelog follows a lightweight Keep a Changelog-style format and is organized around release versions declared in [package.json](/Users/davidrelich/CascadeProjects/music-player/package.json).
+
+## [Unreleased]
+
+### Added
+- Added a README screenshot for the public GitHub repository.
+
+### Changed
+- Licensed the project under `GPL-3.0-only` and added the full license text.
+- Updated project metadata and documentation to reflect the public open-source license.
+
+## [0.1.0] - 2026-05-01
+
+### Added
+- Public initial release of Needle as a local-first hi-fi music player for macOS built with Tauri, React, TypeScript, Rust, and mpv.
+- Local library import with recursive folder scanning, SQLite-backed storage, hidden-file filtering, maintenance rescans, and per-folder removal.
+- Rich playback experience with queue management, session restore, repeat and shuffle modes, output device selection, scrubbing, volume and mute controls, and robust mpv shutdown handling.
+- Artwork-first mini player with draggable positioning, always-on-top pinning, and expandable Up Next queue behavior.
+- Playlist support including manual playlists, smart playlists, saved filtered playlists, playlist editing, and playlist-aware playback actions.
+- Dashboard surfaces for recently added albums, featured albums, top artists, quick picks, and listening-history-driven recommendations.
+- Album pages with hero artwork, metadata, multi-disc grouping, local primary genre overrides, and MusicBrainz-powered album metadata refresh.
+- Artist pages with portraits, biographies, cached enrichment, manual refresh tools, and artwork fallback behavior sourced through MusicBrainz, Wikidata, Wikimedia Commons, and Wikipedia.
+- Equalizer support with built-in presets plus manual 10-band EQ controls.
+- Theme support for system, light, and dark modes with custom accent colors, toast notifications, and app branding refresh.
+
+### Changed
+- Rebranded the app as Needle and refreshed the player UI, dashboard, mini player, and icon set for the public release.
+- Improved large-library browsing performance with deferred cover and portrait loading, cached media lookups, and more responsive browsing surfaces.
+- Hardened metadata fallback behavior for albums and artists, including collaboration-credit matching and clearer refresh error handling.
+
+### Fixed
+- Fixed now-playing and queue synchronization issues during playback progression.
+- Fixed album playback resume behavior and several queue-related playback edge cases.
+- Fixed playlist and filtered-playlist behavior when browsing and playing from playlist views.
