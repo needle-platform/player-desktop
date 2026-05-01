@@ -196,6 +196,33 @@ const notificationToneIcon = (tone: NotificationTone): string => {
   return 'i';
 };
 
+const formatMaintenanceLogLine = (message: string): string => {
+  const timestamp = new Date().toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  return `[${timestamp}] ${message}`;
+};
+
+const formatMaintenanceTimestamp = (value: string | null | undefined): string | null => {
+  if (!value) {
+    return null;
+  }
+
+  const isoValue = value.includes('T') ? value : value.replace(' ', 'T');
+  const normalized = /z$/i.test(isoValue) ? isoValue : `${isoValue}Z`;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date);
+};
+
 const greeting = (): string => {
   const h = new Date().getHours();
   if (h < 5) return 'Late night';
@@ -833,6 +860,8 @@ function App() {
   const [isDeviceMenuOpen, setIsDeviceMenuOpen] = useState(false);
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [isMaintenanceRunning, setIsMaintenanceRunning] = useState(false);
+  const [maintenanceLog, setMaintenanceLog] = useState<string[]>([]);
   const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [notification, setNotification] = useState<{
@@ -875,19 +904,23 @@ function App() {
     const id = notificationIdRef.current + 1;
     notificationIdRef.current = id;
     setNotification({ id, message, tone });
+    setStatus((current) => (current === message ? '' : current));
+  }, [status]);
 
-    const clearStatusTimer = window.setTimeout(() => {
-      setStatus((current) => (current === message ? '' : current));
-    }, 0);
-    const dismissTimer = window.setTimeout(() => {
-      setNotification((current) => (current?.id === id ? null : current));
-    }, tone === 'error' || tone === 'warning' ? 7000 : 4200);
+  useEffect(() => {
+    if (!notification || notification.tone !== 'success') {
+      return;
+    }
+
+    const dismissTimer =
+      window.setTimeout(() => {
+        setNotification((current) => (current?.id === notification.id ? null : current));
+      }, 4200);
 
     return () => {
-      window.clearTimeout(clearStatusTimer);
       window.clearTimeout(dismissTimer);
     };
-  }, [status]);
+  }, [notification]);
 
   const syncConfirmedPlaybackState = () => {
     setIsPlaying(
@@ -1040,6 +1073,7 @@ function App() {
   };
 
   useEffect(() => {
+    let cancelled = false;
     let unlisten: (() => void) | null = null;
     void (async () => {
       const dispose = await listen<{ name: string; data: unknown }>(
@@ -1126,9 +1160,14 @@ function App() {
           }
         },
       );
+      if (cancelled) {
+        dispose();
+        return;
+      }
       unlisten = dispose;
     })();
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, [queuePaths]);
@@ -1143,6 +1182,31 @@ function App() {
         setLoading(false);
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const dispose = await listen<string>('maintenance-log', (event) => {
+        const message = typeof event.payload === 'string' ? event.payload.trim() : '';
+        if (!message) {
+          return;
+        }
+
+        setMaintenanceLog((current) => [...current.slice(-79), formatMaintenanceLogLine(message)]);
+      });
+      if (cancelled) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
   }, []);
 
   useEffect(() => {
@@ -1912,13 +1976,22 @@ function App() {
 
   const maintenance = async () => {
     try {
+      setIsMaintenanceRunning(true);
+      setMaintenanceLog([formatMaintenanceLogLine('Queued maintenance run…')]);
       setBusy('Running maintenance…');
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       const next = await runMaintenance();
       setData(next);
       setStatus(`Library synced · ${next.library.track_count} tracks`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setMaintenanceLog((current) => [
+        ...current.slice(-79),
+        formatMaintenanceLogLine(`Maintenance failed · ${message}`),
+      ]);
+      setStatus(message);
     } finally {
+      setIsMaintenanceRunning(false);
       setBusy(null);
     }
   };
@@ -3566,6 +3639,8 @@ function App() {
             onMaintenance={maintenance}
             onRemoveRoot={removeRoot}
             busy={!!busy}
+            maintenanceBusy={isMaintenanceRunning}
+            maintenanceLog={maintenanceLog}
           />
         )}
       </main>
@@ -6255,6 +6330,8 @@ interface SettingsViewProps {
   onMaintenance: () => void;
   onRemoveRoot: (folder: string) => void;
   busy: boolean;
+  maintenanceBusy: boolean;
+  maintenanceLog: string[];
 }
 
 function SettingsView({
@@ -6265,16 +6342,29 @@ function SettingsView({
   onMaintenance,
   onRemoveRoot,
   busy,
+  maintenanceBusy,
+  maintenanceLog,
 }: SettingsViewProps) {
   const isManualEqualizer = settings.equalizer_preset === 'manual';
   const accentColorValue = normalizeAccentColor(settings.accent_color) ?? currentAccentColor;
+  const lastMaintenanceLabel = formatMaintenanceTimestamp(settings.last_maintenance_at);
   const [manualBandsDraft, setManualBandsDraft] = useState(() =>
     normalizeEqualizerBands(settings.equalizer_bands),
   );
+  const maintenanceLogRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setManualBandsDraft(normalizeEqualizerBands(settings.equalizer_bands));
   }, [settings.equalizer_bands, settings.equalizer_preset]);
+
+  useEffect(() => {
+    const node = maintenanceLogRef.current;
+    if (!node) {
+      return;
+    }
+
+    node.scrollTop = node.scrollHeight;
+  }, [maintenanceLog]);
 
   const equalizerBands = isManualEqualizer ? manualBandsDraft : displayedEqualizerBands(settings);
 
@@ -6494,7 +6584,7 @@ function SettingsView({
               </button>
             </div>
           </div>
-          <div className="settings-row">
+          <div className="settings-row settings-row-block">
             <div className="settings-row-copy">
               <label className="settings-label">Maintenance</label>
               <p className="settings-hint">
@@ -6502,9 +6592,41 @@ function SettingsView({
               </p>
             </div>
             <div className="settings-row-control">
-              <button className="primary" onClick={onMaintenance} disabled={busy}>
-                ↻ Run maintenance
+              <button
+                className="primary settings-maintenance-button"
+                onClick={onMaintenance}
+                disabled={busy}
+              >
+                <span
+                  className={`settings-maintenance-icon ${maintenanceBusy ? 'is-spinning' : ''}`}
+                  aria-hidden="true"
+                >
+                  ↻
+                </span>
+                <span>{maintenanceBusy ? 'Running maintenance…' : 'Run maintenance'}</span>
               </button>
+            </div>
+            <div className="settings-maintenance-meta">
+              {lastMaintenanceLabel ? `Last run ${lastMaintenanceLabel}` : 'No maintenance run recorded yet.'}
+            </div>
+            <div
+              className={`settings-maintenance-console ${maintenanceBusy ? 'is-live' : ''}`}
+              aria-live="polite"
+              aria-busy={maintenanceBusy}
+            >
+              {maintenanceLog.length === 0 ? (
+                <div className="settings-maintenance-empty">
+                  No maintenance run yet. The next run will stream its progress here.
+                </div>
+              ) : (
+                <div className="settings-maintenance-log" ref={maintenanceLogRef}>
+                  {maintenanceLog.map((line, index) => (
+                    <div key={`${index}-${line}`} className="settings-maintenance-line">
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </section>

@@ -12,7 +12,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Tag extraction** via `lofty`: title, artist, album, track number, **genre**, **year**, sample rate, bit depth
 - **On-demand MusicBrainz album refresh** from the album page right-click menu when an imported release needs cleaner metadata
 - **Hidden files ignored** — dotfiles and dot-directories are skipped during scan
-- **Maintenance command** rescans your folders for changes and purges any dotfile entries from the library (never touches your audio files)
+- **Maintenance command** rescans your folders for changes and purges any dotfile entries from the library (never touches your audio files), with live Settings progress output and a recorded last-run timestamp
 - **Diff-based rescans** preserve `added_at` and play history across maintenance runs
 - **Per-folder removal** from Settings
 
@@ -85,7 +85,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Large library browsers** lazily load offscreen covers / portraits and stage media work near the viewport instead of trying to resolve every image at once
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
 - **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
-- **Settings** with theme switcher, custom accent color, library folders, maintenance, live equalizer presets, and manual 10-band EQ
+- **Settings** with theme switcher, custom accent color, library folders, maintenance with live progress + last-run info, live equalizer presets, and manual 10-band EQ
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
@@ -105,7 +105,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Themes**: System, Light, Dark
 - **Custom accent color** persisted in SQLite and applied across playback controls, queue highlights, buttons, and selection states
 - **Theme-aware branding** with separate light/dark app icons and a dock-tuned macOS icon set
-- **Top-right toast notifications** now surface success, warning, and error states in a clear app-level notification card instead of hiding transient messages in the sidebar footer
+- **Top-right toast notifications** now surface success, warning, and error states in a clear app-level notification card instead of hiding transient messages in the sidebar footer, with success confirmations auto-dismissing after a short delay
 - **Mini player runtime dark override** keeps the compact artwork-first window in a dark presentation without changing the user's saved theme preference
 - **Wikipedia links** from album and artist metadata open in the system browser instead of relying on webview behavior
 - **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Vocal, Treble Boost, Lounge

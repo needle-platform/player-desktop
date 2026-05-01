@@ -1,5 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppSettings, BootstrapPayload, PlaybackSession, PlaybackState, RepeatMode } from '../types';
+import type {
+  AppSettings,
+  BootstrapPayload,
+  PlaybackSession,
+  PlaybackState,
+  RepeatMode,
+} from '../types';
 
 export const bootstrapApp = () => invoke<BootstrapPayload>('bootstrap_app');
 

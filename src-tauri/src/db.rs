@@ -212,6 +212,15 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
         .filter(|value| matches!(*value, 25 | 50 | 100))
         .unwrap_or_else(default_tracks_page_size);
 
+    let last_maintenance_at = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'last_maintenance_at'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
     let mut roots_stmt = connection.prepare("SELECT path FROM library_roots ORDER BY path ASC")?;
     let library_roots = roots_stmt
         .query_map([], |row| row.get::<_, String>(0))?
@@ -234,6 +243,7 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
         },
         equalizer_bands,
         tracks_page_size,
+        last_maintenance_at,
         library_roots,
     })
 }
@@ -308,6 +318,16 @@ pub fn insert_or_update_library_root(db_path: &Path, folder: &str) -> Result<()>
     connection.execute(
         "INSERT OR IGNORE INTO library_roots (path) VALUES (?1)",
         params![folder],
+    )?;
+    Ok(())
+}
+
+pub fn record_maintenance_run(db_path: &Path) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params!["last_maintenance_at"],
     )?;
     Ok(())
 }

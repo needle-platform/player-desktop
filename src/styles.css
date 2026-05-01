@@ -2332,6 +2332,67 @@ input, select {
   color: var(--text-2);
 }
 
+.settings-maintenance-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 210px;
+}
+
+.settings-maintenance-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.settings-maintenance-icon.is-spinning {
+  animation: artist-image-spin 0.9s linear infinite;
+}
+
+.settings-maintenance-console {
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--panel-2);
+}
+
+.settings-maintenance-console.is-live {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+.settings-maintenance-meta {
+  width: 100%;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-maintenance-empty {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-maintenance-log {
+  max-height: 240px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, SFMono, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+.settings-maintenance-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.settings-maintenance-line + .settings-maintenance-line {
+  margin-top: 6px;
+}
+
 .equalizer-graph {
   display: grid;
   grid-template-columns: repeat(10, minmax(0, 1fr));

@@ -7,14 +7,14 @@ mod library;
 mod models;
 mod mpv;
 
-use std::{fs, path::Path, process::Command, sync::Mutex};
+use std::{fs, path::Path, process::Command, sync::Mutex, time::Instant};
 
 use models::{
     AlbumMetadataRefreshResult, AlbumMetadataRefreshStatus, AppSettings, BootstrapPayload,
     PlaybackSession, PlaybackState, RepeatMode,
 };
 use mpv::MpvController;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 struct AppState {
     db_path: std::path::PathBuf,
@@ -479,22 +479,97 @@ fn set_audio_device(device_name: String, state: tauri::State<'_, AppState>) -> R
 }
 
 #[tauri::command]
-fn run_maintenance(state: tauri::State<'_, AppState>) -> Result<BootstrapPayload, String> {
-    let roots = db::list_library_roots(&state.db_path).map_err(|error| error.to_string())?;
+async fn run_maintenance(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    let db_path = state.db_path.clone();
+    let app_handle = app.clone();
 
-    db::purge_dotfile_tracks(&state.db_path).map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let emit_log = |message: String| {
+            let _ = app_handle.emit("maintenance-log", message);
+        };
 
-    for root in &roots {
-        if !Path::new(root).exists() {
-            db::remove_library_root(&state.db_path, root).map_err(|error| error.to_string())?;
-            continue;
+        let roots = db::list_library_roots(&db_path).map_err(|error| error.to_string())?;
+
+        emit_log(format!(
+            "Starting library maintenance for {} folder{}.",
+            roots.len(),
+            if roots.len() == 1 { "" } else { "s" }
+        ));
+
+        let removed_dotfile_tracks =
+            db::purge_dotfile_tracks(&db_path).map_err(|error| error.to_string())?;
+        emit_log(format!(
+            "Removed {} dotfile entr{} from the library database.",
+            removed_dotfile_tracks,
+            if removed_dotfile_tracks == 1 { "y" } else { "ies" }
+        ));
+
+        if roots.is_empty() {
+            emit_log("No library folders are configured, so there was nothing to rescan.".to_string());
         }
 
-        let tracks = library::scan_folder(root).map_err(|error| error.to_string())?;
-        db::replace_tracks(&state.db_path, root, &tracks).map_err(|error| error.to_string())?;
-    }
+        for (index, root) in roots.iter().enumerate() {
+            emit_log(format!(
+                "Checking folder {}/{}: {}",
+                index + 1,
+                roots.len(),
+                root
+            ));
 
-    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+            let started_at = Instant::now();
+            if !Path::new(root).exists() {
+                db::remove_library_root(&db_path, root).map_err(|error| error.to_string())?;
+                emit_log(format!(
+                    "Removed missing folder in {} ms: {}",
+                    started_at.elapsed().as_millis(),
+                    root
+                ));
+                continue;
+            }
+
+            let tracks = library::scan_folder(root).map_err(|error| error.to_string())?;
+            let track_count = tracks.len();
+            db::replace_tracks(&db_path, root, &tracks).map_err(|error| error.to_string())?;
+            emit_log(format!(
+                "Scanned {} track{} in {} ms: {}",
+                track_count,
+                if track_count == 1 { "" } else { "s" },
+                started_at.elapsed().as_millis(),
+                root
+            ));
+        }
+
+        db::record_maintenance_run(&db_path).map_err(|error| error.to_string())?;
+        let bootstrap = db::load_bootstrap(&db_path).map_err(|error| error.to_string())?;
+        emit_log(format!(
+            "Maintenance finished. Library now has {} track{}, {} album{}, and {} artist{}.",
+            bootstrap.library.track_count,
+            if bootstrap.library.track_count == 1 {
+                ""
+            } else {
+                "s"
+            },
+            bootstrap.library.album_count,
+            if bootstrap.library.album_count == 1 {
+                ""
+            } else {
+                "s"
+            },
+            bootstrap.library.artist_count,
+            if bootstrap.library.artist_count == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+
+        Ok(bootstrap)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

@@ -44,6 +44,7 @@ export interface AppSettings {
   equalizer_preset: EqualizerPreset;
   equalizer_bands: number[];
   tracks_page_size: number;
+  last_maintenance_at: string | null;
   library_roots: string[];
 }
 

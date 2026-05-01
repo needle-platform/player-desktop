@@ -87,6 +87,8 @@ pub struct AppSettings {
     pub equalizer_bands: [f32; 10],
     #[serde(default = "default_tracks_page_size")]
     pub tracks_page_size: u32,
+    #[serde(default)]
+    pub last_maintenance_at: Option<String>,
     pub library_roots: Vec<String>,
 }
 
