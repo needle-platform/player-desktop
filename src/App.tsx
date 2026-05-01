@@ -1634,6 +1634,7 @@ function App() {
   }, [manualPlaylists, selectedPlaylist, smartPlaylists, trackByPath]);
   const selectedManualPlaylist =
     selectedPlaylistData?.kind === 'manual' ? selectedPlaylistData.saved ?? null : null;
+  const playlistMode = Boolean(selectedPlaylistData);
 
   const scopedTracks = useMemo(() => {
     let list: Track[] = selectedPlaylistData ? selectedPlaylistData.tracks : allTracks;
@@ -1658,15 +1659,15 @@ function App() {
   );
   const filteredTracks = useMemo(() => {
     let list = scopedTracks;
-    if (trackArtistFilter !== allTrackFilterValue) {
+    if (!playlistMode && trackArtistFilter !== allTrackFilterValue) {
       list = list.filter((track) => (track.artist ?? '') === trackArtistFilter);
     }
-    if (trackGenreFilter !== allTrackFilterValue) {
+    if (!playlistMode && trackGenreFilter !== allTrackFilterValue) {
       list = list.filter((track) => splitTrackGenres(effectiveTrackGenre(track)).includes(trackGenreFilter));
     }
-    const startYear = yearFilterNumber(trackYearFromFilter);
-    const endYear = yearFilterNumber(trackYearToFilter);
-    if (startYear != null || endYear != null) {
+    const startYear = playlistMode ? null : yearFilterNumber(trackYearFromFilter);
+    const endYear = playlistMode ? null : yearFilterNumber(trackYearToFilter);
+    if (!playlistMode && (startYear != null || endYear != null)) {
       list = list.filter((track) => {
         if (track.year == null) return false;
         if (startYear != null && track.year < startYear) return false;
@@ -1684,7 +1685,7 @@ function App() {
       );
     }
     return list;
-  }, [scopedTracks, trackArtistFilter, trackGenreFilter, trackYearFromFilter, trackYearToFilter, search]);
+  }, [playlistMode, scopedTracks, trackArtistFilter, trackGenreFilter, trackYearFromFilter, trackYearToFilter, search]);
   const sortedTracks = useMemo(() => {
     if (selectedManualPlaylist) {
       return filteredTracks;
@@ -1898,14 +1899,14 @@ function App() {
   );
   const playlistSourceTotalCount =
     selectedPlaylistData?.kind === 'manual' ? selectedPlaylistData.tracks.length : undefined;
-  const yearFilterSummary = formatTrackYearRange(trackYearFromFilter, trackYearToFilter);
+  const yearFilterSummary = playlistMode ? null : formatTrackYearRange(trackYearFromFilter, trackYearToFilter);
   const hasTrackFilters =
-    trackArtistFilter !== allTrackFilterValue ||
-    trackGenreFilter !== allTrackFilterValue ||
+    (!playlistMode && trackArtistFilter !== allTrackFilterValue) ||
+    (!playlistMode && trackGenreFilter !== allTrackFilterValue) ||
     yearFilterSummary !== null;
   const activeTrackFilterSummary = [
-    trackArtistFilter !== allTrackFilterValue ? trackArtistFilter : null,
-    trackGenreFilter !== allTrackFilterValue ? trackGenreFilter : null,
+    !playlistMode && trackArtistFilter !== allTrackFilterValue ? trackArtistFilter : null,
+    !playlistMode && trackGenreFilter !== allTrackFilterValue ? trackGenreFilter : null,
     yearFilterSummary,
   ]
     .filter(Boolean)
@@ -3237,12 +3238,12 @@ function App() {
   const hasLibraryTracks = allTracks.length > 0;
   const tracksEmptyTitle = !hasLibraryTracks
     ? 'No tracks yet'
-    : selectedManualPlaylist
-      ? 'No tracks in this playlist'
+    : search.trim()
+        ? 'No matching tracks'
       : hasTrackFilters
         ? 'No tracks match these filters'
-      : search.trim()
-        ? 'No matching tracks'
+      : selectedManualPlaylist
+        ? 'No tracks in this playlist'
         : selectedArtist
           ? 'No tracks for this artist'
           : selectedPlaylistData
@@ -3250,13 +3251,13 @@ function App() {
             : 'No tracks found';
   const tracksEmptyMessage = !hasLibraryTracks
     ? 'Add a folder from the sidebar to import FLAC, ALAC, WAV, MP3, OGG, M4A, and more.'
-    : selectedManualPlaylist
-      ? 'This saved playlist is empty right now.'
+    : search.trim()
+        ? `Try a different search than “${search.trim()}”.`
       : hasTrackFilters
         ? 'Try widening the artist, genre, or year range filters.'
-      : search.trim()
-        ? `Try a different search than “${search.trim()}”.`
-        : selectedArtist
+      : selectedManualPlaylist
+        ? 'This saved playlist is empty right now.'
+      : selectedArtist
           ? `No imported tracks are currently linked to ${selectedArtist}.`
           : selectedPlaylistData
             ? 'This playlist does not have any tracks available right now.'
