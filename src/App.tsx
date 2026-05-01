@@ -841,13 +841,8 @@ function PencilIcon() {
 
 function ShuffleIcon() {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 7h4l10 10h2" />
-      <path d="M18 7h2v2" />
-      <path d="m16 9 4-2-2-4" />
-      <path d="M4 17h4l3-3" />
-      <path d="m16 15 4 2-2 4" />
-      <path d="M18 17h2v-2" />
+    <svg className="shuffle-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 7h4.5a4.8 4.8 0 0 1 3.5 1.5L21 18M17 18H21V14M3 17h4.5a4.8 4.8 0 0 0 3.5-1.5L21 6M17 6H21V10" />
     </svg>
   );
 }

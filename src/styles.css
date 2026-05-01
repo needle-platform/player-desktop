@@ -1845,6 +1845,9 @@ input, select {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.ctrl .shuffle-icon {
+  transform: translateX(-0.7px);
+}
 .ctrl:hover:not(:disabled) {
   background: var(--row-hover);
   border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
