@@ -240,6 +240,7 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
         accent_color,
         equalizer_preset: match equalizer_preset.as_str() {
             "bass_boost" => EqualizerPreset::BassBoost,
+            "bass_treble_boost" => EqualizerPreset::BassTrebleBoost,
             "vocal" => EqualizerPreset::Vocal,
             "treble_boost" => EqualizerPreset::TrebleBoost,
             "lounge" => EqualizerPreset::Lounge,
@@ -1402,6 +1403,7 @@ fn equalizer_to_str(equalizer: &EqualizerPreset) -> &'static str {
     match equalizer {
         EqualizerPreset::Flat => "flat",
         EqualizerPreset::BassBoost => "bass_boost",
+        EqualizerPreset::BassTrebleBoost => "bass_treble_boost",
         EqualizerPreset::Vocal => "vocal",
         EqualizerPreset::TrebleBoost => "treble_boost",
         EqualizerPreset::Lounge => "lounge",

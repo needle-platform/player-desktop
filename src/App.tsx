@@ -294,6 +294,7 @@ const shuffleList = <T,>(arr: T[]): T[] => {
 const equalizerOptions: Array<{ value: EqualizerPreset; label: string }> = [
   { value: 'flat', label: 'Flat' },
   { value: 'bass_boost', label: 'Bass Boost' },
+  { value: 'bass_treble_boost', label: 'Bass/Treble Boost' },
   { value: 'vocal', label: 'Vocal' },
   { value: 'treble_boost', label: 'Treble Boost' },
   { value: 'lounge', label: 'Lounge' },
@@ -305,6 +306,7 @@ const maxEqualizerGain = 6;
 const equalizerPresetBands: Record<Exclude<EqualizerPreset, 'manual'>, number[]> = {
   flat: defaultEqualizerBands,
   bass_boost: [2.3, 2.6, 2.2, 1.4, 0.5, 0.0, 0.0, -0.2, -0.3, 0.0],
+  bass_treble_boost: [2.4, 2.7, 2.3, 1.3, 0.2, -0.2, 0.5, 1.4, 2.1, 1.7],
   vocal: [-0.8, -0.6, -0.3, 0.2, 1.0, 1.8, 2.2, 1.0, 0.4, -0.2],
   treble_boost: [-0.3, -0.2, 0.0, 0.0, 0.3, 0.9, 1.6, 2.2, 2.5, 1.4],
   lounge: [1.2, 1.4, 1.0, 0.5, 0.2, -0.3, -0.8, -0.2, 0.2, 0.4],

@@ -109,7 +109,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Top-right toast notifications** now surface success, warning, and error states in a clear app-level notification card instead of hiding transient messages in the sidebar footer, with success confirmations auto-dismissing after a short delay
 - **Mini player runtime dark override** keeps the compact artwork-first window in a dark presentation without changing the user's saved theme preference
 - **Wikipedia links** from album and artist metadata open in the system browser instead of relying on webview behavior
-- **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Vocal, Treble Boost, Lounge
+- **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Bass/Treble Boost, Vocal, Treble Boost, Lounge
 - **Manual 10-band EQ** with preset curve visualization; manual slider edits are applied on release to avoid playback stutter
 
 ## Architecture
@@ -205,6 +205,7 @@ Real **BPM and key analysis** would unlock proper mood detection (energy, workou
 ## Roadmap
 
 - BPM + key analysis as an opt-in background step, with cached `audio_features` table
+- EQ follow-ups such as per-album remembered curves and user-defined genre-to-preset suggestions/mappings, favoring opt-in guidance over unreliable auto-application
 - Gapless playback hand-off
 - Watch folders with incremental rescans
 - Custom smart-playlist rules and editor

@@ -15,6 +15,7 @@ pub enum EqualizerPreset {
     #[default]
     Flat,
     BassBoost,
+    BassTrebleBoost,
     Vocal,
     TrebleBoost,
     Lounge,

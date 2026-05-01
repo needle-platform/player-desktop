@@ -3,6 +3,7 @@ export type ThemeMode = 'system' | 'light' | 'dark';
 export type EqualizerPreset =
   | 'flat'
   | 'bass_boost'
+  | 'bass_treble_boost'
   | 'vocal'
   | 'treble_boost'
   | 'lounge'
