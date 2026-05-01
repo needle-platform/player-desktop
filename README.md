@@ -215,4 +215,4 @@ Real **BPM and key analysis** would unlock proper mood detection (energy, workou
 
 ## License
 
-Currently unpublished personal project. License TBD.
+This project is licensed under the GNU General Public License v3.0. See [LICENSE](/Users/davidrelich/CascadeProjects/music-player/LICENSE).
