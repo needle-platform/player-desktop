@@ -4,6 +4,8 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 
 > Status: actively usable local-first player — library, queue, saved playlists, playback persistence, equalizer, and richer library curation tools are all in place, with smarter playlisting and metadata refinement continuing to grow.
 
+![Needle App](needle-app.png)
+
 ## Features
 
 ### Library
