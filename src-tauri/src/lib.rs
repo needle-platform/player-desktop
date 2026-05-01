@@ -1,4 +1,5 @@
 mod album;
+mod album_metadata;
 mod artist;
 mod cover;
 mod db;
@@ -8,7 +9,10 @@ mod mpv;
 
 use std::{fs, path::Path, process::Command, sync::Mutex};
 
-use models::{AppSettings, BootstrapPayload, PlaybackSession, PlaybackState, RepeatMode};
+use models::{
+    AlbumMetadataRefreshResult, AlbumMetadataRefreshStatus, AppSettings, BootstrapPayload,
+    PlaybackSession, PlaybackState, RepeatMode,
+};
 use mpv::MpvController;
 use tauri::Manager;
 
@@ -787,6 +791,53 @@ async fn refresh_album_info(
     }
 }
 
+#[tauri::command]
+async fn refresh_album_metadata_from_musicbrainz(
+    album: String,
+    album_artist: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<AlbumMetadataRefreshResult, String> {
+    let album_trim = album.trim().to_string();
+    if album_trim.is_empty() {
+        return Err("Album name is required".to_string());
+    }
+    let album_artist_trim = album_artist
+        .as_deref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let tracks =
+        db::load_album_tracks_for_match(&state.db_path, &album_trim, album_artist_trim.as_deref())
+            .map_err(|error| error.to_string())?;
+    if tracks.is_empty() {
+        return Err("No tracks found for this album".to_string());
+    }
+
+    let result =
+        album_metadata::refresh_album_metadata(&album_trim, album_artist_trim.as_deref(), &tracks)
+            .await
+            .map_err(|error| error.to_string())?;
+
+    if matches!(result.status, AlbumMetadataRefreshStatus::Matched) {
+        db::replace_track_metadata_overrides(&state.db_path, &result.overrides)
+            .map_err(|error| error.to_string())?;
+    }
+
+    let bootstrap = db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())?;
+    Ok(AlbumMetadataRefreshResult {
+        status: result.status,
+        album: album_trim,
+        album_artist: album_artist_trim,
+        updated_track_count: result.overrides.len(),
+        confidence: result.confidence,
+        release_title: result.release_title,
+        release_artist: result.release_artist,
+        source_url: result.source_url,
+        message: result.message,
+        bootstrap,
+    })
+}
+
 const ALBUM_INFO_CACHE_VERSION: &str = "v2";
 
 fn album_info_cache_key(album: &str, artist: Option<&str>) -> String {
@@ -903,7 +954,8 @@ pub fn run() {
             get_artist_info,
             refresh_artist_info,
             get_album_info,
-            refresh_album_info
+            refresh_album_info,
+            refresh_album_metadata_from_musicbrainz
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

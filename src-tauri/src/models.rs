@@ -52,6 +52,23 @@ pub struct Track {
     pub last_played_at: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TrackMetadataOverride {
+    pub track_path: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub disc_number: Option<i64>,
+    pub track_number: Option<i64>,
+    pub year: Option<i64>,
+    pub recording_mbid: Option<String>,
+    pub release_track_mbid: Option<String>,
+    pub release_mbid: Option<String>,
+    pub release_group_mbid: Option<String>,
+    pub confidence: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryData {
     pub tracks: Vec<Track>,
@@ -132,4 +149,27 @@ pub struct SavedPlaylist {
     pub track_paths: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlbumMetadataRefreshStatus {
+    Matched,
+    Ambiguous,
+    NoMatch,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlbumMetadataRefreshResult {
+    pub status: AlbumMetadataRefreshStatus,
+    pub album: String,
+    pub album_artist: Option<String>,
+    pub updated_track_count: usize,
+    pub confidence: Option<f64>,
+    pub release_title: Option<String>,
+    pub release_artist: Option<String>,
+    pub source_url: Option<String>,
+    pub message: String,
+    pub bootstrap: BootstrapPayload,
 }

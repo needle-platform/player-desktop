@@ -144,3 +144,27 @@ export const getAlbumInfo = (album: string, artist: string | null) =>
 
 export const refreshAlbumInfo = (album: string, artist: string | null) =>
   invoke<AlbumInfo | null>('refresh_album_info', { album, artist });
+
+export type AlbumMetadataRefreshStatus = 'matched' | 'ambiguous' | 'no_match' | 'error';
+
+export interface AlbumMetadataRefreshResult {
+  status: AlbumMetadataRefreshStatus;
+  album: string;
+  album_artist: string | null;
+  updated_track_count: number;
+  confidence: number | null;
+  release_title: string | null;
+  release_artist: string | null;
+  source_url: string | null;
+  message: string;
+  bootstrap: BootstrapPayload;
+}
+
+export const refreshAlbumMetadataFromMusicBrainz = (
+  album: string,
+  albumArtist: string | null,
+) =>
+  invoke<AlbumMetadataRefreshResult>('refresh_album_metadata_from_musicbrainz', {
+    album,
+    albumArtist,
+  });

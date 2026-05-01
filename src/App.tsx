@@ -24,6 +24,7 @@ import {
   removeQueueIndex as tauriRemoveQueueIndex,
   removeLibraryRoot,
   renamePlaylist,
+  refreshAlbumMetadataFromMusicBrainz,
   resumePlayback,
   runMaintenance,
   setAudioDevice as setPlaybackAudioDevice,
@@ -764,6 +765,7 @@ function App() {
   const [isDeviceMenuOpen, setIsDeviceMenuOpen] = useState(false);
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
   const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light');
@@ -1819,6 +1821,41 @@ function App() {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
+      setBusy(null);
+    }
+  };
+
+  const refreshAlbumMetadata = async (
+    album: string,
+    albumArtist: string | null,
+    albumKeyValue: string,
+  ) => {
+    try {
+      setMetadataRefreshAlbumKey(albumKeyValue);
+      setBusy('Refreshing MusicBrainz metadata…');
+      setStatus(`Refreshing metadata for ${album}`);
+      const result = await refreshAlbumMetadataFromMusicBrainz(album, albumArtist);
+      setData(result.bootstrap);
+      if (result.status === 'matched') {
+        setSelectedAlbum(albumKey(result.release_title ?? album, result.release_artist ?? albumArtist));
+      }
+      if (result.status === 'matched') {
+        setStatus(
+          `Metadata updated from MusicBrainz · ${result.updated_track_count} track${
+            result.updated_track_count === 1 ? '' : 's'
+          } refined`,
+        );
+      } else if (result.status === 'ambiguous') {
+        setStatus('Multiple MusicBrainz releases looked plausible · imported tags left untouched');
+      } else if (result.status === 'no_match') {
+        setStatus('No confident MusicBrainz match found');
+      } else {
+        setStatus(result.message);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMetadataRefreshAlbumKey(null);
       setBusy(null);
     }
   };
@@ -3274,6 +3311,7 @@ function App() {
             albumKey={selectedAlbum}
             albumArtist={selectedAlbumSummary.artist}
             tracks={allTracks}
+            isMetadataRefreshing={metadataRefreshAlbumKey === selectedAlbum}
             currentPath={currentPath}
             isPlaying={isPlaying}
             isCurrentAlbumCurrent={currentAlbumKey === selectedAlbum}
@@ -3306,6 +3344,13 @@ function App() {
                 currentPrimaryGenre,
                 suggestedGenres,
               })
+            }
+            onRefreshMetadata={() =>
+              void refreshAlbumMetadata(
+                selectedAlbumSummary.album,
+                selectedAlbumSummary.artist,
+                selectedAlbum,
+              )
             }
             onPlayAlbum={() => {
       if (currentAlbumKey === selectedAlbum) {
@@ -4896,6 +4941,7 @@ interface AlbumDetailViewProps {
   albumKey: string;
   albumArtist: string | null;
   tracks: Track[];
+  isMetadataRefreshing: boolean;
   currentPath: string | null;
   isPlaying: boolean;
   isCurrentAlbumCurrent: boolean;
@@ -4909,6 +4955,7 @@ interface AlbumDetailViewProps {
   onAddAlbumToPlaylist: () => void;
   onAddTrackToPlaylist: (track: Track) => void;
   onEditPrimaryGenre: (currentPrimaryGenre: string | null, suggestedGenres: string[]) => void;
+  onRefreshMetadata: () => void;
   onPlayAlbum: () => void;
   onShuffleAlbum: () => void;
   onOpenArtist: (artist: string) => void;
@@ -4919,6 +4966,7 @@ function AlbumDetailView({
   albumKey,
   albumArtist,
   tracks,
+  isMetadataRefreshing,
   currentPath,
   isPlaying,
   isCurrentAlbumCurrent,
@@ -4932,10 +4980,13 @@ function AlbumDetailView({
   onAddAlbumToPlaylist,
   onAddTrackToPlaylist,
   onEditPrimaryGenre,
+  onRefreshMetadata,
   onPlayAlbum,
   onShuffleAlbum,
   onOpenArtist,
 }: AlbumDetailViewProps) {
+  const [isMetadataMenuOpen, setIsMetadataMenuOpen] = useState(false);
+  const metadataMenuRef = useRef<HTMLDivElement | null>(null);
   const albumTracks = useMemo(
     () =>
       tracks
@@ -5028,6 +5079,33 @@ function AlbumDetailView({
     primaryArtist,
   );
 
+  useEffect(() => {
+    setIsMetadataMenuOpen(false);
+  }, [album, albumArtist]);
+
+  useEffect(() => {
+    if (!isMetadataMenuOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!metadataMenuRef.current?.contains(event.target as Node)) {
+        setIsMetadataMenuOpen(false);
+      }
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsMetadataMenuOpen(false);
+      }
+    };
+
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isMetadataMenuOpen]);
+
   const formatTotalDuration = (seconds: number): string => {
     if (seconds <= 0) return '—';
     const hours = Math.floor(seconds / 3600);
@@ -5043,11 +5121,41 @@ function AlbumDetailView({
       </button>
 
       <header className="album-hero">
-        <Cover
-          trackPath={samplePath}
-          fallback={album[0]?.toUpperCase() ?? '◉'}
-          size="hero"
-        />
+        <div
+          className="artist-hero-media"
+          ref={metadataMenuRef}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setIsMetadataMenuOpen(true);
+          }}
+        >
+          <Cover
+            trackPath={samplePath}
+            fallback={album[0]?.toUpperCase() ?? '◉'}
+            size="hero"
+          />
+          {isMetadataRefreshing && (
+            <div className="artist-image-refresh-overlay" aria-hidden="true">
+              <div className="artist-image-refresh-spinner" />
+              <div className="artist-image-refresh-label">Refreshing metadata…</div>
+            </div>
+          )}
+          {isMetadataMenuOpen && (
+            <div className="artist-image-menu-panel" role="menu" aria-label={`Metadata options for ${album}`}>
+              <button
+                className="artist-image-menu-option"
+                onClick={() => {
+                  setIsMetadataMenuOpen(false);
+                  onRefreshMetadata();
+                }}
+                disabled={isMetadataRefreshing}
+                role="menuitem"
+              >
+                {isMetadataRefreshing ? 'Refreshing metadata…' : 'Refresh metadata from MusicBrainz'}
+              </button>
+            </div>
+          )}
+        </div>
         <div className="album-hero-meta">
           <div className="album-hero-eyebrow">Album</div>
           <h1 className="album-hero-title">{album}</h1>

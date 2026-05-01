@@ -8,6 +8,7 @@ use crate::artist::ArtistGender;
 use crate::models::{
     default_equalizer_bands, default_tracks_page_size, AppSettings, BootstrapPayload,
     EqualizerPreset, LibraryData, PlaybackSession, SavedPlaylist, ThemeMode, Track,
+    TrackMetadataOverride,
 };
 
 fn normalize_hex_color(value: &str) -> Option<String> {
@@ -95,6 +96,24 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             primary_genre TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (album, album_artist)
+        );
+
+        CREATE TABLE IF NOT EXISTS track_metadata_overrides (
+            track_path TEXT PRIMARY KEY,
+            title TEXT,
+            artist TEXT,
+            album TEXT,
+            album_artist TEXT,
+            disc_number INTEGER,
+            track_number INTEGER,
+            year INTEGER,
+            recording_mbid TEXT,
+            release_track_mbid TEXT,
+            release_mbid TEXT,
+            release_group_mbid TEXT,
+            confidence REAL,
+            source TEXT NOT NULL DEFAULT 'musicbrainz',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         ",
     )?;
@@ -311,6 +330,7 @@ pub fn remove_library_root(db_path: &Path, folder: &str) -> Result<()> {
         params![folder, pattern],
     )?;
     transaction.execute("DELETE FROM library_roots WHERE path = ?1", params![folder])?;
+    prune_orphaned_track_metadata_overrides_tx(&transaction)?;
     prune_orphaned_playlist_tracks_tx(&transaction)?;
     transaction.commit()?;
     Ok(())
@@ -320,6 +340,7 @@ pub fn purge_dotfile_tracks(db_path: &Path) -> Result<usize> {
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     let removed = transaction.execute("DELETE FROM tracks WHERE path LIKE '%/.%'", [])?;
+    prune_orphaned_track_metadata_overrides_tx(&transaction)?;
     prune_orphaned_playlist_tracks_tx(&transaction)?;
     transaction.commit()?;
     Ok(removed)
@@ -403,6 +424,150 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
     }
 
     prune_orphaned_playlist_tracks_tx(&transaction)?;
+    prune_orphaned_track_metadata_overrides_tx(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+pub fn load_album_tracks_for_match(
+    db_path: &Path,
+    album: &str,
+    album_artist: Option<&str>,
+) -> Result<Vec<Track>> {
+    let connection = Connection::open(db_path)?;
+    let normalized_album = album.trim();
+    if normalized_album.is_empty() {
+        return Ok(Vec::new());
+    }
+    let normalized_album_artist = album_artist.unwrap_or("").trim();
+
+    let mut statement = connection.prepare(
+        "
+        SELECT t.id,
+               t.path,
+               COALESCE(tmo.title, t.title) AS title,
+               COALESCE(tmo.artist, t.artist) AS artist,
+               COALESCE(tmo.album, t.album) AS album,
+               COALESCE(tmo.album_artist, t.album_artist) AS album_artist,
+               t.duration_seconds,
+               t.format,
+               t.sample_rate,
+               t.bit_depth,
+               COALESCE(tmo.disc_number, t.disc_number) AS disc_number,
+               COALESCE(tmo.track_number, t.track_number) AS track_number,
+               t.genre,
+               apg.primary_genre,
+               COALESCE(tmo.year, t.year) AS year,
+               t.added_at,
+               t.play_count,
+               t.last_played_at
+        FROM tracks t
+        LEFT JOIN track_metadata_overrides tmo ON tmo.track_path = t.path
+        LEFT JOIN album_primary_genres apg
+          ON apg.album = COALESCE(tmo.album, t.album, '')
+         AND apg.album_artist = COALESCE(tmo.album_artist, tmo.artist, t.album_artist, t.artist, '')
+        WHERE COALESCE(tmo.album, t.album, '') = ?1
+          AND COALESCE(tmo.album_artist, tmo.artist, t.album_artist, t.artist, '') = ?2
+        ORDER BY
+            COALESCE(tmo.disc_number, t.disc_number, 0),
+            COALESCE(tmo.track_number, t.track_number, 0),
+            COALESCE(tmo.title, t.title),
+            t.path
+        ",
+    )?;
+
+    let tracks = statement
+        .query_map(params![normalized_album, normalized_album_artist], |row| {
+            Ok(Track {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                album_artist: row.get(5)?,
+                duration_seconds: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
+                format: row.get(7)?,
+                sample_rate: row.get::<_, Option<i64>>(8)?.map(|value| value as u32),
+                bit_depth: row.get::<_, Option<i64>>(9)?.map(|value| value as u8),
+                disc_number: row.get(10)?,
+                track_number: row.get(11)?,
+                genre: row.get(12)?,
+                primary_genre: row.get(13)?,
+                year: row.get(14)?,
+                added_at: row.get(15)?,
+                play_count: row.get::<_, i64>(16)?,
+                last_played_at: row.get(17)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(tracks)
+}
+
+pub fn replace_track_metadata_overrides(
+    db_path: &Path,
+    overrides: &[TrackMetadataOverride],
+) -> Result<()> {
+    if overrides.is_empty() {
+        return Ok(());
+    }
+
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    let mut statement = transaction.prepare(
+        "
+        INSERT INTO track_metadata_overrides (
+            track_path,
+            title,
+            artist,
+            album,
+            album_artist,
+            disc_number,
+            track_number,
+            year,
+            recording_mbid,
+            release_track_mbid,
+            release_mbid,
+            release_group_mbid,
+            confidence,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, CURRENT_TIMESTAMP)
+        ON CONFLICT(track_path) DO UPDATE SET
+            title = excluded.title,
+            artist = excluded.artist,
+            album = excluded.album,
+            album_artist = excluded.album_artist,
+            disc_number = excluded.disc_number,
+            track_number = excluded.track_number,
+            year = excluded.year,
+            recording_mbid = excluded.recording_mbid,
+            release_track_mbid = excluded.release_track_mbid,
+            release_mbid = excluded.release_mbid,
+            release_group_mbid = excluded.release_group_mbid,
+            confidence = excluded.confidence,
+            updated_at = excluded.updated_at
+        ",
+    )?;
+
+    for item in overrides {
+        statement.execute(params![
+            item.track_path,
+            item.title,
+            item.artist,
+            item.album,
+            item.album_artist,
+            item.disc_number,
+            item.track_number,
+            item.year,
+            item.recording_mbid,
+            item.release_track_mbid,
+            item.release_mbid,
+            item.release_group_mbid,
+            item.confidence,
+        ])?;
+    }
+
+    drop(statement);
     transaction.commit()?;
     Ok(())
 }
@@ -810,32 +975,34 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
         "
         SELECT t.id,
                t.path,
-               t.title,
-               t.artist,
-               t.album,
-               t.album_artist,
+               COALESCE(tmo.title, t.title) AS title,
+               COALESCE(tmo.artist, t.artist) AS artist,
+               COALESCE(tmo.album, t.album) AS album,
+               COALESCE(tmo.album_artist, t.album_artist) AS album_artist,
                t.duration_seconds,
                t.format,
                t.sample_rate,
                t.bit_depth,
-               t.disc_number,
-               t.track_number,
+               COALESCE(tmo.disc_number, t.disc_number) AS disc_number,
+               COALESCE(tmo.track_number, t.track_number) AS track_number,
                t.genre,
                apg.primary_genre,
-               t.year,
+               COALESCE(tmo.year, t.year) AS year,
                t.added_at,
                t.play_count,
                t.last_played_at
         FROM tracks t
+        LEFT JOIN track_metadata_overrides tmo
+          ON tmo.track_path = t.path
         LEFT JOIN album_primary_genres apg
-          ON apg.album = COALESCE(t.album, '')
-         AND apg.album_artist = COALESCE(t.album_artist, t.artist, '')
+          ON apg.album = COALESCE(tmo.album, t.album, '')
+         AND apg.album_artist = COALESCE(tmo.album_artist, tmo.artist, t.album_artist, t.artist, '')
         ORDER BY
-            COALESCE(t.album_artist, t.artist, ''),
-            COALESCE(t.album, ''),
-            COALESCE(t.disc_number, 0),
-            COALESCE(t.track_number, 0),
-            t.title,
+            COALESCE(tmo.album_artist, tmo.artist, t.album_artist, t.artist, ''),
+            COALESCE(tmo.album, t.album, ''),
+            COALESCE(tmo.disc_number, t.disc_number, 0),
+            COALESCE(tmo.track_number, t.track_number, 0),
+            COALESCE(tmo.title, t.title),
             t.path
         ",
     )?;
@@ -868,13 +1035,17 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
     let track_count = query_count(&connection, "SELECT COUNT(*) FROM tracks")?;
     let album_count = query_count(
         &connection,
-        "SELECT COUNT(DISTINCT album || char(31) || COALESCE(album_artist, artist, ''))
-         FROM tracks
-         WHERE album IS NOT NULL AND album != ''",
+        "SELECT COUNT(DISTINCT COALESCE(tmo.album, t.album, '') || char(31) || COALESCE(tmo.album_artist, tmo.artist, t.album_artist, t.artist, ''))
+         FROM tracks t
+         LEFT JOIN track_metadata_overrides tmo ON tmo.track_path = t.path
+         WHERE COALESCE(tmo.album, t.album, '') != ''",
     )?;
     let artist_count = query_count(
         &connection,
-        "SELECT COUNT(DISTINCT artist) FROM tracks WHERE artist IS NOT NULL AND artist != ''",
+        "SELECT COUNT(DISTINCT COALESCE(tmo.artist, t.artist, ''))
+         FROM tracks t
+         LEFT JOIN track_metadata_overrides tmo ON tmo.track_path = t.path
+         WHERE COALESCE(tmo.artist, t.artist, '') != ''",
     )?;
 
     Ok(LibraryData {
@@ -961,6 +1132,7 @@ fn replace_playlist_tracks_tx(
 fn prune_orphaned_playlist_tracks(connection: &mut Connection) -> Result<()> {
     let transaction = connection.transaction()?;
     prune_orphaned_playlist_tracks_tx(&transaction)?;
+    prune_orphaned_track_metadata_overrides_tx(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
@@ -968,6 +1140,16 @@ fn prune_orphaned_playlist_tracks(connection: &mut Connection) -> Result<()> {
 fn prune_orphaned_playlist_tracks_tx(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
     transaction.execute(
         "DELETE FROM playlist_tracks WHERE track_path NOT IN (SELECT path FROM tracks)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn prune_orphaned_track_metadata_overrides_tx(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM track_metadata_overrides WHERE track_path NOT IN (SELECT path FROM tracks)",
         [],
     )?;
     Ok(())

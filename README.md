@@ -10,6 +10,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Local library** stored in SQLite under the OS app-data directory
 - **Folder import** with recursive scan of FLAC, ALAC, WAV, AIFF, M4A, AAC, MP3, OGG, Opus
 - **Tag extraction** via `lofty`: title, artist, album, track number, **genre**, **year**, sample rate, bit depth
+- **On-demand MusicBrainz album refresh** from the album page right-click menu when an imported release needs cleaner metadata
 - **Hidden files ignored** — dotfiles and dot-directories are skipped during scan
 - **Maintenance command** rescans your folders for changes and purges any dotfile entries from the library (never touches your audio files)
 - **Diff-based rescans** preserve `added_at` and play history across maintenance runs
@@ -88,6 +89,8 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
+- **Album metadata refresh** can match one album at a time against **MusicBrainz release** data and refine track titles, album artist, disc / track numbering, and year without rescanning the whole library
+- **Metadata refresh is opt-in and non-destructive**: Needle stores local overrides only for albums you explicitly refresh, while the original imported file tags remain preserved underneath
 - Artist-aware album matching improves lookups for releases with ambiguous or very common titles
 - Collaboration credits on album artists now try split candidates as well, so releases like `Artist A & Orchestra B` can still resolve to the correct MusicBrainz release group
 - Subtitle-aware fallback matching now also trims common edition markers after separators like `:` / `-`, helping releases such as anthology or deluxe variants resolve to the parent album article when MusicBrainz groups them that way
@@ -140,6 +143,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - `src-tauri/src/library.rs` — folder scanner, dotfile filter, metadata via `lofty`
 - `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup with Wikipedia image fallback, Wikipedia-backed artist biography lookup, and collaboration-credit fallback matching
 - `src-tauri/src/album.rs` — MusicBrainz → Wikidata → Wikipedia album lookup with collaboration-credit matching and MusicBrainz factual fallback when no article is linked
+- `src-tauri/src/album_metadata.rs` — on-demand MusicBrainz release matching for album-scoped metadata refreshes and local per-track overrides
 - `src-tauri/src/mpv.rs` — IPC controller, spawns mpv with `--no-video --idle=yes`
 
 ## Requirements
@@ -190,6 +194,7 @@ Needle treats imported metadata as a starting point, not untouchable truth:
 
 - **Raw embedded tags** stay preserved exactly as imported
 - **Local overrides** can refine how the app interprets your library without modifying audio files
+- **MusicBrainz album refresh** adds those overrides only for albums you explicitly choose to repair from the album page
 - **Album-level primary genre** currently flows down to tracks from that album for filtering and smarter playlist generation
 
 Real **BPM and key analysis** would unlock proper mood detection (energy, workout, slow groove). It's tractable in Rust via onset-detection / autocorrelation, but it's CPU-heavy and best done as an opt-in background "Analyze library" maintenance step. Tracked in the roadmap.
