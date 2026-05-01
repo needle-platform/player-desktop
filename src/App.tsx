@@ -11,6 +11,7 @@ import {
   createPlaylist,
   deletePlaylist,
   getPlaybackState,
+  getMissingLibraryRoots,
   insertQueueAt,
   moveQueueIndex as tauriMoveQueueIndex,
   movePlaylistTrack,
@@ -47,6 +48,7 @@ import type {
   PlaybackSession,
   RepeatMode,
   SavedPlaylist,
+  SavedPlaylistRule,
   ThemeMode,
   Track,
 } from './types';
@@ -73,6 +75,7 @@ type PlaylistCreateSource = {
   description: string;
   suggestedName: string;
   tracks: Track[];
+  rule?: SavedPlaylistRule | null;
 };
 type PlaylistComposerState = {
   sources: PlaylistCreateSource[];
@@ -82,6 +85,11 @@ type PlaylistComposerState = {
   genreOptions: string[];
   initialArtist: string;
   initialGenre: string;
+};
+type PlaylistComposerSubmission = {
+  name: string;
+  tracks: Track[];
+  rule: SavedPlaylistRule | null;
 };
 type PlaylistTargetState = {
   title: string;
@@ -194,6 +202,26 @@ const notificationToneIcon = (tone: NotificationTone): string => {
   if (tone === 'warning') return '•';
   if (tone === 'success') return '✓';
   return 'i';
+};
+
+const isPlaybackStatusMessage = (message: string): boolean => {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    normalized.startsWith('playing ') ||
+    normalized.startsWith('playing album') ||
+    normalized.startsWith('playing playlist') ||
+    normalized.startsWith('shuffle play') ||
+    normalized.startsWith('shuffle playlist') ||
+    normalized.startsWith('artist mix') ||
+    normalized.startsWith('selected ') ||
+    normalized === 'that track is already playing' ||
+    normalized === 'that album is already playing' ||
+    normalized === 'that playlist is already playing'
+  );
 };
 
 const formatMaintenanceLogLine = (message: string): string => {
@@ -422,6 +450,32 @@ const splitTrackGenres = (genre: string | null | undefined) =>
     .split(/[;,/]/)
     .map((part) => part.trim())
     .filter(Boolean);
+const normalizePlaylistRuleText = (value: string | null | undefined) => {
+  const trimmed = value?.trim() ?? '';
+  return trimmed ? trimmed : null;
+};
+const formatPlaylistRuleSummary = (rule: SavedPlaylistRule) => {
+  if (rule.kind === 'filtered_library') {
+    const parts = [
+      rule.search ? `Search: ${rule.search}` : null,
+      rule.artist,
+      rule.genre,
+      formatTrackYearRange(
+        rule.year_from != null ? String(rule.year_from) : allTrackFilterValue,
+        rule.year_to != null ? String(rule.year_to) : allTrackFilterValue,
+      ) !== 'Any year'
+        ? formatTrackYearRange(
+            rule.year_from != null ? String(rule.year_from) : allTrackFilterValue,
+            rule.year_to != null ? String(rule.year_to) : allTrackFilterValue,
+          )
+        : null,
+    ].filter(Boolean);
+    return `Auto-updating${parts.length > 0 ? ` · ${parts.join(' · ')}` : ''}`;
+  }
+
+  return 'Auto-updating playlist';
+};
+const isPlaylistTrackEditable = (playlist: SavedPlaylist | null | undefined) => !playlist?.rule;
 const timestampValue = (iso: string | null | undefined) => {
   if (!iso) return 0;
   const parsed = Date.parse(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`);
@@ -862,6 +916,7 @@ function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [isMaintenanceRunning, setIsMaintenanceRunning] = useState(false);
   const [maintenanceLog, setMaintenanceLog] = useState<string[]>([]);
+  const [missingLibraryRoots, setMissingLibraryRoots] = useState<string[]>([]);
   const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [notification, setNotification] = useState<{
@@ -897,6 +952,11 @@ function App() {
   useEffect(() => {
     const message = status.trim();
     if (!message) {
+      return;
+    }
+
+    if (isPlaybackStatusMessage(message)) {
+      setStatus((current) => (current === message ? '' : current));
       return;
     }
 
@@ -991,7 +1051,6 @@ function App() {
       await appWindow.setSize(new LogicalSize(miniPlayerBaseSize.width, miniPlayerBaseSize.height));
       await appWindow.setAlwaysOnTop(isMiniPlayerPinned);
       setIsMiniPlayer(true);
-      setStatus('Mini player on');
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -1008,9 +1067,6 @@ function App() {
         await appWindow.setSize(new PhysicalSize(restoreState.size.width, restoreState.size.height));
       }
       windowRestoreStateRef.current = null;
-      if (!options?.quiet) {
-        setStatus('Mini player off');
-      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -1183,6 +1239,31 @@ function App() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (!data) {
+      setMissingLibraryRoots([]);
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const missingRoots = await getMissingLibraryRoots();
+        if (!cancelled) {
+          setMissingLibraryRoots(missingRoots);
+        }
+      } catch {
+        if (!cancelled) {
+          setMissingLibraryRoots([]);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [data?.settings.library_roots]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1547,7 +1628,9 @@ function App() {
       id: `manual:${playlist.id}`,
       kind: 'manual',
       name: playlist.name,
-      description: `${tracks.length} saved track${tracks.length === 1 ? '' : 's'}`,
+      description: playlist.rule
+        ? formatPlaylistRuleSummary(playlist.rule)
+        : `${tracks.length} saved track${tracks.length === 1 ? '' : 's'}`,
       tracks,
       saved: playlist,
     };
@@ -2044,10 +2127,14 @@ function App() {
     }
   };
 
-  const createManualPlaylist = async (name: string, trackPaths: string[]) => {
+  const createManualPlaylist = async (
+    name: string,
+    trackPaths: string[],
+    rule?: SavedPlaylistRule | null,
+  ) => {
     try {
       setBusy('Saving playlist…');
-      const next = await createPlaylist(name, trackPaths);
+      const next = await createPlaylist(name, trackPaths, rule);
       setData(next);
       const created = next.playlists
         .filter((playlist) => playlist.name === name)
@@ -2056,7 +2143,7 @@ function App() {
         setSelectedPlaylist({ kind: 'manual', id: created.id });
         setView('tracks');
       }
-      setStatus(`Saved playlist · ${name}`);
+      setStatus(rule ? `Saved auto playlist · ${name}` : `Saved playlist · ${name}`);
       return true;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -2111,6 +2198,33 @@ function App() {
       .sort(compareAlbumTracks);
 
   const currentPlaylistSource = useMemo<PlaylistCreateSource | null>(() => {
+    const currentTrackRule: SavedPlaylistRule | null =
+      view === 'tracks' && !selectedPlaylistData
+        ? (() => {
+            const searchValue = normalizePlaylistRuleText(search);
+            const artistValue =
+              trackArtistFilter !== allTrackFilterValue
+                ? trackArtistFilter
+                : selectedArtist && selectedArtistMode === 'all'
+                  ? selectedArtist
+                  : null;
+            const genreValue = trackGenreFilter !== allTrackFilterValue ? trackGenreFilter : null;
+            const yearFromValue = yearFilterNumber(trackYearFromFilter);
+            const yearToValue = yearFilterNumber(trackYearToFilter);
+            if (!searchValue && !artistValue && !genreValue && yearFromValue == null && yearToValue == null) {
+              return null;
+            }
+            return {
+              kind: 'filtered_library',
+              search: searchValue,
+              artist: artistValue,
+              genre: genreValue,
+              year_from: yearFromValue,
+              year_to: yearToValue,
+            };
+          })()
+        : null;
+
     if (view === 'album' && selectedAlbumSummary) {
       const albumTracks = tracksForAlbum(selectedAlbumSummary.key);
       return {
@@ -2119,6 +2233,7 @@ function App() {
         description: `${albumTracks.length} track${albumTracks.length === 1 ? '' : 's'} from this album`,
         suggestedName: selectedAlbumSummary.album,
         tracks: albumTracks,
+        rule: null,
       };
     }
 
@@ -2133,6 +2248,7 @@ function App() {
               ? `${selectedPlaylistData.name} copy`
               : selectedPlaylistData.name,
           tracks: visibleTracksForPlaylist,
+          rule: null,
         };
       }
       if (selectedArtist) {
@@ -2142,6 +2258,7 @@ function App() {
           description: `${visibleTracksForPlaylist.length} track${visibleTracksForPlaylist.length === 1 ? '' : 's'} by this artist${activeTrackFilterSummary ? ` · ${activeTrackFilterSummary}` : ''}`,
           suggestedName: activeTrackFilterSummary ? `${selectedArtist} mix` : `${selectedArtist} mix`,
           tracks: visibleTracksForPlaylist,
+          rule: currentTrackRule,
         };
       }
       if (hasTrackFilters) {
@@ -2151,6 +2268,7 @@ function App() {
           description: `${visibleTracksForPlaylist.length} track${visibleTracksForPlaylist.length === 1 ? '' : 's'} · ${activeTrackFilterSummary}`,
           suggestedName: `${activeTrackFilterSummary} mix`,
           tracks: visibleTracksForPlaylist,
+          rule: currentTrackRule,
         };
       }
       if (search.trim()) {
@@ -2161,6 +2279,7 @@ function App() {
           description: `${visibleTracksForPlaylist.length} matching track${visibleTracksForPlaylist.length === 1 ? '' : 's'}`,
           suggestedName: `${query} mix`,
           tracks: visibleTracksForPlaylist,
+          rule: currentTrackRule,
         };
       }
       return {
@@ -2169,6 +2288,7 @@ function App() {
         description: `${visibleTracksForPlaylist.length} track${visibleTracksForPlaylist.length === 1 ? '' : 's'} from your library`,
         suggestedName: `Playlist ${new Date().toLocaleDateString()}`,
         tracks: visibleTracksForPlaylist,
+        rule: null,
       };
     }
 
@@ -2180,7 +2300,12 @@ function App() {
     activeTrackFilterSummary,
     selectedAlbumSummary,
     selectedArtist,
+    selectedArtistMode,
     selectedPlaylistData,
+    trackArtistFilter,
+    trackGenreFilter,
+    trackYearFromFilter,
+    trackYearToFilter,
     view,
     visibleTracksForPlaylist,
   ]);
@@ -2207,6 +2332,7 @@ function App() {
         description: 'Build a playlist from artist and genre filters.',
         suggestedName: 'Filtered mix',
         tracks: sortedLibraryTracks,
+        rule: null,
       },
     ].filter((source): source is PlaylistCreateSource => Boolean(source));
     const artistOptions = Array.from(
@@ -2224,15 +2350,21 @@ function App() {
       libraryTracks: sortedLibraryTracks,
       artistOptions,
       genreOptions,
-      initialArtist: selectedArtistMode === 'all' ? (selectedArtist ?? dedupedCurrentSource?.tracks[0]?.artist ?? '') : '',
-      initialGenre: '',
+      initialArtist:
+        trackArtistFilter !== allTrackFilterValue
+          ? trackArtistFilter
+          : selectedArtistMode === 'all'
+            ? (selectedArtist ?? dedupedCurrentSource?.tracks[0]?.artist ?? '')
+            : '',
+      initialGenre: trackGenreFilter !== allTrackFilterValue ? trackGenreFilter : '',
     });
   };
-  const submitPlaylistComposer = async (name: string, tracks: Track[]) => {
+  const submitPlaylistComposer = async ({ name, tracks, rule }: PlaylistComposerSubmission) => {
     if (tracks.length === 0) return;
     const created = await createManualPlaylist(
       name,
       tracks.map((track) => track.path),
+      rule,
     );
     if (created) {
       setPlaylistComposer(null);
@@ -3248,7 +3380,7 @@ function App() {
                 setView('tracks');
               }}
             >
-              <span className="nav-icon">≣</span>
+              <span className="nav-icon">{playlist.rule ? '↻' : '≣'}</span>
               <span className="nav-item-copy">{playlist.name}</span>
               <span className="nav-count">{playlist.track_paths.length}</span>
             </button>
@@ -3375,6 +3507,7 @@ function App() {
             onAddToQueue={addToQueue}
             queuePaths={queueTracks.map((track) => track.path)}
             playlistMode={selectedManualPlaylist ?? undefined}
+            playlistTracksEditable={isPlaylistTrackEditable(selectedManualPlaylist)}
             onMovePlaylistTrack={
               selectedManualPlaylist
                 ? (fromIndex, toIndex) => void moveManualPlaylistTrack(selectedManualPlaylist.id, fromIndex, toIndex)
@@ -3641,6 +3774,7 @@ function App() {
             busy={!!busy}
             maintenanceBusy={isMaintenanceRunning}
             maintenanceLog={maintenanceLog}
+            missingLibraryRoots={missingLibraryRoots}
           />
         )}
       </main>
@@ -3650,14 +3784,14 @@ function App() {
           composer={playlistComposer}
           busy={busy === 'Saving playlist…'}
           onClose={() => setPlaylistComposer(null)}
-          onSubmit={(name, tracks) => void submitPlaylistComposer(name, tracks)}
+          onSubmit={(submission) => void submitPlaylistComposer(submission)}
         />
       )}
 
       {playlistTarget && (
         <PlaylistTargetModal
           state={playlistTarget}
-          playlists={manualPlaylists}
+          playlists={manualPlaylists.filter((playlist) => !playlist.rule)}
           busy={busy === 'Saving playlist…' || busy === 'Updating playlist…'}
           onClose={() => setPlaylistTarget(null)}
           onCreate={(name, trackPaths) => void submitPlaylistTargetCreate(name, trackPaths)}
@@ -3917,7 +4051,7 @@ interface PlaylistComposerModalProps {
   composer: PlaylistComposerState;
   busy: boolean;
   onClose: () => void;
-  onSubmit: (name: string, tracks: Track[]) => void;
+  onSubmit: (submission: PlaylistComposerSubmission) => void;
 }
 
 function PlaylistComposerModal({ composer, busy, onClose, onSubmit }: PlaylistComposerModalProps) {
@@ -3927,6 +4061,7 @@ function PlaylistComposerModal({ composer, busy, onClose, onSubmit }: PlaylistCo
   const [sourceId, setSourceId] = useState(selectedSource?.id ?? '');
   const [artistFilter, setArtistFilter] = useState(composer.initialArtist);
   const [genreFilter, setGenreFilter] = useState(composer.initialGenre);
+  const [autoUpdate, setAutoUpdate] = useState(false);
   const lastAutoNameRef = useRef(selectedSource?.suggestedName ?? '');
 
   useEffect(() => {
@@ -3936,6 +4071,7 @@ function PlaylistComposerModal({ composer, busy, onClose, onSubmit }: PlaylistCo
     setSourceId(nextSelectedSource?.id ?? '');
     setArtistFilter(composer.initialArtist);
     setGenreFilter(composer.initialGenre);
+    setAutoUpdate(false);
     lastAutoNameRef.current = nextSelectedSource?.suggestedName ?? '';
   }, [composer]);
 
@@ -3980,6 +4116,8 @@ function PlaylistComposerModal({ composer, busy, onClose, onSubmit }: PlaylistCo
   const isCustomSource = sourceId === 'custom';
   const selectedArtistLabel = artistFilter || 'Any artist';
   const selectedGenreLabel = genreFilter || 'Any genre';
+  const availableRule = activeSource?.rule ?? null;
+  const canAutoUpdate = availableRule != null;
 
   return (
     <div className="modal-scrim" onClick={() => !busy && onClose()}>
@@ -4035,7 +4173,7 @@ function PlaylistComposerModal({ composer, busy, onClose, onSubmit }: PlaylistCo
         </div>
 
         {isCustomSource && (
-          <div className="field">
+          <div className="field playlist-composer-advanced">
             <div className="field-label">Filter the library</div>
             <div className="filter-grid">
               <label className="field">
@@ -4072,10 +4210,27 @@ function PlaylistComposerModal({ composer, busy, onClose, onSubmit }: PlaylistCo
           </div>
         )}
 
+        {availableRule && (
+          <label className="playlist-composer-toggle">
+            <input
+              type="checkbox"
+              checked={autoUpdate}
+              onChange={(event) => setAutoUpdate(event.currentTarget.checked)}
+            />
+            <span className="playlist-composer-toggle-copy">
+              <span className="playlist-composer-toggle-title">Auto-update this playlist</span>
+              <span className="playlist-composer-toggle-text">
+                Needle will reuse this view’s current search and filter choices whenever your library changes.
+              </span>
+            </span>
+          </label>
+        )}
+
         {activeSource && (
           <div className="playlist-composer-summary">
             {filteredTracks.length} track{filteredTracks.length === 1 ? '' : 's'} will be saved
-            {isCustomSource ? ` · ${selectedArtistLabel} · ${selectedGenreLabel}` : ''}.
+            {isCustomSource ? ` · ${selectedArtistLabel} · ${selectedGenreLabel}` : ''}
+            {autoUpdate && canAutoUpdate ? ' · auto-updating' : ''}.
           </div>
         )}
 
@@ -4085,7 +4240,13 @@ function PlaylistComposerModal({ composer, busy, onClose, onSubmit }: PlaylistCo
           </button>
           <button
             className="primary-button"
-            onClick={() => onSubmit(trimmedName, filteredTracks)}
+            onClick={() =>
+              onSubmit({
+                name: trimmedName,
+                tracks: filteredTracks,
+                rule: autoUpdate && canAutoUpdate ? availableRule : null,
+              })
+            }
             disabled={!trimmedName || filteredTracks.length === 0 || busy}
           >
             {busy ? 'Creating…' : 'Create playlist'}
@@ -4159,7 +4320,7 @@ function PlaylistTargetModal({
           <div className="playlist-target-section">
             <div className="field-label">Add to an existing playlist</div>
             {playlists.length === 0 ? (
-              <div className="playlist-target-empty">No saved playlists yet. Create one below.</div>
+              <div className="playlist-target-empty">No editable saved playlists yet. Create one below.</div>
             ) : (
               <div className="playlist-target-list">
                 {playlists.map((playlist) => (
@@ -4687,6 +4848,7 @@ interface TracksViewProps {
   onAddToQueue: (track: Track) => void;
   queuePaths: string[];
   playlistMode?: SavedPlaylist;
+  playlistTracksEditable?: boolean;
   onMovePlaylistTrack?: (fromIndex: number, toIndex: number) => void;
   onRemovePlaylistTrack?: (index: number) => void;
   onRenamePlaylist?: () => void;
@@ -4743,6 +4905,7 @@ function TracksView({
   onAddToQueue,
   queuePaths,
   playlistMode,
+  playlistTracksEditable = true,
   onMovePlaylistTrack,
   onRemovePlaylistTrack,
   onRenamePlaylist,
@@ -5043,7 +5206,7 @@ function TracksView({
                     )}
                   </span>
                   <span className="album-track-actions">
-                    {playlistMode ? (
+                    {playlistMode && playlistTracksEditable ? (
                       <>
                         <button
                           className="row-icon-button"
@@ -6332,6 +6495,7 @@ interface SettingsViewProps {
   busy: boolean;
   maintenanceBusy: boolean;
   maintenanceLog: string[];
+  missingLibraryRoots: string[];
 }
 
 function SettingsView({
@@ -6344,6 +6508,7 @@ function SettingsView({
   busy,
   maintenanceBusy,
   maintenanceLog,
+  missingLibraryRoots,
 }: SettingsViewProps) {
   const isManualEqualizer = settings.equalizer_preset === 'manual';
   const accentColorValue = normalizeAccentColor(settings.accent_color) ?? currentAccentColor;
@@ -6352,6 +6517,7 @@ function SettingsView({
     normalizeEqualizerBands(settings.equalizer_bands),
   );
   const maintenanceLogRef = useRef<HTMLDivElement | null>(null);
+  const missingRootsSet = useMemo(() => new Set(missingLibraryRoots), [missingLibraryRoots]);
 
   useEffect(() => {
     setManualBandsDraft(normalizeEqualizerBands(settings.equalizer_bands));
@@ -6562,15 +6728,33 @@ function SettingsView({
           <div className="settings-row settings-row-block">
             <div className="settings-row-copy">
               <label className="settings-label">Folders</label>
-              <p className="settings-hint">Manage the local folders Needle scans into your library.</p>
+              <p className="settings-hint">
+                Manage the local folders Needle scans into your library.
+              </p>
             </div>
+            {missingLibraryRoots.length > 0 && (
+              <div className="settings-library-health" role="status">
+                {missingLibraryRoots.length === 1
+                  ? '1 watched folder is missing on disk. Needle will remove it on the next maintenance run.'
+                  : `${missingLibraryRoots.length} watched folders are missing on disk. Needle will remove them on the next maintenance run.`}
+              </div>
+            )}
             <div className="settings-library-roots">
               {settings.library_roots.length === 0 ? (
                 <div className="settings-library-empty">No folders added yet.</div>
               ) : (
                 settings.library_roots.map((root) => (
-                  <div key={root} className="settings-library-root" title={root}>
-                    <span className="settings-library-root-name">{root}</span>
+                  <div
+                    key={root}
+                    className={`settings-library-root ${missingRootsSet.has(root) ? 'is-missing' : ''}`}
+                    title={root}
+                  >
+                    <div className="settings-library-root-copy">
+                      <span className="settings-library-root-name">{root}</span>
+                      {missingRootsSet.has(root) && (
+                        <span className="settings-library-root-status">Missing on disk</span>
+                      )}
+                    </div>
                     <button className="ghost-button" onClick={() => onRemoveRoot(root)}>
                       Remove
                     </button>

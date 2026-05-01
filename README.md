@@ -20,7 +20,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Time-of-day greeting** with library summary, or a **Now spinning** hero when something's playing
 - **Hero now-playing treatment** with an animated vinyl indicator, center-label album art, and album artwork stretched across the top dashboard band
 - **Idle dashboard backdrop** from bundled artwork when nothing is playing, so the hero stays readable instead of falling back to empty white space
-- **Quick actions**: Shuffle play · Add folder · Maintenance
+- **Quick actions**: Shuffle play · Add folder
 - **Recently added albums** sorted by newest tracks with relative timestamps (Today / 3d ago / 2w ago…)
 - **From your library** recommendations grounded in your own listening history and collection metadata:
   - **Most played** & **Recently played** (from real play history)
@@ -56,6 +56,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Playlists
 - **Sidebar Playlists section** with saved playlists and smart playlists
 - **Manual playlists** stored in SQLite and editable in-app
+- **Auto-updating filtered playlists** can save the current Tracks search + filter state (artist, genre, year range, query) and refresh themselves when your library changes
 - **Empty playlist creation** directly from the sidebar
 - **Add to playlist** actions on tracks and albums, with in-app creation of a new playlist during the add flow
 - **Playlist pages as playback views** with top-level Play / Shuffle / Play next / Add to queue actions
@@ -85,7 +86,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Large library browsers** lazily load offscreen covers / portraits and stage media work near the viewport instead of trying to resolve every image at once
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
 - **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
-- **Settings** with theme switcher, custom accent color, library folders, maintenance with live progress + last-run info, live equalizer presets, and manual 10-band EQ
+- **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, live equalizer presets, and manual 10-band EQ
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**

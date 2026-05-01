@@ -77,10 +77,20 @@ export interface PlaybackSession {
   shuffle_enabled: boolean;
 }
 
+export interface SavedPlaylistRule {
+  kind: 'filtered_library';
+  search: string | null;
+  artist: string | null;
+  genre: string | null;
+  year_from: number | null;
+  year_to: number | null;
+}
+
 export interface SavedPlaylist {
   id: number;
   name: string;
   track_paths: string[];
+  rule: SavedPlaylistRule | null;
   created_at: string;
   updated_at: string;
 }

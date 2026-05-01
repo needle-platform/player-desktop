@@ -11,7 +11,7 @@ use std::{fs, path::Path, process::Command, sync::Mutex, time::Instant};
 
 use models::{
     AlbumMetadataRefreshResult, AlbumMetadataRefreshStatus, AppSettings, BootstrapPayload,
-    PlaybackSession, PlaybackState, RepeatMode,
+    PlaybackSession, PlaybackState, RepeatMode, SavedPlaylistRule,
 };
 use mpv::MpvController;
 use tauri::{Emitter, Manager};
@@ -357,9 +357,11 @@ fn clear_queue(state: tauri::State<'_, AppState>) -> Result<(), String> {
 fn create_playlist(
     name: String,
     track_paths: Vec<String>,
+    rule: Option<SavedPlaylistRule>,
     state: tauri::State<'_, AppState>,
 ) -> Result<BootstrapPayload, String> {
-    db::create_playlist(&state.db_path, &name, &track_paths).map_err(|error| error.to_string())?;
+    db::create_playlist(&state.db_path, &name, &track_paths, rule.as_ref())
+        .map_err(|error| error.to_string())?;
     db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
 }
 
@@ -476,6 +478,15 @@ fn set_audio_device(device_name: String, state: tauri::State<'_, AppState>) -> R
     player
         .set_audio_device(&device_name)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_missing_library_roots(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    let roots = db::list_library_roots(&state.db_path).map_err(|error| error.to_string())?;
+    Ok(roots
+        .into_iter()
+        .filter(|root| !Path::new(root).exists())
+        .collect())
 }
 
 #[tauri::command]
@@ -1054,6 +1065,7 @@ pub fn run() {
             set_playback_volume,
             set_playback_muted,
             set_audio_device,
+            get_missing_library_roots,
             set_repeat_mode,
             run_maintenance,
             remove_library_root,

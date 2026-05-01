@@ -2,13 +2,13 @@ use std::path::Path;
 
 use anyhow::Result;
 use anyhow::{anyhow, bail};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::artist::ArtistGender;
 use crate::models::{
     default_equalizer_bands, default_tracks_page_size, AppSettings, BootstrapPayload,
-    EqualizerPreset, LibraryData, PlaybackSession, SavedPlaylist, ThemeMode, Track,
-    TrackMetadataOverride,
+    EqualizerPreset, LibraryData, PlaybackSession, SavedPlaylist, SavedPlaylistRule,
+    ThemeMode, Track, TrackMetadataOverride,
 };
 
 fn normalize_hex_color(value: &str) -> Option<String> {
@@ -88,6 +88,11 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             position INTEGER NOT NULL,
             PRIMARY KEY (playlist_id, track_path),
             UNIQUE (playlist_id, position)
+        );
+
+        CREATE TABLE IF NOT EXISTS playlist_rules (
+            playlist_id INTEGER PRIMARY KEY,
+            rule_json TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS album_primary_genres (
@@ -785,9 +790,10 @@ pub fn load_playlists(db_path: &Path) -> Result<Vec<SavedPlaylist>> {
 
     let mut playlist_stmt = connection.prepare(
         "
-        SELECT id, name, created_at, updated_at
-        FROM playlists
-        ORDER BY lower(name), id
+        SELECT p.id, p.name, p.created_at, p.updated_at, pr.rule_json
+        FROM playlists p
+        LEFT JOIN playlist_rules pr ON pr.playlist_id = p.id
+        ORDER BY lower(p.name), p.id
         ",
     )?;
 
@@ -798,6 +804,7 @@ pub fn load_playlists(db_path: &Path) -> Result<Vec<SavedPlaylist>> {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -813,14 +820,23 @@ pub fn load_playlists(db_path: &Path) -> Result<Vec<SavedPlaylist>> {
     )?;
 
     let mut playlists = Vec::with_capacity(rows.len());
-    for (id, name, created_at, updated_at) in rows {
-        let track_paths = track_stmt
-            .query_map(params![id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, name, created_at, updated_at, rule_json) in rows {
+        let rule = rule_json
+            .as_deref()
+            .map(serde_json::from_str::<SavedPlaylistRule>)
+            .transpose()?;
+        let track_paths = if let Some(rule) = rule.as_ref() {
+            track_paths_for_playlist_rule(&connection, rule)?
+        } else {
+            track_stmt
+                .query_map(params![id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
         playlists.push(SavedPlaylist {
             id,
             name,
             track_paths,
+            rule,
             created_at,
             updated_at,
         });
@@ -833,6 +849,7 @@ pub fn create_playlist(
     db_path: &Path,
     name: &str,
     track_paths: &[String],
+    rule: Option<&SavedPlaylistRule>,
 ) -> Result<Vec<SavedPlaylist>> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -846,7 +863,15 @@ pub fn create_playlist(
         params![trimmed],
     )?;
     let playlist_id = transaction.last_insert_rowid();
-    replace_playlist_tracks_tx(&transaction, playlist_id, track_paths)?;
+    if let Some(rule_value) = rule {
+        validate_playlist_rule(rule_value)?;
+        transaction.execute(
+            "INSERT INTO playlist_rules (playlist_id, rule_json) VALUES (?1, ?2)",
+            params![playlist_id, serde_json::to_string(rule_value)?],
+        )?;
+    } else {
+        replace_playlist_tracks_tx(&transaction, playlist_id, track_paths)?;
+    }
     transaction.commit()?;
     load_playlists(db_path)
 }
@@ -872,6 +897,10 @@ pub fn delete_playlist(db_path: &Path, playlist_id: i64) -> Result<Vec<SavedPlay
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     transaction.execute(
+        "DELETE FROM playlist_rules WHERE playlist_id = ?1",
+        params![playlist_id],
+    )?;
+    transaction.execute(
         "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
         params![playlist_id],
     )?;
@@ -891,6 +920,7 @@ pub fn append_tracks_to_playlist(
 ) -> Result<Vec<SavedPlaylist>> {
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
+    ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
     let mut combined = load_playlist_track_paths_tx(&transaction, playlist_id)?;
     for path in dedupe_paths(track_paths) {
         if !combined.iter().any(|existing| existing == &path) {
@@ -909,6 +939,7 @@ pub fn replace_playlist_tracks(
 ) -> Result<Vec<SavedPlaylist>> {
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
+    ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
     replace_playlist_tracks_tx(&transaction, playlist_id, track_paths)?;
     transaction.commit()?;
     load_playlists(db_path)
@@ -921,6 +952,7 @@ pub fn remove_playlist_track(
 ) -> Result<Vec<SavedPlaylist>> {
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
+    ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
     let mut track_paths = load_playlist_track_paths_tx(&transaction, playlist_id)?;
     if index >= track_paths.len() {
         bail!("Track is out of range for this playlist");
@@ -939,6 +971,7 @@ pub fn move_playlist_track(
 ) -> Result<Vec<SavedPlaylist>> {
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
+    ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
     let mut track_paths = load_playlist_track_paths_tx(&transaction, playlist_id)?;
     if from_index >= track_paths.len() || to_index >= track_paths.len() {
         bail!("Track is out of range for this playlist");
@@ -1110,6 +1143,36 @@ fn load_playlist_track_paths_tx(
     Ok(paths)
 }
 
+fn load_playlist_rule_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    playlist_id: i64,
+) -> Result<Option<SavedPlaylistRule>> {
+    let rule_json = transaction
+        .query_row(
+            "SELECT rule_json FROM playlist_rules WHERE playlist_id = ?1",
+            params![playlist_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    rule_json
+        .as_deref()
+        .map(serde_json::from_str::<SavedPlaylistRule>)
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn ensure_playlist_is_track_editable_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    playlist_id: i64,
+) -> Result<()> {
+    if load_playlist_rule_tx(transaction, playlist_id)?.is_some() {
+        bail!("Auto-updating playlists can't be edited manually");
+    }
+
+    Ok(())
+}
+
 fn replace_playlist_tracks_tx(
     transaction: &rusqlite::Transaction<'_>,
     playlist_id: i64,
@@ -1147,6 +1210,158 @@ fn replace_playlist_tracks_tx(
         params![playlist_id],
     )?;
     Ok(())
+}
+
+fn validate_playlist_rule(rule: &SavedPlaylistRule) -> Result<()> {
+    match rule {
+        SavedPlaylistRule::FilteredLibrary {
+            search,
+            artist,
+            genre,
+            year_from,
+            year_to,
+        } => {
+            let has_search = search.as_deref().map(str::trim).is_some_and(|value| !value.is_empty());
+            let has_artist = artist.as_deref().map(str::trim).is_some_and(|value| !value.is_empty());
+            let has_genre = genre.as_deref().map(str::trim).is_some_and(|value| !value.is_empty());
+            let has_year = year_from.is_some() || year_to.is_some();
+            if !has_search && !has_artist && !has_genre && !has_year {
+                bail!("Auto-updating playlists need at least one filter");
+            }
+            if let (Some(start), Some(end)) = (year_from, year_to) {
+                if start > end {
+                    bail!("Auto-updating playlist year range is invalid");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn effective_genre<'a>(primary_genre: Option<&'a str>, genre: Option<&'a str>) -> Option<&'a str> {
+    primary_genre.or(genre)
+}
+
+fn split_track_genres(genre: &str) -> impl Iterator<Item = &str> {
+    genre
+        .split(|ch| matches!(ch, ';' | ',' | '/'))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+}
+
+fn track_paths_for_playlist_rule(
+    connection: &Connection,
+    rule: &SavedPlaylistRule,
+) -> Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT t.path,
+               COALESCE(tmo.title, t.title) AS title,
+               COALESCE(tmo.artist, t.artist) AS artist,
+               COALESCE(tmo.album, t.album) AS album,
+               t.genre,
+               apg.primary_genre,
+               COALESCE(tmo.year, t.year) AS year
+        FROM tracks t
+        LEFT JOIN track_metadata_overrides tmo ON tmo.track_path = t.path
+        LEFT JOIN album_primary_genres apg
+          ON apg.album = COALESCE(tmo.album, t.album, '')
+         AND apg.album_artist = COALESCE(tmo.album_artist, tmo.artist, t.album_artist, t.artist, '')
+        ORDER BY
+            COALESCE(tmo.album_artist, tmo.artist, t.album_artist, t.artist, ''),
+            COALESCE(tmo.album, t.album, ''),
+            COALESCE(tmo.disc_number, t.disc_number, 0),
+            COALESCE(tmo.track_number, t.track_number, 0),
+            COALESCE(tmo.title, t.title),
+            t.path
+        ",
+    )?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let matches_rule = |title: Option<&str>,
+                        artist_value: Option<&str>,
+                        album: Option<&str>,
+                        genre_value: Option<&str>,
+                        year_value: Option<i64>| match rule {
+        SavedPlaylistRule::FilteredLibrary {
+            search,
+            artist,
+            genre,
+            year_from,
+            year_to,
+        } => {
+            if let Some(query) = search.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                let query_lower = query.to_lowercase();
+                let matches_search = [title, artist_value, album].into_iter().flatten().any(|value| {
+                    value.to_lowercase().contains(&query_lower)
+                });
+                if !matches_search {
+                    return false;
+                }
+            }
+
+            if let Some(expected_artist) = artist.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                if artist_value != Some(expected_artist) {
+                    return false;
+                }
+            }
+
+            if let Some(expected_genre) = genre.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                let Some(current_genre) = genre_value else {
+                    return false;
+                };
+                if !split_track_genres(current_genre).any(|part| part == expected_genre) {
+                    return false;
+                }
+            }
+
+            if year_from.is_some() || year_to.is_some() {
+                let Some(year) = year_value else {
+                    return false;
+                };
+                if let Some(start) = year_from {
+                    if year < *start {
+                        return false;
+                    }
+                }
+                if let Some(end) = year_to {
+                    if year > *end {
+                        return false;
+                    }
+                }
+            }
+
+            true
+        }
+    };
+
+    Ok(rows
+        .into_iter()
+        .filter(|(_, title, artist, album, genre, primary_genre, year)| {
+            matches_rule(
+                title.as_deref(),
+                artist.as_deref(),
+                album.as_deref(),
+                effective_genre(primary_genre.as_deref(), genre.as_deref()),
+                *year,
+            )
+        })
+        .map(|(path, _, _, _, _, _, _)| path)
+        .collect())
 }
 
 fn prune_orphaned_playlist_tracks(connection: &mut Connection) -> Result<()> {

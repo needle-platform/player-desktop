@@ -149,8 +149,22 @@ pub struct SavedPlaylist {
     pub id: i64,
     pub name: String,
     pub track_paths: Vec<String>,
+    #[serde(default)]
+    pub rule: Option<SavedPlaylistRule>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SavedPlaylistRule {
+    FilteredLibrary {
+        search: Option<String>,
+        artist: Option<String>,
+        genre: Option<String>,
+        year_from: Option<i64>,
+        year_to: Option<i64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

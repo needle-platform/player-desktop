@@ -5,6 +5,7 @@ import type {
   PlaybackSession,
   PlaybackState,
   RepeatMode,
+  SavedPlaylistRule,
 } from '../types';
 
 export const bootstrapApp = () => invoke<BootstrapPayload>('bootstrap_app');
@@ -73,8 +74,13 @@ export const runMaintenance = () => invoke<BootstrapPayload>('run_maintenance');
 export const removeLibraryRoot = (folder: string) =>
   invoke<BootstrapPayload>('remove_library_root', { folder });
 
-export const createPlaylist = (name: string, trackPaths: string[]) =>
-  invoke<BootstrapPayload>('create_playlist', { name, trackPaths });
+export const getMissingLibraryRoots = () => invoke<string[]>('get_missing_library_roots');
+
+export const createPlaylist = (
+  name: string,
+  trackPaths: string[],
+  rule?: SavedPlaylistRule | null,
+) => invoke<BootstrapPayload>('create_playlist', { name, trackPaths, rule: rule ?? null });
 
 export const renamePlaylist = (playlistId: number, name: string) =>
   invoke<BootstrapPayload>('rename_playlist', { playlistId, name });
