@@ -127,6 +127,74 @@ type WindowRestoreState = {
   alwaysOnTop: boolean;
   resizable: boolean;
 };
+type NotificationTone = 'info' | 'success' | 'warning' | 'error';
+
+const inferNotificationTone = (message: string): NotificationTone => {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return 'info';
+
+  if (
+    normalized.includes('failed') ||
+    normalized.includes("couldn't") ||
+    normalized.includes('unable') ||
+    normalized.includes('does not exist') ||
+    normalized.includes('out of range') ||
+    normalized.includes('rate-limit') ||
+    normalized.includes('rate limiting') ||
+    normalized.includes('try again later') ||
+    normalized.includes('try again in a minute') ||
+    normalized.includes('non-2xx')
+  ) {
+    return 'error';
+  }
+
+  if (
+    normalized.includes('no confident') ||
+    normalized.includes('no tracks') ||
+    normalized.includes('left untouched') ||
+    normalized.includes('already playing') ||
+    normalized.includes('already playing') ||
+    normalized.includes('already') ||
+    normalized.includes('not found')
+  ) {
+    return 'warning';
+  }
+
+  if (
+    normalized.includes('imported') ||
+    normalized.includes('saved') ||
+    normalized.includes('renamed') ||
+    normalized.includes('deleted') ||
+    normalized.includes('updated') ||
+    normalized.includes('synced') ||
+    normalized.includes('added') ||
+    normalized.includes('removed') ||
+    normalized.includes('cleared') ||
+    normalized.includes('reordered') ||
+    normalized.includes('plays next') ||
+    normalized.includes('pinned') ||
+    normalized.includes('mini player on') ||
+    normalized.includes('mini player off')
+  ) {
+    return 'success';
+  }
+
+  return 'info';
+};
+
+const notificationToneLabel = (tone: NotificationTone): string => {
+  if (tone === 'error') return 'Problem';
+  if (tone === 'warning') return 'Heads up';
+  if (tone === 'success') return 'Done';
+  return 'Needle';
+};
+
+const notificationToneIcon = (tone: NotificationTone): string => {
+  if (tone === 'error') return '!';
+  if (tone === 'warning') return '•';
+  if (tone === 'success') return '✓';
+  return 'i';
+};
 
 const greeting = (): string => {
   const h = new Date().getHours();
@@ -767,6 +835,11 @@ function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
   const [status, setStatus] = useState('');
+  const [notification, setNotification] = useState<{
+    id: number;
+    message: string;
+    tone: NotificationTone;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light');
   const effectiveTheme: 'light' | 'dark' = isMiniPlayer ? 'dark' : resolvedTheme;
@@ -790,6 +863,31 @@ function App() {
   const queueDrawerRef = useRef<HTMLElement | null>(null);
   const windowRestoreStateRef = useRef<WindowRestoreState | null>(null);
   const miniQueueResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const notificationIdRef = useRef(0);
+
+  useEffect(() => {
+    const message = status.trim();
+    if (!message) {
+      return;
+    }
+
+    const tone = inferNotificationTone(message);
+    const id = notificationIdRef.current + 1;
+    notificationIdRef.current = id;
+    setNotification({ id, message, tone });
+
+    const clearStatusTimer = window.setTimeout(() => {
+      setStatus((current) => (current === message ? '' : current));
+    }, 0);
+    const dismissTimer = window.setTimeout(() => {
+      setNotification((current) => (current?.id === id ? null : current));
+    }, tone === 'error' || tone === 'warning' ? 7000 : 4200);
+
+    return () => {
+      window.clearTimeout(clearStatusTimer);
+      window.clearTimeout(dismissTimer);
+    };
+  }, [status]);
 
   const syncConfirmedPlaybackState = () => {
     setIsPlaying(
@@ -3113,7 +3211,7 @@ function App() {
           </button>
         </nav>
 
-        <div className="sidebar-footer">{status || (busy ?? 'Ready')}</div>
+        <div className="sidebar-footer">{busy ?? 'Ready'}</div>
       </aside>
 
       <main className="content">
@@ -3525,6 +3623,31 @@ function App() {
           onRemoveTrack={(index) => removeQueueItem(queueDisplayStartIndex + index)}
           onClearQueue={() => void clearQueue()}
         />
+      )}
+
+      {notification && (
+        <div className="toast-layer" aria-live="polite" aria-atomic="true">
+          <div
+            className={`app-toast is-${notification.tone}`}
+            role={notification.tone === 'error' ? 'alert' : 'status'}
+          >
+            <div className="app-toast-icon" aria-hidden="true">
+              {notificationToneIcon(notification.tone)}
+            </div>
+            <div className="app-toast-copy">
+              <div className="app-toast-title">{notificationToneLabel(notification.tone)}</div>
+              <div className="app-toast-message">{notification.message}</div>
+            </div>
+            <button
+              className="app-toast-close"
+              onClick={() => setNotification(null)}
+              aria-label="Dismiss notification"
+              title="Dismiss notification"
+            >
+              ×
+            </button>
+          </div>
+        </div>
       )}
 
       <footer className="player-bar">

@@ -93,17 +93,19 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Metadata refresh is opt-in and non-destructive**: Needle stores local overrides only for albums you explicitly refresh, while the original imported file tags remain preserved underneath
 - Artist-aware album matching improves lookups for releases with ambiguous or very common titles
 - Collaboration credits on album artists now try split candidates as well, so releases like `Artist A & Orchestra B` can still resolve to the correct MusicBrainz release group
-- Subtitle-aware fallback matching now also trims common edition markers after separators like `:` / `-`, helping releases such as anthology or deluxe variants resolve to the parent album article when MusicBrainz groups them that way
+- Subtitle-aware fallback matching now also trims common edition markers after separators like `:` / `-`, and can fall back from long parenthetical subtitles to the core album title when MusicBrainz files the release more tersely
 - When a release group has no linked Wikipedia or Wikidata page, Needle now falls back to a simple factual note from MusicBrainz itself instead of leaving the album page blank
 - Cached in SQLite (`album_info`) so repeat opens are instant and we avoid repeat lookups
 - **Album page genres** are derived from the imported track tags already embedded in your files
 - **Primary genre override** lets you set a local album-level genre Needle should prefer for browsing, filtering, and smart-playlist logic without rewriting the source files
+- **Refresh failures are now surfaced clearly** when MusicBrainz is temporarily rate-limiting or unavailable, so you get a friendly “try again later” message instead of a cryptic backend error
 - Graceful fallback when no article exists for obscure releases, compilations, or local-only metadata
 
 ### Themes & UX
 - **Themes**: System, Light, Dark
 - **Custom accent color** persisted in SQLite and applied across playback controls, queue highlights, buttons, and selection states
 - **Theme-aware branding** with separate light/dark app icons and a dock-tuned macOS icon set
+- **Top-right toast notifications** now surface success, warning, and error states in a clear app-level notification card instead of hiding transient messages in the sidebar footer
 - **Mini player runtime dark override** keeps the compact artwork-first window in a dark presentation without changing the user's saved theme preference
 - **Wikipedia links** from album and artist metadata open in the system browser instead of relying on webview behavior
 - **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Vocal, Treble Boost, Lounge

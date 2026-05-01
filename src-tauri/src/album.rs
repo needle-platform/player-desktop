@@ -267,6 +267,27 @@ fn strip_separator_variant_suffix(title: &str) -> Option<String> {
     None
 }
 
+fn strip_parenthetical_subtitle(title: &str) -> Option<String> {
+    let trimmed = title.trim_end();
+    if !trimmed.ends_with(')') {
+        return None;
+    }
+
+    let start = trimmed.rfind('(')?;
+    let suffix = trimmed.get(start + 1..trimmed.len() - 1)?.trim();
+    let base = trimmed[..start].trim_end();
+    if base.is_empty() || suffix.is_empty() {
+        return None;
+    }
+
+    let word_count = suffix.split_whitespace().count();
+    if word_count < 3 {
+        return None;
+    }
+
+    Some(base.to_string())
+}
+
 pub fn lookup_title_candidates(album: &str) -> Vec<String> {
     let trimmed = album.trim();
     if trimmed.is_empty() {
@@ -278,7 +299,8 @@ pub fn lookup_title_candidates(album: &str) -> Vec<String> {
 
     loop {
         let next = strip_bracketed_variant_suffix(&current)
-            .or_else(|| strip_separator_variant_suffix(&current));
+            .or_else(|| strip_separator_variant_suffix(&current))
+            .or_else(|| strip_parenthetical_subtitle(&current));
         let Some(next) = next else {
             break;
         };
@@ -510,6 +532,19 @@ mod tests {
                 "Album Title (Expanded Edition) [Remastered]",
                 "Album Title (Expanded Edition)",
                 "Album Title",
+            ]
+        );
+    }
+
+    #[test]
+    fn strips_long_parenthetical_subtitles() {
+        assert_eq!(
+            lookup_title_candidates(
+                "Covered (The Robert Glasper Trio Recorded Live At Capitol Studios)"
+            ),
+            vec![
+                "Covered (The Robert Glasper Trio Recorded Live At Capitol Studios)",
+                "Covered",
             ]
         );
     }

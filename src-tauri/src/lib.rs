@@ -25,6 +25,21 @@ const DB_FILENAME: &str = "library.sqlite";
 const SOCKET_FILENAME: &str = "mpv.sock";
 const LEGACY_BUNDLE_IDENTIFIER: &str = "com.davidrelich.musicplayer";
 
+fn musicbrainz_refresh_error_message(error: &str) -> String {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("allowable rate limit")
+        || normalized.contains("too many requests")
+        || (normalized.contains("503 service unavailable") && normalized.contains("rate limit"))
+        || normalized.contains("returned 429")
+    {
+        return "MusicBrainz is rate-limiting requests right now. Please try again in a minute or two."
+            .to_string();
+    }
+
+    "Needle couldn't refresh metadata from MusicBrainz right now. Please try again later."
+        .to_string()
+}
+
 fn migrate_legacy_app_data(app_data_dir: &Path) {
     let Some(parent) = app_data_dir.parent() else {
         return;
@@ -813,10 +828,31 @@ async fn refresh_album_metadata_from_musicbrainz(
         return Err("No tracks found for this album".to_string());
     }
 
-    let result =
-        album_metadata::refresh_album_metadata(&album_trim, album_artist_trim.as_deref(), &tracks)
-            .await
-            .map_err(|error| error.to_string())?;
+    let result = match album_metadata::refresh_album_metadata(
+        &album_trim,
+        album_artist_trim.as_deref(),
+        &tracks,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let bootstrap =
+                db::load_bootstrap(&state.db_path).map_err(|db_error| db_error.to_string())?;
+            return Ok(AlbumMetadataRefreshResult {
+                status: AlbumMetadataRefreshStatus::Error,
+                album: album_trim,
+                album_artist: album_artist_trim,
+                updated_track_count: 0,
+                confidence: None,
+                release_title: None,
+                release_artist: None,
+                source_url: None,
+                message: musicbrainz_refresh_error_message(&error.to_string()),
+                bootstrap,
+            });
+        }
+    };
 
     if matches!(result.status, AlbumMetadataRefreshStatus::Matched) {
         db::replace_track_metadata_overrides(&state.db_path, &result.overrides)

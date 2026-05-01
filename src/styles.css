@@ -619,6 +619,105 @@ input, select {
   border-top: 1px solid var(--border);
 }
 
+.toast-layer {
+  position: absolute;
+  right: 24px;
+  top: 24px;
+  z-index: 80;
+  pointer-events: none;
+}
+
+.app-toast {
+  width: min(420px, calc(100vw - 340px));
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  border: 1px solid var(--border);
+  box-shadow: 0 18px 42px -26px rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(18px) saturate(1.06);
+  -webkit-backdrop-filter: blur(18px) saturate(1.06);
+  pointer-events: auto;
+}
+
+.app-toast.is-info {
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+}
+
+.app-toast.is-success {
+  border-color: color-mix(in srgb, #2bb673 34%, var(--border));
+}
+
+.app-toast.is-warning {
+  border-color: color-mix(in srgb, #d9a441 42%, var(--border));
+}
+
+.app-toast.is-error {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+}
+
+.app-toast-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.app-toast.is-success .app-toast-icon {
+  background: color-mix(in srgb, #2bb673 18%, transparent);
+  color: #1f8b58;
+}
+
+.app-toast.is-warning .app-toast-icon {
+  background: color-mix(in srgb, #d9a441 18%, transparent);
+  color: #9a6a0f;
+}
+
+.app-toast.is-error .app-toast-icon {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+}
+
+.app-toast-copy {
+  min-width: 0;
+}
+
+.app-toast-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.app-toast-message {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+.app-toast-close {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.app-toast-close:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
 /* ------- Views ------- */
 
 .view-header {

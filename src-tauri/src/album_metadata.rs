@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use reqwest::Client;
+use anyhow::{anyhow, Context, Result};
+use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
@@ -26,6 +26,47 @@ fn http_client() -> Result<Client> {
         .timeout(Duration::from_secs(15))
         .build()
         .context("Failed to build HTTP client")
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+async fn fetch_json_with_retries(client: &Client, url: &str, action: &str) -> Result<Value> {
+    let mut last_error = None;
+
+    for attempt in 0..3 {
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("{action} failed"))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return response
+                .json()
+                .await
+                .with_context(|| format!("{action} returned invalid JSON"));
+        }
+
+        let body = response.text().await.unwrap_or_default();
+        if is_retryable_status(status) && attempt < 2 {
+            last_error = Some(anyhow!("{action} returned {status}: {body}"));
+            tokio::time::sleep(Duration::from_millis(1200 * (attempt as u64 + 1))).await;
+            continue;
+        }
+
+        return Err(anyhow!("{action} returned {status}: {body}"));
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("{action} failed after retries")))
 }
 
 fn escape_query(value: &str) -> String {
@@ -260,6 +301,7 @@ async fn search_release_ids(
 
     let mut ids = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut last_error = None;
 
     for query in queries {
         let _permit = mb_permit().await;
@@ -267,16 +309,13 @@ async fn search_release_ids(
             "https://musicbrainz.org/ws/2/release/?query={}&fmt=json&limit=8",
             urlencoding::encode(&query)
         );
-        let resp: Value = client
-            .get(&url)
-            .send()
-            .await
-            .context("MusicBrainz release search failed")?
-            .error_for_status()
-            .context("MusicBrainz release search returned non-2xx")?
-            .json()
-            .await
-            .context("MusicBrainz release search returned invalid JSON")?;
+        let resp = match fetch_json_with_retries(client, &url, "MusicBrainz release search").await {
+            Ok(value) => value,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
 
         for release in resp["releases"].as_array().into_iter().flatten() {
             let score = release["score"].as_i64().unwrap_or(0);
@@ -285,6 +324,12 @@ async fn search_release_ids(
                 continue;
             }
             ids.push(id.to_string());
+        }
+    }
+
+    if ids.is_empty() {
+        if let Some(error) = last_error {
+            return Err(error);
         }
     }
 
@@ -300,16 +345,7 @@ async fn fetch_release_candidate(
         "https://musicbrainz.org/ws/2/release/{}?inc=recordings+artist-credits&fmt=json",
         release_mbid
     );
-    let resp: Value = client
-        .get(&url)
-        .send()
-        .await
-        .context("MusicBrainz release lookup failed")?
-        .error_for_status()
-        .context("MusicBrainz release lookup returned non-2xx")?
-        .json()
-        .await
-        .context("MusicBrainz release lookup returned invalid JSON")?;
+    let resp = fetch_json_with_retries(client, &url, "MusicBrainz release lookup").await?;
     Ok(extract_release_candidate(&resp))
 }
 
