@@ -35,6 +35,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Playback
 - **mpv backend** for bit-perfect lossless playback through JSON IPC
 - **Real Up Next queue** with visible current item, album covers, queue counts, and click-outside dismiss
+- **Fast-opening Up Next queue** with deferred album-art loading so large queues stay responsive
 - **Queue actions everywhere they matter**: Play next · Add to queue · album-level Play next / Add to queue
 - **Queue editing**: reorder, remove individual items, clear upcoming tracks, direct jump to any queued track
 - **Queue-aware playback**: play album · shuffle artist · play all Quick picks · shuffle a From-your-library playlist — mpv auto-advances through the queue

@@ -12,6 +12,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 ### Changed
 - Licensed the project under `GPL-3.0-only` and added the full license text.
 - Updated project metadata and documentation to reflect the public open-source license.
+- Deferred Up Next queue artwork loading so long queues open more quickly instead of resolving every cover up front.
 
 ## [0.1.0] - 2026-05-01
 
