@@ -4539,6 +4539,8 @@ function QueueDrawer({
                     trackPath={track.path}
                     fallback={track.title[0]?.toUpperCase() ?? '♪'}
                     size="queue"
+                    imageMode="deferred"
+                    lazyLoad
                   />
                   <span className="queue-row-copy">
                     <span className="queue-row-title">{track.title}</span>
@@ -4779,7 +4781,13 @@ function MiniPlayerView({
                       <span className="mini-player-queue-index">
                         {isCurrent ? (isPlaying ? <PlayingIndicator /> : 'Now') : index + 1}
                       </span>
-                      <Cover trackPath={track.path} fallback={track.title[0]?.toUpperCase() ?? '♪'} size="queue" />
+                      <Cover
+                        trackPath={track.path}
+                        fallback={track.title[0]?.toUpperCase() ?? '♪'}
+                        size="queue"
+                        imageMode="deferred"
+                        lazyLoad
+                      />
                       <span className="mini-player-queue-copy-block">
                         <span className="mini-player-queue-title">{track.title}</span>
                         <span className="mini-player-queue-sub">
