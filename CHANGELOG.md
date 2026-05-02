@@ -4,8 +4,6 @@ All notable changes to this project will be documented in this file.
 
 This changelog follows a lightweight Keep a Changelog-style format and is organized around release versions declared in [package.json](/Users/davidrelich/CascadeProjects/music-player/package.json).
 
-## [Unreleased]
-
 ## [0.1.1] - 2026-05-02
 
 ### Added
