@@ -70,6 +70,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Playlist management**: rename, delete, reorder tracks, remove tracks
 - **Smart playlists** surfaced as first-class library views generated from your collection and listening history
 - **Ratings-driven smart playlist** automatically keeps a `Top rated` mix in sync with your own stars
+- **Smart-playlist genre focus pills** let you narrow a generated mix to the genres currently present in that playlist, including multi-select combinations like pop + r&b
 
 ### Artist portraits & bios
 - **Artist portraits** pulled for free via **MusicBrainz → Wikidata → Wikimedia Commons**
@@ -195,6 +196,7 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 
 - **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
 - **User ratings** (`rating`) drive a `Top rated` smart playlist built from the stars you assign
+- **Playlist-local genre focus** lets smart playlists keep their generated order while narrowing the current mix to one or more genres already represented in that playlist
 - **Library state** (`play_count = 0`) drives Needs a first spin
 - **Tags** and local overrides (`primary_genre`) drive one top-genre mix when your collection has a clear favorite
 - **Artist enrichment** (`gender` when MusicBrainz provides it) gives future artist-radio style mixes another optional signal without blocking playback when metadata is incomplete

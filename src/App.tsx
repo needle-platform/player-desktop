@@ -98,6 +98,11 @@ type PlaylistTargetState = {
   trackPaths: string[];
   suggestedName: string;
 };
+type SmartPlaylistGenreOption = {
+  key: string;
+  label: string;
+  count: number;
+};
 type AlbumGenreEditorState = {
   album: string;
   albumArtist: string | null;
@@ -366,6 +371,7 @@ const filteredPlaylistName = (artist: string, genre: string) => {
   return parts.length > 0 ? `${parts.join(' · ')} mix` : 'Filtered mix';
 };
 const effectiveTrackGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
+const genreKey = (genre: string) => genre.trim().toLocaleLowerCase();
 const uniqueSorted = (values: string[]) =>
   Array.from(new Set(values.filter(Boolean))).sort((a, b) => compareText(a, b));
 const dedupeTracksByPath = (tracks: Track[]) => Array.from(new Map(tracks.map((track) => [track.path, track])).values());
@@ -978,6 +984,7 @@ function App() {
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [pendingTrackRatings, setPendingTrackRatings] = useState<string[]>([]);
+  const [selectedSmartPlaylistGenres, setSelectedSmartPlaylistGenres] = useState<string[]>([]);
   const [isMaintenanceRunning, setIsMaintenanceRunning] = useState(false);
   const [maintenanceLog, setMaintenanceLog] = useState<string[]>([]);
   const [missingLibraryRoots, setMissingLibraryRoots] = useState<string[]>([]);
@@ -1748,6 +1755,26 @@ function App() {
   const selectedManualPlaylist =
     selectedPlaylistData?.kind === 'manual' ? selectedPlaylistData.saved ?? null : null;
   const selectedSmartPlaylist = selectedPlaylistData?.kind === 'smart' ? selectedPlaylistData : null;
+  const smartPlaylistGenreOptions = useMemo<SmartPlaylistGenreOption[]>(() => {
+    if (!selectedSmartPlaylist) return [];
+
+    const genres = new Map<string, SmartPlaylistGenreOption>();
+    for (const track of selectedSmartPlaylist.tracks) {
+      for (const genre of splitTrackGenres(effectiveTrackGenre(track))) {
+        const key = genreKey(genre);
+        const existing = genres.get(key);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          genres.set(key, { key, label: genre, count: 1 });
+        }
+      }
+    }
+
+    return Array.from(genres.values()).sort(
+      (a, b) => b.count - a.count || compareText(a.label, b.label),
+    );
+  }, [selectedSmartPlaylist]);
   const playlistMode = Boolean(selectedPlaylistData);
 
   const scopedTracks = useMemo(() => {
@@ -1773,6 +1800,12 @@ function App() {
   );
   const filteredTracks = useMemo(() => {
     let list = scopedTracks;
+    if (selectedSmartPlaylist && selectedSmartPlaylistGenres.length > 0) {
+      list = list.filter((track) => {
+        const trackGenres = splitTrackGenres(effectiveTrackGenre(track)).map(genreKey);
+        return trackGenres.some((genre) => selectedSmartPlaylistGenres.includes(genre));
+      });
+    }
     if (!playlistMode && trackArtistFilter !== allTrackFilterValue) {
       list = list.filter((track) => (track.artist ?? '') === trackArtistFilter);
     }
@@ -1808,6 +1841,7 @@ function App() {
     trackYearToFilter,
     search,
     selectedSmartPlaylist,
+    selectedSmartPlaylistGenres,
   ]);
   const sortedTracks = useMemo(() => {
     if (selectedPlaylistData) {
@@ -1829,6 +1863,21 @@ function App() {
       setSelectedPlaylist(null);
     }
   }, [manualPlaylists, selectedPlaylist, smartPlaylists]);
+
+  useEffect(() => {
+    setSelectedSmartPlaylistGenres([]);
+  }, [selectedSmartPlaylist?.id]);
+
+  useEffect(() => {
+    if (!selectedSmartPlaylist) {
+      setSelectedSmartPlaylistGenres([]);
+      return;
+    }
+
+    setSelectedSmartPlaylistGenres((current) =>
+      current.filter((genre) => smartPlaylistGenreOptions.some((option) => option.key === genre)),
+    );
+  }, [selectedSmartPlaylist, smartPlaylistGenreOptions]);
 
   const albums = useMemo(() => {
     const map = new Map<string, AlbumSummary>();
@@ -2022,6 +2071,8 @@ function App() {
   );
   const playlistSourceTotalCount =
     selectedPlaylistData?.kind === 'manual' ? selectedPlaylistData.tracks.length : undefined;
+  const smartPlaylistHasGenreFocus =
+    selectedSmartPlaylist != null && selectedSmartPlaylistGenres.length > 0;
   const yearFilterSummary = playlistMode ? null : formatTrackYearRange(trackYearFromFilter, trackYearToFilter);
   const hasTrackFilters =
     (!playlistMode && trackArtistFilter !== allTrackFilterValue) ||
@@ -2034,13 +2085,15 @@ function App() {
   ]
     .filter(Boolean)
     .join(' · ');
-  const selectedPlaylistBaseTracks = selectedPlaylistData ? dedupeTracksByPath(selectedPlaylistData.tracks) : [];
+  const selectedPlaylistActionTracks = selectedPlaylistData
+    ? dedupeTracksByPath(visibleTracksForPlaylist)
+    : [];
   const isSelectedPlaylistActive =
     Boolean(currentPath) &&
-    selectedPlaylistBaseTracks.length > 0 &&
-    selectedPlaylistBaseTracks.length === baseQueueTracks.length &&
-    selectedPlaylistBaseTracks.every((track, index) => baseQueueTracks[index]?.path === track.path) &&
-    selectedPlaylistBaseTracks.some((track) => track.path === currentPath);
+    selectedPlaylistActionTracks.length > 0 &&
+    selectedPlaylistActionTracks.length === baseQueueTracks.length &&
+    selectedPlaylistActionTracks.every((track, index) => baseQueueTracks[index]?.path === track.path) &&
+    selectedPlaylistActionTracks.some((track) => track.path === currentPath);
   const selectedPlaylistPrimaryActionLabel = !selectedPlaylistData
     ? '▶ Play'
     : isSelectedPlaylistActive
@@ -2064,6 +2117,7 @@ function App() {
     selectedArtistMode,
     selectedPlaylist?.kind,
     selectedPlaylist?.id,
+    selectedSmartPlaylistGenres,
   ]);
 
   useEffect(() => {
@@ -2815,16 +2869,16 @@ function App() {
       shuffle: true,
     });
   };
-  const playPlaylistSelection = (playlist: ResolvedPlaylist) => {
-    const baseTracks = dedupeTracksByPath(playlist.tracks);
+  const playPlaylistSelection = (playlist: ResolvedPlaylist, tracksOverride?: Track[]) => {
+    const baseTracks = dedupeTracksByPath(tracksOverride ?? playlist.tracks);
     const actualTracks = shuffleEnabled ? shuffleList(baseTracks) : baseTracks;
     void playQueue(actualTracks, `Playing playlist · ${playlist.name}`, {
       baseTracks,
       shuffle: shuffleEnabled,
     });
   };
-  const shufflePlaylistSelection = (playlist: ResolvedPlaylist) => {
-    const baseTracks = dedupeTracksByPath(playlist.tracks);
+  const shufflePlaylistSelection = (playlist: ResolvedPlaylist, tracksOverride?: Track[]) => {
+    const baseTracks = dedupeTracksByPath(tracksOverride ?? playlist.tracks);
     if (baseTracks.length === 0) return;
     void playQueue(shuffleList(baseTracks), `Shuffle playlist · ${playlist.name}`, {
       baseTracks,
@@ -3361,8 +3415,10 @@ function App() {
   const hasLibraryTracks = allTracks.length > 0;
   const tracksEmptyTitle = !hasLibraryTracks
     ? 'No tracks yet'
-    : search.trim()
+    : !selectedSmartPlaylist && search.trim()
         ? 'No matching tracks'
+      : smartPlaylistHasGenreFocus
+        ? 'No tracks match this mix'
       : hasTrackFilters
         ? 'No tracks match these filters'
       : selectedManualPlaylist
@@ -3374,8 +3430,10 @@ function App() {
             : 'No tracks found';
   const tracksEmptyMessage = !hasLibraryTracks
     ? 'Add a folder from the sidebar to import FLAC, ALAC, WAV, MP3, OGG, M4A, and more.'
-    : search.trim()
+    : !selectedSmartPlaylist && search.trim()
         ? `Try a different search than “${search.trim()}”.`
+      : smartPlaylistHasGenreFocus
+        ? 'Try a different genre combination or clear the mix focus.'
       : hasTrackFilters
         ? 'Try widening the artist, genre, or year range filters.'
       : selectedManualPlaylist
@@ -3658,6 +3716,16 @@ function App() {
               })
             }
             hideTrackToolbar={selectedPlaylistData?.kind === 'smart'}
+            smartPlaylistGenreOptions={smartPlaylistGenreOptions}
+            selectedSmartPlaylistGenres={selectedSmartPlaylistGenres}
+            onToggleSmartPlaylistGenre={(genre) =>
+              setSelectedSmartPlaylistGenres((current) =>
+                current.includes(genre)
+                  ? current.filter((entry) => entry !== genre)
+                  : current.concat(genre),
+              )
+            }
+            onClearSmartPlaylistGenres={() => setSelectedSmartPlaylistGenres([])}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
             playlistPrimaryActionLabel={selectedPlaylistData ? selectedPlaylistPrimaryActionLabel : undefined}
@@ -3668,24 +3736,26 @@ function App() {
                       void togglePlayPause();
                       return;
                     }
-                    playPlaylistSelection(selectedPlaylistData);
+                    playPlaylistSelection(selectedPlaylistData, selectedPlaylistActionTracks);
                   }
                 : undefined
             }
             onShufflePlaylist={
-              selectedPlaylistData ? () => shufflePlaylistSelection(selectedPlaylistData) : undefined
+              selectedPlaylistData
+                ? () => shufflePlaylistSelection(selectedPlaylistData, selectedPlaylistActionTracks)
+                : undefined
             }
             onPlayPlaylistNext={
               selectedPlaylistData
                 ? () => {
-                    void queueTrackCollection(selectedPlaylistData.tracks, selectedPlaylistData.name, 'next');
+                    void queueTrackCollection(selectedPlaylistActionTracks, selectedPlaylistData.name, 'next');
                   }
                 : undefined
             }
             onAddPlaylistToQueue={
               selectedPlaylistData
                 ? () => {
-                    void queueTrackCollection(selectedPlaylistData.tracks, selectedPlaylistData.name, 'queue');
+                    void queueTrackCollection(selectedPlaylistActionTracks, selectedPlaylistData.name, 'queue');
                   }
                 : undefined
             }
@@ -4997,6 +5067,10 @@ interface TracksViewProps {
   saveActionLabel?: string;
   onAddTrackToPlaylist?: (track: Track) => void;
   hideTrackToolbar?: boolean;
+  smartPlaylistGenreOptions?: SmartPlaylistGenreOption[];
+  selectedSmartPlaylistGenres?: string[];
+  onToggleSmartPlaylistGenre?: (genre: string) => void;
+  onClearSmartPlaylistGenres?: () => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
   playlistPrimaryActionLabel?: string;
@@ -5057,6 +5131,10 @@ function TracksView({
   saveActionLabel,
   onAddTrackToPlaylist,
   hideTrackToolbar = false,
+  smartPlaylistGenreOptions = [],
+  selectedSmartPlaylistGenres = [],
+  onToggleSmartPlaylistGenre,
+  onClearSmartPlaylistGenres,
   onSetRating,
   pendingRatingPaths,
   playlistPrimaryActionLabel,
@@ -5174,6 +5252,33 @@ function TracksView({
             </button>
           )}
         </div>
+      )}
+      {smartPlaylistGenreOptions.length > 0 && (
+        <section className="playlist-focus" aria-label="Focus this mix by genre">
+          <div className="playlist-focus-head">
+            <div className="playlist-focus-title">Focus this mix</div>
+            {selectedSmartPlaylistGenres.length > 0 && onClearSmartPlaylistGenres && (
+              <button className="ghost-button playlist-focus-clear" onClick={onClearSmartPlaylistGenres}>
+                Clear
+              </button>
+            )}
+          </div>
+          <div className="playlist-focus-pills">
+            {smartPlaylistGenreOptions.map((genre) => {
+              const selected = selectedSmartPlaylistGenres.includes(genre.key);
+              return (
+                <button
+                  key={genre.key}
+                  className={`playlist-focus-pill ${selected ? 'is-active' : ''}`}
+                  onClick={() => onToggleSmartPlaylistGenre?.(genre.key)}
+                >
+                  <span>{genre.label}</span>
+                  <span className="playlist-focus-pill-count">{genre.count}</span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
       )}
       {!hideTrackToolbar && (
         <section className={`tracks-toolbar ${playlistMode ? 'is-playlist-mode' : ''}`}>

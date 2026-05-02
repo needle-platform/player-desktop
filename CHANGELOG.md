@@ -10,6 +10,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Added a README screenshot for the public GitHub repository.
 - Added persistent 1-5 star ratings for tracks across the library, album, and artist views.
 - Added a `Top rated` smart playlist generated from the listener's own track ratings.
+- Added genre-focus pills for smart playlists so listeners can narrow a generated mix to one or more genres already present in that playlist.
 
 ### Changed
 - Licensed the project under `GPL-3.0-only` and added the full license text.
@@ -17,6 +18,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Deferred Up Next queue artwork loading so long queues open more quickly instead of resolving every cover up front.
 - Streamlined track rows by stacking artist and album metadata, removing the `Queued` pill, and using the queue button itself as the queued-state indicator.
 - Simplified smart-playlist pages by hiding the generic track search/filter toolbar and preserving Needle's generated ordering.
+- Made smart-playlist playback and queue actions respect the currently focused subset instead of always using the full underlying playlist.
 - Tightened sidebar active states so Tracks and playlist highlights only appear when that exact library or playlist view is on screen.
 
 ## [0.1.0] - 2026-05-01
