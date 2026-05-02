@@ -447,6 +447,16 @@ fn set_album_primary_genre(
 }
 
 #[tauri::command]
+fn set_track_rating(
+    path: String,
+    rating: Option<i64>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::set_track_rating(&state.db_path, &path, rating).map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn set_playback_volume(
     volume_percent: f64,
     state: tauri::State<'_, AppState>,
@@ -1062,6 +1072,7 @@ pub fn run() {
             remove_playlist_track,
             move_playlist_track,
             set_album_primary_genre,
+            set_track_rating,
             set_playback_volume,
             set_playback_muted,
             set_audio_device,

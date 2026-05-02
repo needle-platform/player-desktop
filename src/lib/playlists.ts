@@ -79,6 +79,32 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
   let accentIndex = 0;
   const now = Date.now();
 
+  const ratedTracks = tracks
+    .filter((track) => (track.rating ?? 0) > 0)
+    .slice()
+    .sort(
+      (a, b) =>
+        (b.rating ?? 0) - (a.rating ?? 0) ||
+        (b.play_count ?? 0) - (a.play_count ?? 0) ||
+        compareTimestamps(a.last_played_at, b.last_played_at, 'desc') ||
+        a.title.localeCompare(b.title),
+    )
+    .slice(0, 50);
+  if (ratedTracks.length >= 3) {
+    const favoriteRatedTracks = ratedTracks.filter((track) => (track.rating ?? 0) >= 4);
+    const playlistTracks = favoriteRatedTracks.length >= 3 ? favoriteRatedTracks : ratedTracks;
+    playlists.push({
+      id: 'ratings:top-rated',
+      name: 'Top rated',
+      description:
+        favoriteRatedTracks.length >= 3
+          ? `Tracks you marked 4 or 5 stars`
+          : 'Tracks ordered by the stars you gave them',
+      accent: accent(accentIndex++),
+      tracks: playlistTracks,
+    });
+  }
+
   // Most played
   const played = tracks.filter((t) => (t.play_count ?? 0) > 0);
   if (played.length >= 5) {
@@ -128,8 +154,7 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
         compareTimestamps(a.added_at, b.added_at, 'asc') ||
         (a.album ?? '').localeCompare(b.album ?? '') ||
         a.title.localeCompare(b.title),
-    )
-    .slice(0, 50);
+    );
   if (needsFirstSpin.length >= 5) {
     playlists.push({
       id: 'library:first-spin',

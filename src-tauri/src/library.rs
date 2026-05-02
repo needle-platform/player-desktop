@@ -113,6 +113,7 @@ fn read_track(path: &Path) -> Track {
         added_at: None,
         play_count: 0,
         last_played_at: None,
+        rating: None,
     }
 }
 
