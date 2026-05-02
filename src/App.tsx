@@ -30,6 +30,7 @@ import {
   runMaintenance,
   setAudioDevice as setPlaybackAudioDevice,
   setAlbumPrimaryGenre as persistAlbumPrimaryGenre,
+  setTrackRating as persistTrackRating,
   setPlaybackMuted,
   setPlaybackVolume as setPlaybackVolumeLevel,
   setRepeatMode as tauriSetRepeatMode,
@@ -63,7 +64,7 @@ import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'artist' | 'settings';
 type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: number };
-type TrackSortOption = 'title' | 'artist' | 'album' | 'recent' | 'plays' | 'duration';
+type TrackSortOption = 'title' | 'artist' | 'album' | 'recent' | 'plays' | 'rating' | 'duration';
 type AlbumSortOption = 'album' | 'artist' | 'recent' | 'tracks';
 type ArtistSortOption = 'artist' | 'tracks' | 'recent';
 type ArtistBrowseMode = 'album' | 'all';
@@ -323,6 +324,7 @@ const trackSortOptions: Array<{ value: TrackSortOption; label: string }> = [
   { value: 'album', label: 'Album (A-Z)' },
   { value: 'recent', label: 'Recently added' },
   { value: 'plays', label: 'Most played' },
+  { value: 'rating', label: 'Highest rated' },
   { value: 'duration', label: 'Longest first' },
 ];
 const albumSortOptions: Array<{ value: AlbumSortOption; label: string }> = [
@@ -344,6 +346,7 @@ const trackPageSizeOptions = [25, 50, 100] as const;
 const defaultTracksPageSize = 50;
 const allTrackFilterValue = 'all';
 const defaultVolumePercent = 80;
+const maxTrackRating = 5;
 const miniPlayerPinnedStorageKey = 'needle-mini-player-pinned';
 const miniPlayerBaseSize = { width: 380, height: 420 };
 const miniPlayerExpandedHeightDefault = 772;
@@ -357,6 +360,7 @@ const formatDuration = (seconds: number | null | undefined) => {
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
+const formatTrackRatingLabel = (rating: number) => `${rating} star${rating === 1 ? '' : 's'}`;
 const filteredPlaylistName = (artist: string, genre: string) => {
   const parts = [artist, genre].filter(Boolean);
   return parts.length > 0 ? `${parts.join(' · ')} mix` : 'Filtered mix';
@@ -514,6 +518,14 @@ const compareTracksBySort = (sort: TrackSortOption) => (a: Track, b: Track) => {
   }
   if (sort === 'plays') {
     return (
+      (b.play_count ?? 0) - (a.play_count ?? 0) ||
+      timestampValue(b.last_played_at) - timestampValue(a.last_played_at) ||
+      compareText(a.title, b.title)
+    );
+  }
+  if (sort === 'rating') {
+    return (
+      (b.rating ?? 0) - (a.rating ?? 0) ||
       (b.play_count ?? 0) - (a.play_count ?? 0) ||
       timestampValue(b.last_played_at) - timestampValue(a.last_played_at) ||
       compareText(a.title, b.title)
@@ -861,6 +873,60 @@ function RepeatIcon({ mode }: { mode: RepeatMode }) {
   );
 }
 
+function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M12 3.6 14.6 8.9l5.9.9-4.2 4.1 1 5.8L12 17l-5.3 2.8 1-5.8-4.2-4.1 5.9-.9L12 3.6Z"
+        fill={filled ? 'currentColor' : 'none'}
+      />
+    </svg>
+  );
+}
+
+function TrackRatingControl({
+  track,
+  disabled,
+  onSetRating,
+}: {
+  track: Track;
+  disabled?: boolean;
+  onSetRating: (track: Track, rating: number | null) => void;
+}) {
+  const currentRating = track.rating ?? 0;
+
+  return (
+    <div className="track-rating" role="group" aria-label={`Rating for ${track.title}`}>
+      {Array.from({ length: maxTrackRating }, (_, index) => {
+        const value = index + 1;
+        const filled = currentRating >= value;
+        const nextRating = currentRating === value ? null : value;
+        const label = formatTrackRatingLabel(value).toLowerCase();
+        return (
+          <button
+            key={`${track.path}-rating-${value}`}
+            className={`track-rating-star ${filled ? 'is-filled' : ''}`}
+            type="button"
+            disabled={disabled}
+            title={nextRating == null ? `Clear ${label} rating` : `Set ${label} rating`}
+            aria-label={
+              nextRating == null
+                ? `Clear ${label} rating for ${track.title}`
+                : `Set ${label} rating for ${track.title}`
+            }
+            onClick={(event) => {
+              event.stopPropagation();
+              onSetRating(track, nextRating);
+            }}
+          >
+            <StarIcon filled={filled} />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function App() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
   const [view, setView] = useState<View>('dashboard');
@@ -911,6 +977,7 @@ function App() {
   const [isDeviceMenuOpen, setIsDeviceMenuOpen] = useState(false);
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pendingTrackRatings, setPendingTrackRatings] = useState<string[]>([]);
   const [isMaintenanceRunning, setIsMaintenanceRunning] = useState(false);
   const [maintenanceLog, setMaintenanceLog] = useState<string[]>([]);
   const [missingLibraryRoots, setMissingLibraryRoots] = useState<string[]>([]);
@@ -1020,6 +1087,52 @@ function App() {
     setTrackGenreFilter(allTrackFilterValue);
     setTrackYearFromFilter(allTrackFilterValue);
     setTrackYearToFilter(allTrackFilterValue);
+  };
+  const updateTrackRating = async (track: Track, rating: number | null) => {
+    const previousRating = track.rating ?? null;
+    setPendingTrackRatings((current) =>
+      current.includes(track.path) ? current : current.concat(track.path),
+    );
+    setData((prev) =>
+      prev
+        ? {
+            ...prev,
+            library: {
+              ...prev.library,
+              tracks: prev.library.tracks.map((entry) =>
+                entry.path === track.path ? { ...entry, rating } : entry,
+              ),
+            },
+          }
+        : prev,
+    );
+
+    try {
+      const next = await persistTrackRating(track.path, rating);
+      setData(next);
+      setStatus(
+        rating == null
+          ? `Cleared rating · ${track.title}`
+          : `Updated rating · ${track.title} · ${formatTrackRatingLabel(rating)}`,
+      );
+    } catch (error) {
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              library: {
+                ...prev.library,
+                tracks: prev.library.tracks.map((entry) =>
+                  entry.path === track.path ? { ...entry, rating: previousRating } : entry,
+                ),
+              },
+            }
+          : prev,
+      );
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingTrackRatings((current) => current.filter((path) => path !== track.path));
+    }
   };
   const resizeMiniPlayerWindow = async (height: number) => {
     const appWindow = getCurrentWindow();
@@ -1634,6 +1747,7 @@ function App() {
   }, [manualPlaylists, selectedPlaylist, smartPlaylists, trackByPath]);
   const selectedManualPlaylist =
     selectedPlaylistData?.kind === 'manual' ? selectedPlaylistData.saved ?? null : null;
+  const selectedSmartPlaylist = selectedPlaylistData?.kind === 'smart' ? selectedPlaylistData : null;
   const playlistMode = Boolean(selectedPlaylistData);
 
   const scopedTracks = useMemo(() => {
@@ -1675,7 +1789,7 @@ function App() {
         return true;
       });
     }
-    if (search.trim()) {
+    if (!selectedSmartPlaylist && search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(
         (t) =>
@@ -1685,13 +1799,22 @@ function App() {
       );
     }
     return list;
-  }, [playlistMode, scopedTracks, trackArtistFilter, trackGenreFilter, trackYearFromFilter, trackYearToFilter, search]);
+  }, [
+    playlistMode,
+    scopedTracks,
+    trackArtistFilter,
+    trackGenreFilter,
+    trackYearFromFilter,
+    trackYearToFilter,
+    search,
+    selectedSmartPlaylist,
+  ]);
   const sortedTracks = useMemo(() => {
-    if (selectedManualPlaylist) {
+    if (selectedPlaylistData) {
       return filteredTracks;
     }
     return filteredTracks.slice().sort(compareTracksBySort(trackSort));
-  }, [filteredTracks, selectedManualPlaylist, trackSort]);
+  }, [filteredTracks, selectedPlaylistData, trackSort]);
 
   useEffect(() => {
     if (!selectedPlaylist) return;
@@ -3333,7 +3456,7 @@ function App() {
             <span className="nav-icon">⌂</span>Dashboard
           </button>
           <button
-            className={`nav-item ${view === 'tracks' ? 'active' : ''}`}
+            className={`nav-item ${view === 'tracks' && !selectedPlaylist ? 'active' : ''}`}
             onClick={() => {
               setView('tracks');
               clearBrowsingFilters();
@@ -3369,7 +3492,9 @@ function App() {
             <button
               key={playlist.id}
               className={`nav-item nav-item-compact ${
-                selectedPlaylist?.kind === 'manual' && selectedPlaylist.id === playlist.id ? 'active' : ''
+                view === 'tracks' && selectedPlaylist?.kind === 'manual' && selectedPlaylist.id === playlist.id
+                  ? 'active'
+                  : ''
               }`}
               onClick={() => {
                 setSelectedPlaylist({ kind: 'manual', id: playlist.id });
@@ -3388,7 +3513,9 @@ function App() {
             <button
               key={playlist.id}
               className={`nav-item nav-item-compact ${
-                selectedPlaylist?.kind === 'smart' && selectedPlaylist.id === playlist.id ? 'active' : ''
+                view === 'tracks' && selectedPlaylist?.kind === 'smart' && selectedPlaylist.id === playlist.id
+                  ? 'active'
+                  : ''
               }`}
               onClick={() => {
                 setSelectedPlaylist({ kind: 'smart', id: playlist.id });
@@ -3483,8 +3610,8 @@ function App() {
             playlistSourceTotalCount={playlistSourceTotalCount}
             search={search}
             onSearch={setSearch}
-            sortValue={selectedManualPlaylist ? undefined : trackSort}
-            onSortChange={selectedManualPlaylist ? undefined : setTrackSort}
+            sortValue={selectedPlaylistData ? undefined : trackSort}
+            onSortChange={selectedPlaylistData ? undefined : setTrackSort}
             artistFilterValue={trackArtistFilter}
             onArtistFilterChange={setTrackArtistFilter}
             artistFilterOptions={trackArtistOptions}
@@ -3530,6 +3657,9 @@ function App() {
                 suggestedName: `${track.title} picks`,
               })
             }
+            hideTrackToolbar={selectedPlaylistData?.kind === 'smart'}
+            onSetRating={updateTrackRating}
+            pendingRatingPaths={pendingTrackRatings}
             playlistPrimaryActionLabel={selectedPlaylistData ? selectedPlaylistPrimaryActionLabel : undefined}
             onPlayPlaylistPrimaryAction={
               selectedPlaylistData
@@ -3639,6 +3769,8 @@ function App() {
                 suggestedName: `${selectedAlbumSummary.album} picks`,
               })
             }
+            onSetRating={updateTrackRating}
+            pendingRatingPaths={pendingTrackRatings}
             onEditPrimaryGenre={(currentPrimaryGenre, suggestedGenres) =>
               setAlbumGenreEditor({
                 album: selectedAlbumSummary.album,
@@ -3758,6 +3890,8 @@ function App() {
                 suggestedName: `${selectedArtistProfile} picks`,
               })
             }
+            onSetRating={updateTrackRating}
+            pendingRatingPaths={pendingTrackRatings}
           />
         )}
 
@@ -4862,6 +4996,9 @@ interface TracksViewProps {
   onSaveAsPlaylist?: () => void;
   saveActionLabel?: string;
   onAddTrackToPlaylist?: (track: Track) => void;
+  hideTrackToolbar?: boolean;
+  onSetRating: (track: Track, rating: number | null) => void;
+  pendingRatingPaths: string[];
   playlistPrimaryActionLabel?: string;
   onPlayPlaylistPrimaryAction?: () => void;
   onShufflePlaylist?: () => void;
@@ -4919,6 +5056,9 @@ function TracksView({
   onSaveAsPlaylist,
   saveActionLabel,
   onAddTrackToPlaylist,
+  hideTrackToolbar = false,
+  onSetRating,
+  pendingRatingPaths,
   playlistPrimaryActionLabel,
   onPlayPlaylistPrimaryAction,
   onShufflePlaylist,
@@ -5035,120 +5175,122 @@ function TracksView({
           )}
         </div>
       )}
-      <section className={`tracks-toolbar ${playlistMode ? 'is-playlist-mode' : ''}`}>
-        <div className="tracks-toolbar-main">
-          <label className="tracks-search-wrap">
-            <SearchIcon />
-            <input
-              className="search tracks-search"
-              placeholder="Search title, artist, album…"
-              value={search}
-              onChange={(e) => onSearch(e.target.value)}
-            />
-          </label>
-          <div className="tracks-toolbar-actions">
-            {sortValue && onSortChange && (
-              <label className="tracks-toolbar-control tracks-toolbar-sort">
-                <span className="view-select-label">Sort</span>
-                <select
-                  className="view-select tracks-select"
-                  value={sortValue}
-                  onChange={(event) => onSortChange(event.currentTarget.value as TrackSortOption)}
-                >
-                  {trackSortOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
+      {!hideTrackToolbar && (
+        <section className={`tracks-toolbar ${playlistMode ? 'is-playlist-mode' : ''}`}>
+          <div className="tracks-toolbar-main">
+            <label className="tracks-search-wrap">
+              <SearchIcon />
+              <input
+                className="search tracks-search"
+                placeholder="Search title, artist, album…"
+                value={search}
+                onChange={(e) => onSearch(e.target.value)}
+              />
+            </label>
+            <div className="tracks-toolbar-actions">
+              {sortValue && onSortChange && (
+                <label className="tracks-toolbar-control tracks-toolbar-sort">
+                  <span className="view-select-label">Sort</span>
+                  <select
+                    className="view-select tracks-select"
+                    value={sortValue}
+                    onChange={(event) => onSortChange(event.currentTarget.value as TrackSortOption)}
+                  >
+                    {trackSortOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
           </div>
-        </div>
-        {!playlistMode && (
-          <>
-            <div className="tracks-filter-grid">
-              <label className="tracks-filter-card">
-                <span className="view-select-label">Artist</span>
-                <select
-                  className="view-select tracks-select"
-                  value={artistFilterValue}
-                  onChange={(event) => onArtistFilterChange(event.currentTarget.value)}
-                >
-                  <option value={allTrackFilterValue}>All artists</option>
-                  {artistFilterOptions.map((artist) => (
-                    <option key={artist} value={artist}>
-                      {artist}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="tracks-filter-card">
-                <span className="view-select-label">Genre</span>
-                <select
-                  className="view-select tracks-select"
-                  value={genreFilterValue}
-                  onChange={(event) => onGenreFilterChange(event.currentTarget.value)}
-                >
-                  <option value={allTrackFilterValue}>All genres</option>
-                  {genreFilterOptions.map((genre) => (
-                    <option key={genre} value={genre}>
-                      {genre}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="tracks-filter-card tracks-filter-card-year">
-                <span className="view-select-label">Year</span>
-                <div className="tracks-year-range">
+          {!playlistMode && (
+            <>
+              <div className="tracks-filter-grid">
+                <label className="tracks-filter-card">
+                  <span className="view-select-label">Artist</span>
                   <select
                     className="view-select tracks-select"
-                    value={yearFilterFromValue}
-                    onChange={(event) => onYearFilterFromChange(event.currentTarget.value as TrackYearBoundaryFilter)}
+                    value={artistFilterValue}
+                    onChange={(event) => onArtistFilterChange(event.currentTarget.value)}
                   >
-                    <option value={allTrackFilterValue}>From</option>
-                    {yearFilterOptions.map((year) => (
-                      <option key={`from-${year}`} value={year}>
-                        {year}
+                    <option value={allTrackFilterValue}>All artists</option>
+                    {artistFilterOptions.map((artist) => (
+                      <option key={artist} value={artist}>
+                        {artist}
                       </option>
                     ))}
                   </select>
-                  <span className="tracks-year-range-separator">→</span>
+                </label>
+                <label className="tracks-filter-card">
+                  <span className="view-select-label">Genre</span>
                   <select
                     className="view-select tracks-select"
-                    value={yearFilterToValue}
-                    onChange={(event) => onYearFilterToChange(event.currentTarget.value as TrackYearBoundaryFilter)}
+                    value={genreFilterValue}
+                    onChange={(event) => onGenreFilterChange(event.currentTarget.value)}
                   >
-                    <option value={allTrackFilterValue}>To</option>
-                    {yearFilterOptions.map((year) => (
-                      <option key={`to-${year}`} value={year}>
-                        {year}
+                    <option value={allTrackFilterValue}>All genres</option>
+                    {genreFilterOptions.map((genre) => (
+                      <option key={genre} value={genre}>
+                        {genre}
                       </option>
                     ))}
                   </select>
-                </div>
-              </label>
-            </div>
-            <div className="tracks-toolbar-footer">
-              <span className="tracks-filter-status">
-                {hasTrackFilters ? 'Filters are shaping this view' : 'Save this filtered view as a playlist snapshot'}
-              </span>
-              <div className="tracks-toolbar-footer-actions">
-                {hasTrackFilters && (
-                  <button className="ghost-button" onClick={onClearTrackFilters}>
-                    Clear filters
-                  </button>
-                )}
-                {onSaveAsPlaylist && (
-                  <button className="ghost-button" onClick={onSaveAsPlaylist} disabled={totalTracks === 0}>
-                    {saveActionLabel ?? '+ Save as playlist'}
-                  </button>
-                )}
+                </label>
+                <label className="tracks-filter-card tracks-filter-card-year">
+                  <span className="view-select-label">Year</span>
+                  <div className="tracks-year-range">
+                    <select
+                      className="view-select tracks-select"
+                      value={yearFilterFromValue}
+                      onChange={(event) => onYearFilterFromChange(event.currentTarget.value as TrackYearBoundaryFilter)}
+                    >
+                      <option value={allTrackFilterValue}>From</option>
+                      {yearFilterOptions.map((year) => (
+                        <option key={`from-${year}`} value={year}>
+                          {year}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="tracks-year-range-separator">→</span>
+                    <select
+                      className="view-select tracks-select"
+                      value={yearFilterToValue}
+                      onChange={(event) => onYearFilterToChange(event.currentTarget.value as TrackYearBoundaryFilter)}
+                    >
+                      <option value={allTrackFilterValue}>To</option>
+                      {yearFilterOptions.map((year) => (
+                        <option key={`to-${year}`} value={year}>
+                          {year}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </label>
               </div>
-            </div>
-          </>
-        )}
-      </section>
+              <div className="tracks-toolbar-footer">
+                <span className="tracks-filter-status">
+                  {hasTrackFilters ? 'Filters are shaping this view' : 'Save this filtered view as a playlist snapshot'}
+                </span>
+                <div className="tracks-toolbar-footer-actions">
+                  {hasTrackFilters && (
+                    <button className="ghost-button" onClick={onClearTrackFilters}>
+                      Clear filters
+                    </button>
+                  )}
+                  {onSaveAsPlaylist && (
+                    <button className="ghost-button" onClick={onSaveAsPlaylist} disabled={totalTracks === 0}>
+                      {saveActionLabel ?? '+ Save as playlist'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </section>
+      )}
 
       {totalTracks === 0 ? (
         <div className="empty">
@@ -5170,6 +5312,7 @@ function TracksView({
                 typeof playlistSourceTotalCount === 'number'
                   ? playlistSourceTotalCount - 1
                   : Math.max(totalTracks - 1, 0);
+              const ratingIsPending = pendingRatingPaths.includes(track.path);
               return (
                 <div key={track.id} className={`track-row ${isCurrent ? 'playing' : ''}`}>
                   <Cover
@@ -5186,32 +5329,44 @@ function TracksView({
                     <span className="track-title-wrap">
                       <span className="track-title">{track.title}</span>
                       <span className="track-play-meta">
-                        {(track.play_count ?? 0) > 0
-                          ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
-                          : 'Unplayed so far'}
+                        {[
+                          (track.play_count ?? 0) > 0
+                            ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
+                            : 'Unplayed so far',
+                          track.rating ? `Rated ${formatTrackRatingLabel(track.rating)}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
                       </span>
                     </span>
                     <span className="track-duration">{formatDuration(track.duration_seconds)}</span>
                   </button>
-                  <span className="track-artist-wrap">
-                    {track.artist ? (
-                      <button className="track-detail-link" onClick={() => onOpenArtist(track.artist ?? '')}>
-                        {track.artist}
-                      </button>
-                    ) : (
-                      <span className="track-detail-link is-static">Unknown artist</span>
-                    )}
-                  </span>
-                  <span className="track-album-wrap">
-                    {track.album && albumKeyValue ? (
-                      <button className="track-detail-link" onClick={() => onOpenAlbum(albumKeyValue)}>
-                        {track.album}
-                      </button>
-                    ) : (
-                      <span className="track-detail-link is-static">Standalone track</span>
-                    )}
+                  <span className="track-context-wrap">
+                    <span className="track-artist-wrap">
+                      {track.artist ? (
+                        <button className="track-detail-link" onClick={() => onOpenArtist(track.artist ?? '')}>
+                          {track.artist}
+                        </button>
+                      ) : (
+                        <span className="track-detail-link is-static">Unknown artist</span>
+                      )}
+                    </span>
+                    <span className="track-album-wrap">
+                      {track.album && albumKeyValue ? (
+                        <button className="track-detail-link track-detail-subtle" onClick={() => onOpenAlbum(albumKeyValue)}>
+                          {track.album}
+                        </button>
+                      ) : (
+                        <span className="track-detail-link track-detail-subtle is-static">Standalone track</span>
+                      )}
+                    </span>
                   </span>
                   <span className="album-track-actions">
+                    <TrackRatingControl
+                      track={track}
+                      disabled={ratingIsPending}
+                      onSetRating={onSetRating}
+                    />
                     {playlistMode && playlistTracksEditable ? (
                       <>
                         <button
@@ -5253,7 +5408,6 @@ function TracksView({
                       </>
                     ) : (
                       <>
-                        {isQueued && <span className="queue-pill">Queued</span>}
                         <button
                           className="row-icon-button"
                           onClick={(event) => {
@@ -5266,7 +5420,7 @@ function TracksView({
                           <NextIcon />
                         </button>
                         <button
-                          className="row-icon-button"
+                          className={`row-icon-button ${isQueued ? 'is-queued' : ''}`}
                           onClick={(event) => {
                             event.stopPropagation();
                             void onAddToQueue(track);
@@ -5321,6 +5475,8 @@ interface AlbumDetailViewProps {
   onAddAlbumToQueue: () => void;
   onAddAlbumToPlaylist: () => void;
   onAddTrackToPlaylist: (track: Track) => void;
+  onSetRating: (track: Track, rating: number | null) => void;
+  pendingRatingPaths: string[];
   onEditPrimaryGenre: (currentPrimaryGenre: string | null, suggestedGenres: string[]) => void;
   onRefreshMetadata: () => void;
   onPlayAlbum: () => void;
@@ -5346,6 +5502,8 @@ function AlbumDetailView({
   onAddAlbumToQueue,
   onAddAlbumToPlaylist,
   onAddTrackToPlaylist,
+  onSetRating,
+  pendingRatingPaths,
   onEditPrimaryGenre,
   onRefreshMetadata,
   onPlayAlbum,
@@ -5631,6 +5789,7 @@ function AlbumDetailView({
                 {tracks.map((t) => {
                   const isCurrent = currentPath === t.path;
                   const isQueued = queuePaths.includes(t.path);
+                  const ratingIsPending = pendingRatingPaths.includes(t.path);
                   return (
                     <div
                       key={t.id}
@@ -5647,12 +5806,16 @@ function AlbumDetailView({
                         <span className="album-track-meta muted">
                           {formatQuality(t)}
                         </span>
-                        <span className="album-track-duration">
+                      <span className="album-track-duration">
                           {formatDuration(t.duration_seconds)}
                         </span>
                       </button>
                       <span className="album-track-actions">
-                        {isQueued && <span className="queue-pill">Queued</span>}
+                        <TrackRatingControl
+                          track={t}
+                          disabled={ratingIsPending}
+                          onSetRating={onSetRating}
+                        />
                         <button
                           className="row-icon-button"
                           onClick={(event) => {
@@ -5665,7 +5828,7 @@ function AlbumDetailView({
                           <NextIcon />
                         </button>
                         <button
-                          className="row-icon-button"
+                          className={`row-icon-button ${isQueued ? 'is-queued' : ''}`}
                           onClick={(event) => {
                             event.stopPropagation();
                             void onAddToQueue(t);
@@ -5725,6 +5888,8 @@ interface ArtistDetailViewProps {
   onPlayTopTracksNext: () => void;
   onAddTopTracksToQueue: () => void;
   onAddTrackToPlaylist: (track: Track) => void;
+  onSetRating: (track: Track, rating: number | null) => void;
+  pendingRatingPaths: string[];
 }
 
 function ArtistDetailView({
@@ -5753,6 +5918,8 @@ function ArtistDetailView({
   onPlayTopTracksNext,
   onAddTopTracksToQueue,
   onAddTrackToPlaylist,
+  onSetRating,
+  pendingRatingPaths,
 }: ArtistDetailViewProps) {
   const [isBioExpanded, setIsBioExpanded] = useState(false);
   const [isImageMenuOpen, setIsImageMenuOpen] = useState(false);
@@ -6061,6 +6228,7 @@ function ArtistDetailView({
               const isCurrent = currentPath === track.path;
               const isQueued = queuePaths.includes(track.path);
               const albumKeyValue = trackAlbumKey(track);
+              const ratingIsPending = pendingRatingPaths.includes(track.path);
               return (
                 <div key={track.id} className={`album-track-row artist-top-track-row ${isCurrent ? 'playing' : ''}`}>
                   <Cover
@@ -6075,9 +6243,14 @@ function ArtistDetailView({
                     <span className="artist-track-title-wrap">
                       <span className="album-track-title">{track.title}</span>
                       <span className="artist-track-play-meta">
-                        {(track.play_count ?? 0) > 0
-                          ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
-                          : 'Unplayed so far'}
+                        {[
+                          (track.play_count ?? 0) > 0
+                            ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
+                            : 'Unplayed so far',
+                          track.rating ? `Rated ${formatTrackRatingLabel(track.rating)}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
                       </span>
                     </span>
                   </button>
@@ -6093,7 +6266,11 @@ function ArtistDetailView({
                   </span>
                   <span className="artist-track-format">{formatQuality(track)}</span>
                   <span className="album-track-actions">
-                    {isQueued && <span className="queue-pill">Queued</span>}
+                    <TrackRatingControl
+                      track={track}
+                      disabled={ratingIsPending}
+                      onSetRating={onSetRating}
+                    />
                     <button
                       className="row-icon-button"
                       onClick={() => void onPlayNext(track)}
@@ -6103,7 +6280,7 @@ function ArtistDetailView({
                       <NextIcon />
                     </button>
                     <button
-                      className="row-icon-button"
+                      className={`row-icon-button ${isQueued ? 'is-queued' : ''}`}
                       onClick={() => void onAddToQueue(track)}
                       title={`Add ${track.title} to queue`}
                       aria-label={`Add ${track.title} to queue`}

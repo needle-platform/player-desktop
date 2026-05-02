@@ -106,6 +106,9 @@ export const setAlbumPrimaryGenre = (
   primaryGenre: string | null,
 ) => invoke<BootstrapPayload>('set_album_primary_genre', { album, albumArtist, primaryGenre });
 
+export const setTrackRating = (path: string, rating: number | null) =>
+  invoke<BootstrapPayload>('set_track_rating', { path, rating });
+
 export interface CoverArt {
   data_url: string;
   source: string;

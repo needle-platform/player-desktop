@@ -30,6 +30,7 @@ export interface Track {
   added_at: string | null;
   play_count: number;
   last_played_at: string | null;
+  rating: number | null;
 }
 
 export interface LibraryData {

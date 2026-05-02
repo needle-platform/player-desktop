@@ -42,7 +42,8 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             year INTEGER,
             added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             play_count INTEGER NOT NULL DEFAULT 0,
-            last_played_at TEXT
+            last_played_at TEXT,
+            rating INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS settings (
@@ -150,6 +151,7 @@ pub fn init_database(db_path: &Path) -> Result<()> {
         [],
     );
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN last_played_at TEXT", []);
+    let _ = connection.execute("ALTER TABLE tracks ADD COLUMN rating INTEGER", []);
     let _ = connection.execute("ALTER TABLE artist_info ADD COLUMN gender TEXT", []);
     let _ = connection.execute(
         "UPDATE tracks SET added_at = CURRENT_TIMESTAMP WHERE added_at IS NULL",
@@ -486,7 +488,8 @@ pub fn load_album_tracks_for_match(
                COALESCE(tmo.year, t.year) AS year,
                t.added_at,
                t.play_count,
-               t.last_played_at
+               t.last_played_at,
+               t.rating
         FROM tracks t
         LEFT JOIN track_metadata_overrides tmo ON tmo.track_path = t.path
         LEFT JOIN album_primary_genres apg
@@ -523,6 +526,7 @@ pub fn load_album_tracks_for_match(
                 added_at: row.get(15)?,
                 play_count: row.get::<_, i64>(16)?,
                 last_played_at: row.get(17)?,
+                rating: row.get(18)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -757,6 +761,26 @@ pub fn record_play(db_path: &Path, path: &str) -> Result<()> {
          WHERE path = ?1",
         params![path],
     )?;
+    Ok(())
+}
+
+pub fn set_track_rating(db_path: &Path, path: &str, rating: Option<i64>) -> Result<()> {
+    let normalized_rating = rating.filter(|value| (1..=5).contains(value));
+    if rating.is_some() && normalized_rating.is_none() {
+        bail!("Track rating must be between 1 and 5 stars");
+    }
+
+    let connection = Connection::open(db_path)?;
+    let updated = connection.execute(
+        "UPDATE tracks
+         SET rating = ?2
+         WHERE path = ?1",
+        params![path, normalized_rating],
+    )?;
+    if updated == 0 {
+        bail!("Track not found");
+    }
+
     Ok(())
 }
 
@@ -1044,7 +1068,8 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                COALESCE(tmo.year, t.year) AS year,
                t.added_at,
                t.play_count,
-               t.last_played_at
+               t.last_played_at,
+               t.rating
         FROM tracks t
         LEFT JOIN track_metadata_overrides tmo
           ON tmo.track_path = t.path
@@ -1082,6 +1107,7 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                 added_at: row.get(15)?,
                 play_count: row.get::<_, i64>(16)?,
                 last_played_at: row.get(17)?,
+                rating: row.get(18)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

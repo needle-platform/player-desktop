@@ -25,6 +25,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Quick actions**: Shuffle play · Add folder
 - **Recently added albums** sorted by newest tracks with relative timestamps (Today / 3d ago / 2w ago…)
 - **From your library** recommendations grounded in your own listening history and collection metadata:
+  - **Top rated** from the stars you assign yourself
   - **Most played** & **Recently played** (from real play history)
   - **Needs a first spin** for unplayed tracks still waiting in the library
   - **Rediscover** for tracks you played before but have not visited in a while
@@ -46,6 +47,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Artwork-first mini player** with full-bleed cover art, drag-to-move behavior, pinned always-on-top mode, and an expandable / resizable Up Next queue
 - **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
+- **Per-track user star ratings** saved locally and reusable across the app
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
 - **Safer startup volume** defaults to 80% to reduce surprise-blast playback on first launch
 - **Animated current-track indicator** in both the main track list and the album track list
@@ -67,6 +69,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Filtered playlist creation** from library metadata such as artist and genre
 - **Playlist management**: rename, delete, reorder tracks, remove tracks
 - **Smart playlists** surfaced as first-class library views generated from your collection and listening history
+- **Ratings-driven smart playlist** automatically keeps a `Top rated` mix in sync with your own stars
 
 ### Artist portraits & bios
 - **Artist portraits** pulled for free via **MusicBrainz → Wikidata → Wikimedia Commons**
@@ -191,6 +194,7 @@ Maintenance and remove-folder actions only touch the database — your audio fil
 Needle generates dashboard recommendations and smart-playlist views from data we already have, no machine learning required:
 
 - **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
+- **User ratings** (`rating`) drive a `Top rated` smart playlist built from the stars you assign
 - **Library state** (`play_count = 0`) drives Needs a first spin
 - **Tags** and local overrides (`primary_genre`) drive one top-genre mix when your collection has a clear favorite
 - **Artist enrichment** (`gender` when MusicBrainz provides it) gives future artist-radio style mixes another optional signal without blocking playback when metadata is incomplete
