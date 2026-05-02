@@ -4,6 +4,7 @@ mod artist;
 mod cover;
 mod db;
 mod library;
+mod loudness;
 mod models;
 mod mpv;
 
@@ -38,6 +39,33 @@ fn musicbrainz_refresh_error_message(error: &str) -> String {
 
     "Needle couldn't refresh metadata from MusicBrainz right now. Please try again later."
         .to_string()
+}
+
+fn volume_leveling_gain_for_path(
+    db_path: &Path,
+    path: Option<&str>,
+) -> Result<Option<f32>, String> {
+    let Some(track_path) = path.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+
+    let settings = db::load_settings(db_path).map_err(|error| error.to_string())?;
+    if !settings.volume_leveling_enabled {
+        return Ok(None);
+    }
+
+    db::get_track_loudness_gain(db_path, track_path).map_err(|error| error.to_string())
+}
+
+fn apply_volume_leveling_to_player(
+    player: &mut MpvController,
+    db_path: &Path,
+    path: Option<&str>,
+) -> Result<(), String> {
+    let gain = volume_leveling_gain_for_path(db_path, path)?;
+    player
+        .set_track_gain_db(gain)
+        .map_err(|error| error.to_string())
 }
 
 fn migrate_legacy_app_data(app_data_dir: &Path) {
@@ -128,6 +156,12 @@ fn save_settings(
     state: tauri::State<'_, AppState>,
 ) -> Result<AppSettings, String> {
     db::save_settings(&state.db_path, &settings).map_err(|error| error.to_string())?;
+    let current_session =
+        db::load_playback_session(&state.db_path).map_err(|error| error.to_string())?;
+    let current_path = current_session
+        .queue_paths
+        .get(current_session.current_index)
+        .cloned();
 
     let mut player = state
         .player
@@ -136,6 +170,7 @@ fn save_settings(
     player
         .set_equalizer(settings.equalizer_preset.clone(), settings.equalizer_bands)
         .map_err(|error| error.to_string())?;
+    apply_volume_leveling_to_player(&mut player, &state.db_path, current_path.as_deref())?;
 
     Ok(settings)
 }
@@ -150,6 +185,7 @@ fn play_track(path: String, state: tauri::State<'_, AppState>) -> Result<(), Str
         .player
         .lock()
         .map_err(|_| "Unable to acquire player state".to_string())?;
+    apply_volume_leveling_to_player(&mut player, &state.db_path, Some(&path))?;
     player.play(&path).map_err(|error| error.to_string())
 }
 
@@ -167,6 +203,11 @@ fn play_queue(paths: Vec<String>, state: tauri::State<'_, AppState>) -> Result<(
         .player
         .lock()
         .map_err(|_| "Unable to acquire player state".to_string())?;
+    apply_volume_leveling_to_player(
+        &mut player,
+        &state.db_path,
+        existing.first().map(String::as_str),
+    )?;
     player
         .play_queue(&existing)
         .map_err(|error| error.to_string())
@@ -254,6 +295,14 @@ fn sync_playback_session(
         .player
         .lock()
         .map_err(|_| "Unable to acquire player state".to_string())?;
+    apply_volume_leveling_to_player(
+        &mut player,
+        &state.db_path,
+        normalized
+            .queue_paths
+            .get(normalized.current_index)
+            .map(String::as_str),
+    )?;
     player
         .sync_playback_session(&normalized)
         .map_err(|error| error.to_string())
@@ -274,11 +323,29 @@ fn set_repeat_mode(
 }
 
 #[tauri::command]
-fn play_queue_index(index: usize, state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn apply_volume_leveling_for_track(
+    path: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     let mut player = state
         .player
         .lock()
         .map_err(|_| "Unable to acquire player state".to_string())?;
+    apply_volume_leveling_to_player(&mut player, &state.db_path, path.as_deref())
+}
+
+#[tauri::command]
+fn play_queue_index(index: usize, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let session = db::load_playback_session(&state.db_path).map_err(|error| error.to_string())?;
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    apply_volume_leveling_to_player(
+        &mut player,
+        &state.db_path,
+        session.queue_paths.get(index).map(String::as_str),
+    )?;
     player
         .play_queue_index(index)
         .map_err(|error| error.to_string())
@@ -525,11 +592,17 @@ async fn run_maintenance(
         emit_log(format!(
             "Removed {} dotfile entr{} from the library database.",
             removed_dotfile_tracks,
-            if removed_dotfile_tracks == 1 { "y" } else { "ies" }
+            if removed_dotfile_tracks == 1 {
+                "y"
+            } else {
+                "ies"
+            }
         ));
 
         if roots.is_empty() {
-            emit_log("No library folders are configured, so there was nothing to rescan.".to_string());
+            emit_log(
+                "No library folders are configured, so there was nothing to rescan.".to_string(),
+            );
         }
 
         for (index, root) in roots.iter().enumerate() {
@@ -588,6 +661,26 @@ async fn run_maintenance(
         ));
 
         Ok(bootstrap)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_loudness_analysis(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    let db_path = state.db_path.clone();
+    let app_handle = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let emit_log = |message: String| {
+            let _ = app_handle.emit("loudness-analysis-log", message);
+        };
+
+        loudness::analyze_library(&db_path, emit_log).map_err(|error| error.to_string())?;
+        db::load_bootstrap(&db_path).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1078,7 +1171,9 @@ pub fn run() {
             set_audio_device,
             get_missing_library_roots,
             set_repeat_mode,
+            apply_volume_leveling_for_track,
             run_maintenance,
+            run_loudness_analysis,
             remove_library_root,
             get_cover_art,
             record_play,

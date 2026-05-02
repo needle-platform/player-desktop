@@ -11,6 +11,8 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Added persistent 1-5 star ratings for tracks across the library, album, and artist views.
 - Added a `Top rated` smart playlist generated from the listener's own track ratings.
 - Added genre-focus pills for smart playlists so listeners can narrow a generated mix to one or more genres already present in that playlist.
+- Added opt-in loudness analysis and volume leveling, with FFmpeg-backed per-track gain stored locally and applied through mpv during playback.
+- Added vinyl-rip tag detection plus a record badge overlay on album artwork for tagged transfers.
 
 ### Changed
 - Licensed the project under `GPL-3.0-only` and added the full license text.
@@ -22,9 +24,11 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Made smart-playlist playback and queue actions respect the currently focused subset instead of always using the full underlying playlist.
 - Removed the redundant sidebar status footer to free more vertical space for growing playlist lists.
 - Tightened sidebar active states so Tracks and playlist highlights only appear when that exact library or playlist view is on screen.
+- Expanded Settings with a background loudness-analysis workflow, live progress logging, and clearer guidance that the first pass can take a while while the app remains usable.
 
 ### Fixed
 - Fixed album-page track clicks so choosing one song plays that track directly instead of queueing the rest of the album.
+- Fixed album-page track-heading spacing so the `Tracks` label has a little breathing room above the list.
 
 ## [0.1.0] - 2026-05-01
 

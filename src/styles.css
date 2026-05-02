@@ -199,6 +199,7 @@ input, select {
 }
 
 .mini-player-artwork {
+  position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -1714,6 +1715,7 @@ input, select {
 .card:hover { transform: translateY(-2px); border-color: var(--accent); }
 
 .card-art {
+  position: relative;
   aspect-ratio: 1 / 1;
   border-radius: 10px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
@@ -1825,6 +1827,7 @@ input, select {
   transform: translateY(1px);
 }
 .cover {
+  position: relative;
   width: 56px;
   height: 56px;
   border-radius: 8px;
@@ -1843,6 +1846,61 @@ input, select {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.vinyl-rip-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, rgba(12, 14, 19, 0.92) 82%, var(--panel));
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 10px 20px -16px rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+}
+
+.vinyl-rip-badge svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.vinyl-rip-badge-img {
+  width: 76%;
+  height: 76%;
+  display: block;
+}
+
+.vinyl-rip-badge-hero {
+  right: 14px;
+  bottom: 14px;
+  width: 42px;
+  height: 42px;
+}
+
+.vinyl-rip-badge-card {
+  width: 30px;
+  height: 30px;
+}
+
+.vinyl-rip-badge-md,
+.vinyl-rip-badge-queue {
+  right: 5px;
+  bottom: 5px;
+  width: 22px;
+  height: 22px;
+}
+
+.vinyl-rip-badge-mini {
+  right: 10px;
+  bottom: 10px;
+  width: 36px;
+  height: 36px;
 }
 
 .card-art {
@@ -3458,6 +3516,7 @@ input, select {
 }
 
 .cover-hero {
+  position: relative;
   width: 100%;
   aspect-ratio: 1 / 1;
   border-radius: 14px;
@@ -3665,6 +3724,10 @@ input, select {
   color: var(--muted);
   cursor: default;
   text-decoration: none;
+}
+
+.album-tracks .section-title {
+  margin-bottom: 12px;
 }
 
 .artist-detail {

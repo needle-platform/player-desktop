@@ -48,6 +48,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
 - **Per-track user star ratings** saved locally and reusable across the app
+- **Opt-in volume leveling** based on local FFmpeg loudness analysis, with per-track gain applied through mpv while leaving your main listening volume untouched
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
 - **Safer startup volume** defaults to 80% to reduce surprise-blast playback on first launch
 - **Animated current-track indicator** in both the main track list and the album track list
@@ -92,8 +93,9 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Albums** with cover art, sorting, and direct playlist actions
 - **Large library browsers** lazily load offscreen covers / portraits and stage media work near the viewport instead of trying to resolve every image at once
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
+- **Vinyl-rip badge support** detects `vinyl-rip` tags from your files and marks matching albums with a small record badge on album artwork
 - **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
-- **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, live equalizer presets, and manual 10-band EQ
+- **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, loudness analysis with live progress output, live equalizer presets, and manual 10-band EQ
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
@@ -196,9 +198,11 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 
 - **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
 - **User ratings** (`rating`) drive a `Top rated` smart playlist built from the stars you assign
+- **Optional loudness analysis** stores LUFS / peak-derived gain data locally so Needle can level mixed queues when you enable volume leveling
 - **Playlist-local genre focus** lets smart playlists keep their generated order while narrowing the current mix to one or more genres already represented in that playlist
 - **Library state** (`play_count = 0`) drives Needs a first spin
 - **Tags** and local overrides (`primary_genre`) drive one top-genre mix when your collection has a clear favorite
+- **Vinyl-rip tags** (for example `vinyl-rip`) can mark your own transfers visually without rewriting how Needle handles the rest of your metadata
 - **Artist enrichment** (`gender` when MusicBrainz provides it) gives future artist-radio style mixes another optional signal without blocking playback when metadata is incomplete
 - **`added_at`** (preserved across rescans) drives the Recently added albums row
 

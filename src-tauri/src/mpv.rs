@@ -74,6 +74,7 @@ pub struct MpvController {
     child: Option<Child>,
     equalizer_preset: EqualizerPreset,
     equalizer_bands: [f32; 10],
+    track_gain_db: Option<f32>,
     #[allow(dead_code)]
     app_handle: Option<AppHandle>,
     #[allow(dead_code)]
@@ -92,6 +93,7 @@ impl MpvController {
             child: None,
             equalizer_preset,
             equalizer_bands,
+            track_gain_db: None,
             app_handle: None,
             listener_active: Arc::new(AtomicBool::new(false)),
         }
@@ -112,7 +114,20 @@ impl MpvController {
 
         let mut stream = UnixStream::connect(&self.socket_path)
             .context("Unable to connect to mpv IPC socket")?;
-        self.apply_equalizer(&mut stream)
+        self.apply_audio_filters(&mut stream)
+    }
+
+    pub fn set_track_gain_db(&mut self, gain_db: Option<f32>) -> Result<()> {
+        self.track_gain_db = normalize_track_gain(gain_db);
+        self.refresh_child_state()?;
+
+        if !self.socket_path.exists() {
+            return Ok(());
+        }
+
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .context("Unable to connect to mpv IPC socket")?;
+        self.apply_audio_filters(&mut stream)
     }
 
     pub fn play(&mut self, path: &str) -> Result<()> {
@@ -340,7 +355,7 @@ impl MpvController {
         })?;
 
         self.start_listener();
-        self.apply_equalizer(&mut stream)?;
+        self.apply_audio_filters(&mut stream)?;
 
         Ok(stream)
     }
@@ -387,8 +402,12 @@ impl MpvController {
         )
     }
 
-    fn apply_equalizer(&self, stream: &mut UnixStream) -> Result<()> {
-        let command = match equalizer_filter_value(&self.equalizer_preset, &self.equalizer_bands) {
+    fn apply_audio_filters(&self, stream: &mut UnixStream) -> Result<()> {
+        let command = match audio_filter_value(
+            self.track_gain_db,
+            &self.equalizer_preset,
+            &self.equalizer_bands,
+        ) {
             Some(graph) => json!({ "command": ["set_property", "af", format!("lavfi=[{graph}]")] }),
             None => json!({ "command": ["set_property", "af", []] }),
         };
@@ -664,6 +683,25 @@ fn resolve_mpv_binary() -> Option<PathBuf> {
     None
 }
 
+fn audio_filter_value(
+    track_gain_db: Option<f32>,
+    preset: &EqualizerPreset,
+    manual_bands: &[f32; 10],
+) -> Option<String> {
+    let mut filters = Vec::new();
+    if let Some(gain_db) = normalize_track_gain(track_gain_db) {
+        filters.push(format!("volume={gain_db:.2}dB"));
+    }
+    if let Some(graph) = equalizer_filter_value(preset, manual_bands) {
+        filters.push(graph);
+    }
+    if filters.is_empty() {
+        None
+    } else {
+        Some(filters.join(","))
+    }
+}
+
 fn equalizer_filter_value(preset: &EqualizerPreset, manual_bands: &[f32; 10]) -> Option<String> {
     let bands = match preset {
         EqualizerPreset::Flat => return None,
@@ -689,4 +727,14 @@ fn equalizer_filter_value(preset: &EqualizerPreset, manual_bands: &[f32; 10]) ->
         "volume={preamp:.1}dB,firequalizer=gain_entry='{}':delay=0.05:accuracy=4:zero_phase=on",
         entries.join(";")
     ))
+}
+
+fn normalize_track_gain(gain_db: Option<f32>) -> Option<f32> {
+    gain_db.and_then(|value| {
+        if value.is_finite() && value.abs() >= 0.05 {
+            Some(value.clamp(-24.0, 24.0))
+        } else {
+            None
+        }
+    })
 }

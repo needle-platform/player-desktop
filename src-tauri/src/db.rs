@@ -7,8 +7,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::artist::ArtistGender;
 use crate::models::{
     default_equalizer_bands, default_tracks_page_size, AppSettings, BootstrapPayload,
-    EqualizerPreset, LibraryData, PlaybackSession, SavedPlaylist, SavedPlaylistRule,
-    ThemeMode, Track, TrackMetadataOverride,
+    EqualizerPreset, LibraryData, PlaybackSession, SavedPlaylist, SavedPlaylistRule, ThemeMode,
+    Track, TrackMetadataOverride,
 };
 
 fn normalize_hex_color(value: &str) -> Option<String> {
@@ -18,6 +18,23 @@ fn normalize_hex_color(value: &str) -> Option<String> {
         return None;
     }
     Some(format!("#{}", hex.to_ascii_lowercase()))
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackLoudnessAnalysisCandidate {
+    pub path: String,
+    pub cached_file_size: Option<i64>,
+    pub cached_file_modified_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackLoudnessAnalysisRecord {
+    pub path: String,
+    pub integrated_lufs: f32,
+    pub true_peak_db: f32,
+    pub target_gain_db: f32,
+    pub file_size: i64,
+    pub file_modified_at: i64,
 }
 
 pub fn init_database(db_path: &Path) -> Result<()> {
@@ -39,6 +56,7 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             disc_number INTEGER,
             track_number INTEGER,
             genre TEXT,
+            is_vinyl_rip INTEGER NOT NULL DEFAULT 0,
             year INTEGER,
             added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             play_count INTEGER NOT NULL DEFAULT 0,
@@ -121,6 +139,16 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             source TEXT NOT NULL DEFAULT 'musicbrainz',
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS track_loudness (
+            track_path TEXT PRIMARY KEY,
+            integrated_lufs REAL NOT NULL,
+            true_peak_db REAL NOT NULL,
+            target_gain_db REAL NOT NULL,
+            file_size INTEGER NOT NULL,
+            file_modified_at INTEGER NOT NULL,
+            analyzed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         ",
     )?;
 
@@ -139,8 +167,16 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             serde_json::to_string(&default_equalizer_bands())?
         ],
     )?;
+    connection.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+        params!["volume_leveling_enabled", "0"],
+    )?;
 
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN genre TEXT", []);
+    let _ = connection.execute(
+        "ALTER TABLE tracks ADD COLUMN is_vinyl_rip INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN year INTEGER", []);
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN album_artist TEXT", []);
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN disc_number INTEGER", []);
@@ -219,9 +255,32 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
         .filter(|value| matches!(*value, 25 | 50 | 100))
         .unwrap_or_else(default_tracks_page_size);
 
+    let volume_leveling_enabled = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'volume_leveling_enabled'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+
     let last_maintenance_at = connection
         .query_row(
             "SELECT value FROM settings WHERE key = 'last_maintenance_at'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    let last_loudness_analysis_at = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'last_loudness_analysis_at'",
             [],
             |row| row.get::<_, String>(0),
         )
@@ -250,8 +309,10 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
             _ => EqualizerPreset::Flat,
         },
         equalizer_bands,
+        volume_leveling_enabled,
         tracks_page_size,
         last_maintenance_at,
+        last_loudness_analysis_at,
         library_roots,
     })
 }
@@ -301,6 +362,19 @@ pub fn save_settings(db_path: &Path, settings: &AppSettings) -> Result<AppSettin
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![
+            "volume_leveling_enabled",
+            if settings.volume_leveling_enabled {
+                "1"
+            } else {
+                "0"
+            }
+        ],
+    )?;
+
+    connection.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![
             "tracks_page_size",
             match settings.tracks_page_size {
                 25 | 50 | 100 => settings.tracks_page_size,
@@ -340,6 +414,16 @@ pub fn record_maintenance_run(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn record_loudness_analysis_run(db_path: &Path) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params!["last_loudness_analysis_at"],
+    )?;
+    Ok(())
+}
+
 pub fn list_library_roots(db_path: &Path) -> Result<Vec<String>> {
     let connection = Connection::open(db_path)?;
     let mut stmt = connection.prepare("SELECT path FROM library_roots ORDER BY path ASC")?;
@@ -360,6 +444,7 @@ pub fn remove_library_root(db_path: &Path, folder: &str) -> Result<()> {
     transaction.execute("DELETE FROM library_roots WHERE path = ?1", params![folder])?;
     prune_orphaned_track_metadata_overrides_tx(&transaction)?;
     prune_orphaned_playlist_tracks_tx(&transaction)?;
+    prune_orphaned_track_loudness_tx(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
@@ -370,6 +455,7 @@ pub fn purge_dotfile_tracks(db_path: &Path) -> Result<usize> {
     let removed = transaction.execute("DELETE FROM tracks WHERE path LIKE '%/.%'", [])?;
     prune_orphaned_track_metadata_overrides_tx(&transaction)?;
     prune_orphaned_playlist_tracks_tx(&transaction)?;
+    prune_orphaned_track_loudness_tx(&transaction)?;
     transaction.commit()?;
     Ok(removed)
 }
@@ -416,9 +502,10 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
                 disc_number,
                 track_number,
                 genre,
+                is_vinyl_rip,
                 year,
                 added_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, CURRENT_TIMESTAMP)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, CURRENT_TIMESTAMP)
             ON CONFLICT(path) DO UPDATE SET
                 title = excluded.title,
                 artist = excluded.artist,
@@ -431,6 +518,7 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
                 disc_number = excluded.disc_number,
                 track_number = excluded.track_number,
                 genre = excluded.genre,
+                is_vinyl_rip = excluded.is_vinyl_rip,
                 year = excluded.year
             ",
             params![
@@ -446,6 +534,7 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
                 track.disc_number,
                 track.track_number,
                 track.genre,
+                if track.is_vinyl_rip { 1 } else { 0 },
                 track.year,
             ],
         )?;
@@ -453,6 +542,7 @@ pub fn replace_tracks(db_path: &Path, folder: &str, tracks: &[Track]) -> Result<
 
     prune_orphaned_playlist_tracks_tx(&transaction)?;
     prune_orphaned_track_metadata_overrides_tx(&transaction)?;
+    prune_orphaned_track_loudness_tx(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
@@ -485,6 +575,7 @@ pub fn load_album_tracks_for_match(
                COALESCE(tmo.track_number, t.track_number) AS track_number,
                t.genre,
                apg.primary_genre,
+               t.is_vinyl_rip,
                COALESCE(tmo.year, t.year) AS year,
                t.added_at,
                t.play_count,
@@ -522,11 +613,12 @@ pub fn load_album_tracks_for_match(
                 track_number: row.get(11)?,
                 genre: row.get(12)?,
                 primary_genre: row.get(13)?,
-                year: row.get(14)?,
-                added_at: row.get(15)?,
-                play_count: row.get::<_, i64>(16)?,
-                last_played_at: row.get(17)?,
-                rating: row.get(18)?,
+                is_vinyl_rip: row.get::<_, i64>(14)? != 0,
+                year: row.get(15)?,
+                added_at: row.get(16)?,
+                play_count: row.get::<_, i64>(17)?,
+                last_played_at: row.get(18)?,
+                rating: row.get(19)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -781,6 +873,94 @@ pub fn set_track_rating(db_path: &Path, path: &str, rating: Option<i64>) -> Resu
         bail!("Track not found");
     }
 
+    Ok(())
+}
+
+pub fn get_track_loudness_gain(db_path: &Path, path: &str) -> Result<Option<f32>> {
+    let connection = Connection::open(db_path)?;
+    connection
+        .query_row(
+            "SELECT target_gain_db FROM track_loudness WHERE track_path = ?1",
+            params![path],
+            |row| row.get::<_, f32>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+pub fn list_tracks_for_loudness_analysis(
+    db_path: &Path,
+) -> Result<Vec<TrackLoudnessAnalysisCandidate>> {
+    let connection = Connection::open(db_path)?;
+    let mut statement = connection.prepare(
+        "
+        SELECT t.path,
+               tl.file_size,
+               tl.file_modified_at
+        FROM tracks t
+        LEFT JOIN track_loudness tl ON tl.track_path = t.path
+        ORDER BY t.path
+        ",
+    )?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(TrackLoudnessAnalysisCandidate {
+                path: row.get(0)?,
+                cached_file_size: row.get(1)?,
+                cached_file_modified_at: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)?;
+
+    Ok(rows)
+}
+
+pub fn save_track_loudness_records(
+    db_path: &Path,
+    records: &[TrackLoudnessAnalysisRecord],
+) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    let mut statement = transaction.prepare(
+        "
+        INSERT INTO track_loudness (
+            track_path,
+            integrated_lufs,
+            true_peak_db,
+            target_gain_db,
+            file_size,
+            file_modified_at,
+            analyzed_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)
+        ON CONFLICT(track_path) DO UPDATE SET
+            integrated_lufs = excluded.integrated_lufs,
+            true_peak_db = excluded.true_peak_db,
+            target_gain_db = excluded.target_gain_db,
+            file_size = excluded.file_size,
+            file_modified_at = excluded.file_modified_at,
+            analyzed_at = excluded.analyzed_at
+        ",
+    )?;
+
+    for record in records {
+        statement.execute(params![
+            record.path,
+            record.integrated_lufs,
+            record.true_peak_db,
+            record.target_gain_db,
+            record.file_size,
+            record.file_modified_at,
+        ])?;
+    }
+
+    drop(statement);
+    transaction.commit()?;
     Ok(())
 }
 
@@ -1065,6 +1245,7 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                COALESCE(tmo.track_number, t.track_number) AS track_number,
                t.genre,
                apg.primary_genre,
+               t.is_vinyl_rip,
                COALESCE(tmo.year, t.year) AS year,
                t.added_at,
                t.play_count,
@@ -1103,11 +1284,12 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                 track_number: row.get(11)?,
                 genre: row.get(12)?,
                 primary_genre: row.get(13)?,
-                year: row.get(14)?,
-                added_at: row.get(15)?,
-                play_count: row.get::<_, i64>(16)?,
-                last_played_at: row.get(17)?,
-                rating: row.get(18)?,
+                is_vinyl_rip: row.get::<_, i64>(14)? != 0,
+                year: row.get(15)?,
+                added_at: row.get(16)?,
+                play_count: row.get::<_, i64>(17)?,
+                last_played_at: row.get(18)?,
+                rating: row.get(19)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1248,9 +1430,18 @@ fn validate_playlist_rule(rule: &SavedPlaylistRule) -> Result<()> {
             year_from,
             year_to,
         } => {
-            let has_search = search.as_deref().map(str::trim).is_some_and(|value| !value.is_empty());
-            let has_artist = artist.as_deref().map(str::trim).is_some_and(|value| !value.is_empty());
-            let has_genre = genre.as_deref().map(str::trim).is_some_and(|value| !value.is_empty());
+            let has_search = search
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+            let has_artist = artist
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+            let has_genre = genre
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
             let has_year = year_from.is_some() || year_to.is_some();
             if !has_search && !has_artist && !has_genre && !has_year {
                 bail!("Auto-updating playlists need at least one filter");
@@ -1331,23 +1522,36 @@ fn track_paths_for_playlist_rule(
             year_from,
             year_to,
         } => {
-            if let Some(query) = search.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(query) = search
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
                 let query_lower = query.to_lowercase();
-                let matches_search = [title, artist_value, album].into_iter().flatten().any(|value| {
-                    value.to_lowercase().contains(&query_lower)
-                });
+                let matches_search = [title, artist_value, album]
+                    .into_iter()
+                    .flatten()
+                    .any(|value| value.to_lowercase().contains(&query_lower));
                 if !matches_search {
                     return false;
                 }
             }
 
-            if let Some(expected_artist) = artist.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(expected_artist) = artist
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
                 if artist_value != Some(expected_artist) {
                     return false;
                 }
             }
 
-            if let Some(expected_genre) = genre.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(expected_genre) = genre
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
                 let Some(current_genre) = genre_value else {
                     return false;
                 };
@@ -1395,6 +1599,7 @@ fn prune_orphaned_playlist_tracks(connection: &mut Connection) -> Result<()> {
     let transaction = connection.transaction()?;
     prune_orphaned_playlist_tracks_tx(&transaction)?;
     prune_orphaned_track_metadata_overrides_tx(&transaction)?;
+    prune_orphaned_track_loudness_tx(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
@@ -1412,6 +1617,14 @@ fn prune_orphaned_track_metadata_overrides_tx(
 ) -> Result<()> {
     transaction.execute(
         "DELETE FROM track_metadata_overrides WHERE track_path NOT IN (SELECT path FROM tracks)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn prune_orphaned_track_loudness_tx(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM track_loudness WHERE track_path NOT IN (SELECT path FROM tracks)",
         [],
     )?;
     Ok(())

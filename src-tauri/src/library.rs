@@ -56,6 +56,7 @@ fn read_track(path: &Path) -> Track {
     let mut disc_number = None;
     let mut track_number = None;
     let mut genre = None;
+    let mut is_vinyl_rip = false;
     let mut year = None;
 
     if let Ok(tagged_file) = Probe::open(path).and_then(|probe| probe.read()) {
@@ -79,6 +80,7 @@ fn read_track(path: &Path) -> Track {
             disc_number = tag.disk().map(|value| value as i64);
             track_number = tag.track().map(|value| value as i64);
             genre = tag.genre().map(|value| value.to_string());
+            is_vinyl_rip = tag_marks_vinyl_rip(tag);
             year = tag.year().map(|value| value as i64);
         }
     }
@@ -109,12 +111,41 @@ fn read_track(path: &Path) -> Track {
         track_number,
         genre,
         primary_genre: None,
+        is_vinyl_rip,
         year,
         added_at: None,
         play_count: 0,
         last_played_at: None,
         rating: None,
     }
+}
+
+fn tag_marks_vinyl_rip(tag: &lofty::tag::Tag) -> bool {
+    tag.items().any(|item| {
+        let matches_key = match item.key() {
+            ItemKey::PodcastKeywords | ItemKey::Comment => true,
+            ItemKey::Unknown(key) => {
+                let normalized = key.trim().to_ascii_lowercase();
+                normalized == "tags" || normalized == "tag" || normalized == "keywords"
+            }
+            _ => false,
+        };
+
+        matches_key && item.value().text().is_some_and(value_marks_vinyl_rip)
+    })
+}
+
+fn value_marks_vinyl_rip(value: &str) -> bool {
+    value
+        .split(|ch| matches!(ch, ',' | ';' | '/' | '|'))
+        .map(str::trim)
+        .any(|part| {
+            let normalized = part.to_ascii_lowercase();
+            matches!(
+                normalized.as_str(),
+                "vinyl" | "vinyl-rip" | "needledrop" | "needle-drop"
+            )
+        })
 }
 
 fn is_supported_audio_file(path: &Path) -> bool {

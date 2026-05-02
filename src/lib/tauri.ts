@@ -69,7 +69,12 @@ export const setAudioDevice = (deviceName: string) =>
 export const setRepeatMode = (repeatMode: RepeatMode) =>
   invoke<void>('set_repeat_mode', { repeatMode });
 
+export const applyVolumeLevelingForTrack = (path: string | null) =>
+  invoke<void>('apply_volume_leveling_for_track', { path });
+
 export const runMaintenance = () => invoke<BootstrapPayload>('run_maintenance');
+
+export const runLoudnessAnalysis = () => invoke<BootstrapPayload>('run_loudness_analysis');
 
 export const removeLibraryRoot = (folder: string) =>
   invoke<BootstrapPayload>('remove_library_root', { folder });

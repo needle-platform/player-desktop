@@ -47,6 +47,8 @@ pub struct Track {
     pub track_number: Option<i64>,
     pub genre: Option<String>,
     pub primary_genre: Option<String>,
+    #[serde(default)]
+    pub is_vinyl_rip: bool,
     pub year: Option<i64>,
     pub added_at: Option<String>,
     pub play_count: i64,
@@ -87,10 +89,14 @@ pub struct AppSettings {
     pub equalizer_preset: EqualizerPreset,
     #[serde(default = "default_equalizer_bands")]
     pub equalizer_bands: [f32; 10],
+    #[serde(default)]
+    pub volume_leveling_enabled: bool,
     #[serde(default = "default_tracks_page_size")]
     pub tracks_page_size: u32,
     #[serde(default)]
     pub last_maintenance_at: Option<String>,
+    #[serde(default)]
+    pub last_loudness_analysis_at: Option<String>,
     pub library_roots: Vec<String>,
 }
 

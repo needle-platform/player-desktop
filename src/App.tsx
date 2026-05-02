@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { CSSProperties, RefObject } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  applyVolumeLevelingForTrack,
   appendTracksToPlaylist,
   appendQueue,
   bootstrapApp,
@@ -36,6 +37,7 @@ import {
   setRepeatMode as tauriSetRepeatMode,
   saveSettings,
   savePlaybackSession,
+  runLoudnessAnalysis,
   scanLibrary,
   seekPlayback,
   stopPlayback,
@@ -61,6 +63,7 @@ import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
 import dashboardIdleBackdrop from './assets/bg.jpg';
 import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
+import vinylRipBadgeIcon from './assets/vinyl-rip-badge.svg';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'artist' | 'settings';
 type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: number };
@@ -124,6 +127,7 @@ type AlbumSummary = {
   year: number | null;
   count: number;
   samplePath: string;
+  is_vinyl_rip: boolean;
   addedAt: string | null;
 };
 type ArtistSummary = {
@@ -987,6 +991,8 @@ function App() {
   const [selectedSmartPlaylistGenres, setSelectedSmartPlaylistGenres] = useState<string[]>([]);
   const [isMaintenanceRunning, setIsMaintenanceRunning] = useState(false);
   const [maintenanceLog, setMaintenanceLog] = useState<string[]>([]);
+  const [isLoudnessAnalysisRunning, setIsLoudnessAnalysisRunning] = useState(false);
+  const [loudnessAnalysisLog, setLoudnessAnalysisLog] = useState<string[]>([]);
   const [missingLibraryRoots, setMissingLibraryRoots] = useState<string[]>([]);
   const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
   const [status, setStatus] = useState('');
@@ -1408,6 +1414,31 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const dispose = await listen<string>('loudness-analysis-log', (event) => {
+        const message = typeof event.payload === 'string' ? event.payload.trim() : '';
+        if (!message) {
+          return;
+        }
+
+        setLoudnessAnalysisLog((current) => [...current.slice(-79), formatMaintenanceLogLine(message)]);
+      });
+      if (cancelled) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(miniPlayerPinnedStorageKey, String(isMiniPlayerPinned));
   }, [isMiniPlayerPinned]);
@@ -1512,6 +1543,31 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = effectiveTheme;
   }, [effectiveTheme]);
+
+  useEffect(() => {
+    if (!data) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        await applyVolumeLevelingForTrack(currentPath);
+      } catch (error) {
+        if (!cancelled) {
+          setStatus(error instanceof Error ? error.message : String(error));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    currentPath,
+    data?.settings.last_loudness_analysis_at,
+    data?.settings.volume_leveling_enabled,
+  ]);
 
   useEffect(() => {
     const rootStyle = document.documentElement.style;
@@ -1893,6 +1949,9 @@ function App() {
         if (existing.year == null && t.year != null) {
           existing.year = t.year;
         }
+        if (t.is_vinyl_rip) {
+          existing.is_vinyl_rip = true;
+        }
       } else {
         map.set(key, {
           key,
@@ -1901,6 +1960,7 @@ function App() {
           year: t.year ?? null,
           count: 1,
           samplePath: t.path,
+          is_vinyl_rip: t.is_vinyl_rip,
           addedAt: t.added_at ?? null,
         });
       }
@@ -2250,6 +2310,28 @@ function App() {
       setStatus(message);
     } finally {
       setIsMaintenanceRunning(false);
+      setBusy(null);
+    }
+  };
+
+  const analyzeLoudness = async () => {
+    try {
+      setIsLoudnessAnalysisRunning(true);
+      setLoudnessAnalysisLog([formatMaintenanceLogLine('Queued loudness analysis…')]);
+      setBusy('Analyzing loudness…');
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      const next = await runLoudnessAnalysis();
+      setData(next);
+      setStatus('Volume leveling analysis finished');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLoudnessAnalysisLog((current) => [
+        ...current.slice(-79),
+        formatMaintenanceLogLine(`Loudness analysis failed · ${message}`),
+      ]);
+      setStatus(message);
+    } finally {
+      setIsLoudnessAnalysisRunning(false);
       setBusy(null);
     }
   };
@@ -3798,6 +3880,7 @@ function App() {
             album={selectedAlbumSummary.album}
             albumKey={selectedAlbum}
             albumArtist={selectedAlbumSummary.artist}
+            isVinylRip={selectedAlbumSummary.is_vinyl_rip}
             tracks={allTracks}
             isMetadataRefreshing={metadataRefreshAlbumKey === selectedAlbum}
             currentPath={currentPath}
@@ -3958,10 +4041,13 @@ function App() {
             onChange={updateSettings}
             onAddFolder={importFolder}
             onMaintenance={maintenance}
+            onLoudnessAnalysis={analyzeLoudness}
             onRemoveRoot={removeRoot}
             busy={!!busy}
             maintenanceBusy={isMaintenanceRunning}
             maintenanceLog={maintenanceLog}
+            loudnessAnalysisBusy={isLoudnessAnalysisRunning}
+            loudnessAnalysisLog={loudnessAnalysisLog}
             missingLibraryRoots={missingLibraryRoots}
           />
         )}
@@ -5552,6 +5638,7 @@ interface AlbumDetailViewProps {
   album: string;
   albumKey: string;
   albumArtist: string | null;
+  isVinylRip: boolean;
   tracks: Track[];
   isMetadataRefreshing: boolean;
   currentPath: string | null;
@@ -5579,6 +5666,7 @@ function AlbumDetailView({
   album,
   albumKey,
   albumArtist,
+  isVinylRip,
   tracks,
   isMetadataRefreshing,
   currentPath,
@@ -5749,6 +5837,7 @@ function AlbumDetailView({
             trackPath={samplePath}
             fallback={album[0]?.toUpperCase() ?? '◉'}
             size="hero"
+            vinylRip={isVinylRip}
           />
           {isMetadataRefreshing && (
             <div className="artist-image-refresh-overlay" aria-hidden="true">
@@ -6254,6 +6343,7 @@ function ArtistDetailView({
                     trackPath={album.samplePath}
                     fallback={album.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
+                    vinylRip={album.is_vinyl_rip}
                   />
                   <div className="card-title">{album.album}</div>
                   <div className="card-sub">{album.year ?? relativeAdded(album.addedAt)}</div>
@@ -6454,6 +6544,7 @@ function AlbumsView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
+                    vinylRip={a.is_vinyl_rip}
                     imageMode="deferred"
                     lazyLoad
                   />
@@ -6499,11 +6590,19 @@ interface CoverProps {
   trackPath: string | null;
   fallback: string;
   size: 'md' | 'card' | 'hero' | 'queue' | 'mini';
+  vinylRip?: boolean;
   imageMode?: 'default' | 'cache_only' | 'deferred';
   lazyLoad?: boolean;
 }
 
-function Cover({ trackPath, fallback, size, imageMode = 'default', lazyLoad = false }: CoverProps) {
+function Cover({
+  trackPath,
+  fallback,
+  size,
+  vinylRip = false,
+  imageMode = 'default',
+  lazyLoad = false,
+}: CoverProps) {
   const { ref, isNearViewport } = useNearViewport(lazyLoad);
   const url = useCoverArt(trackPath, {
     cacheOnly: imageMode === 'cache_only',
@@ -6525,6 +6624,7 @@ function Cover({ trackPath, fallback, size, imageMode = 'default', lazyLoad = fa
     return (
       <div className={className} ref={ref}>
         <img src={url} alt="" className="cover-img" />
+        {vinylRip && <VinylRipBadge size={size} />}
       </div>
     );
   }
@@ -6532,7 +6632,16 @@ function Cover({ trackPath, fallback, size, imageMode = 'default', lazyLoad = fa
   return (
     <div className={className} ref={ref}>
       {fallback}
+      {vinylRip && <VinylRipBadge size={size} />}
     </div>
+  );
+}
+
+function VinylRipBadge({ size }: { size: CoverProps['size'] }) {
+  return (
+    <span className={`vinyl-rip-badge vinyl-rip-badge-${size}`} title="Vinyl rip" aria-label="Vinyl rip">
+      <img src={vinylRipBadgeIcon} alt="" className="vinyl-rip-badge-img" />
+    </span>
   );
 }
 
@@ -6765,10 +6874,13 @@ interface SettingsViewProps {
   onChange: (next: AppSettings) => void;
   onAddFolder: () => void;
   onMaintenance: () => void;
+  onLoudnessAnalysis: () => void;
   onRemoveRoot: (folder: string) => void;
   busy: boolean;
   maintenanceBusy: boolean;
   maintenanceLog: string[];
+  loudnessAnalysisBusy: boolean;
+  loudnessAnalysisLog: string[];
   missingLibraryRoots: string[];
 }
 
@@ -6778,19 +6890,24 @@ function SettingsView({
   onChange,
   onAddFolder,
   onMaintenance,
+  onLoudnessAnalysis,
   onRemoveRoot,
   busy,
   maintenanceBusy,
   maintenanceLog,
+  loudnessAnalysisBusy,
+  loudnessAnalysisLog,
   missingLibraryRoots,
 }: SettingsViewProps) {
   const isManualEqualizer = settings.equalizer_preset === 'manual';
   const accentColorValue = normalizeAccentColor(settings.accent_color) ?? currentAccentColor;
   const lastMaintenanceLabel = formatMaintenanceTimestamp(settings.last_maintenance_at);
+  const lastLoudnessAnalysisLabel = formatMaintenanceTimestamp(settings.last_loudness_analysis_at);
   const [manualBandsDraft, setManualBandsDraft] = useState(() =>
     normalizeEqualizerBands(settings.equalizer_bands),
   );
   const maintenanceLogRef = useRef<HTMLDivElement | null>(null);
+  const loudnessAnalysisLogRef = useRef<HTMLDivElement | null>(null);
   const missingRootsSet = useMemo(() => new Set(missingLibraryRoots), [missingLibraryRoots]);
 
   useEffect(() => {
@@ -6805,6 +6922,15 @@ function SettingsView({
 
     node.scrollTop = node.scrollHeight;
   }, [maintenanceLog]);
+
+  useEffect(() => {
+    const node = loudnessAnalysisLogRef.current;
+    if (!node) {
+      return;
+    }
+
+    node.scrollTop = node.scrollHeight;
+  }, [loudnessAnalysisLog]);
 
   const equalizerBands = isManualEqualizer ? manualBandsDraft : displayedEqualizerBands(settings);
 
@@ -7096,6 +7222,80 @@ function SettingsView({
           </div>
           <div className="settings-row">
             <div className="settings-row-copy">
+              <label className="settings-label">Volume leveling</label>
+              <p className="settings-hint">
+                Analyze your library once, then let Needle nudge mixed queues toward a steadier loudness without changing your main listening volume.
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <div className="seg">
+                {[
+                  { value: false, label: 'Off' },
+                  { value: true, label: 'On' },
+                ].map((opt) => (
+                  <button
+                    key={String(opt.value)}
+                    className={`seg-btn ${settings.volume_leveling_enabled === opt.value ? 'on' : ''}`}
+                    onClick={() => onChange({ ...settings, volume_leveling_enabled: opt.value })}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="settings-row settings-row-block">
+            <div className="settings-row-copy">
+              <label className="settings-label">Loudness analysis</label>
+              <p className="settings-hint">
+                Runs a local FFmpeg pass across your library, stores LUFS and peak data in Needle’s database, and only re-checks files that changed.
+              </p>
+              <p className="settings-hint">
+                It keeps running while you browse or play music. The first pass can take a while on larger libraries, but later runs only revisit changed files.
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <button
+                className="primary settings-maintenance-button"
+                onClick={onLoudnessAnalysis}
+                disabled={busy}
+              >
+                <span
+                  className={`settings-maintenance-icon ${loudnessAnalysisBusy ? 'is-spinning' : ''}`}
+                  aria-hidden="true"
+                >
+                  ↻
+                </span>
+                <span>{loudnessAnalysisBusy ? 'Analyzing loudness…' : 'Analyze library'}</span>
+              </button>
+            </div>
+            <div className="settings-maintenance-meta">
+              {lastLoudnessAnalysisLabel
+                ? `Last run ${lastLoudnessAnalysisLabel}`
+                : 'No loudness analysis recorded yet.'}
+            </div>
+            <div
+              className={`settings-maintenance-console ${loudnessAnalysisBusy ? 'is-live' : ''}`}
+              aria-live="polite"
+              aria-busy={loudnessAnalysisBusy}
+            >
+              {loudnessAnalysisLog.length === 0 ? (
+                <div className="settings-maintenance-empty">
+                  No loudness analysis yet. The next run will stream its progress here.
+                </div>
+              ) : (
+                <div className="settings-maintenance-log" ref={loudnessAnalysisLogRef}>
+                  {loudnessAnalysisLog.map((line, index) => (
+                    <div key={`${index}-${line}`} className="settings-maintenance-line">
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
               <label className="settings-label">Backend</label>
               <p className="settings-hint">
                 On macOS install it with <code>brew install mpv</code> if it is not already available.
@@ -7278,6 +7478,7 @@ function DashboardView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
+                    vinylRip={a.is_vinyl_rip}
                     imageMode="deferred"
                     lazyLoad
                   />
@@ -7372,6 +7573,7 @@ function DashboardView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
+                    vinylRip={a.is_vinyl_rip}
                     imageMode="deferred"
                     lazyLoad
                   />

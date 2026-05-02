@@ -26,6 +26,7 @@ export interface Track {
   track_number: number | null;
   genre: string | null;
   primary_genre: string | null;
+  is_vinyl_rip: boolean;
   year: number | null;
   added_at: string | null;
   play_count: number;
@@ -45,8 +46,10 @@ export interface AppSettings {
   accent_color: string | null;
   equalizer_preset: EqualizerPreset;
   equalizer_bands: number[];
+  volume_leveling_enabled: boolean;
   tracks_page_size: number;
   last_maintenance_at: string | null;
+  last_loudness_analysis_at: string | null;
   library_roots: string[];
 }
 
