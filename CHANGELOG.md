@@ -21,6 +21,9 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Made smart-playlist playback and queue actions respect the currently focused subset instead of always using the full underlying playlist.
 - Tightened sidebar active states so Tracks and playlist highlights only appear when that exact library or playlist view is on screen.
 
+### Fixed
+- Fixed album-page track clicks so choosing one song plays that track directly instead of queueing the rest of the album.
+
 ## [0.1.0] - 2026-05-01
 
 ### Added

@@ -2840,20 +2840,6 @@ function App() {
     });
   };
 
-  const playAlbumFromTrack = (albumKeyValue: string, track: Track) => {
-    const tracks = tracksForAlbum(albumKeyValue);
-    const startIndex = tracks.findIndex((t) => t.path === track.path);
-    const baseTracks = startIndex >= 0 ? tracks.slice(startIndex) : [track];
-    const queue = shuffleEnabled
-      ? [track, ...shuffleList(baseTracks.filter((item) => item.path !== track.path))]
-      : baseTracks;
-    void playQueue(queue, `Playing album · ${albumTitleFromKey(albumKeyValue)}`, {
-      baseTracks,
-      currentPath: track.path,
-      shuffle: shuffleEnabled,
-    });
-  };
-
   const tracksForArtist = (artistName: string, mode: ArtistBrowseMode = 'all') =>
     allTracks.filter((track) => artistNameForTrack(track, mode) === artistName);
   const topTracksForArtist = (artistName: string, mode: ArtistBrowseMode = 'all') =>
@@ -3822,7 +3808,7 @@ function App() {
               setSelectedAlbum(null);
               setView(albumReturnView.current);
             }}
-            onPlayTrack={(track) => playAlbumFromTrack(selectedAlbum, track)}
+            onPlayTrack={play}
             onPlayNext={playNext}
             onAddToQueue={addToQueue}
             onPlayAlbumNext={() => playAlbumNext(selectedAlbum)}
