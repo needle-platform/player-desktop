@@ -154,8 +154,7 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
         compareTimestamps(a.added_at, b.added_at, 'asc') ||
         (a.album ?? '').localeCompare(b.album ?? '') ||
         a.title.localeCompare(b.title),
-    )
-    .slice(0, 50);
+    );
   if (needsFirstSpin.length >= 5) {
     playlists.push({
       id: 'library:first-spin',

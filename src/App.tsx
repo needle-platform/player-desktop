@@ -3491,101 +3491,101 @@ function App() {
           </div>
         </div>
 
-        <nav className="nav-section">
-          <div className="nav-label">Browse</div>
-          <button
-            className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
-            onClick={() => setView('dashboard')}
-          >
-            <span className="nav-icon">⌂</span>Dashboard
-          </button>
-          <button
-            className={`nav-item ${view === 'tracks' && !selectedPlaylist ? 'active' : ''}`}
-            onClick={() => {
-              setView('tracks');
-              clearBrowsingFilters();
-            }}
-          >
-            <span className="nav-icon">♪</span>Tracks
-            <span className="nav-count">{lib.track_count}</span>
-          </button>
-          <button
-            className={`nav-item ${view === 'albums' ? 'active' : ''}`}
-            onClick={() => setView('albums')}
-          >
-            <span className="nav-icon">◉</span>Albums
-            <span className="nav-count">{lib.album_count}</span>
-          </button>
-          <button
-            className={`nav-item ${view === 'artists' ? 'active' : ''}`}
-            onClick={() => setView('artists')}
-          >
-            <span className="nav-icon">☻</span>Artists
-            <span className="nav-count">{lib.artist_count}</span>
-          </button>
-        </nav>
-
-        <nav className="nav-section">
-          <div className="nav-label">Playlists</div>
-          <button className="nav-button" onClick={() => openPlaylistTarget([])}>
-            + New playlist
-          </button>
-          <div className="nav-sub-label">Saved</div>
-          {manualPlaylists.length === 0 && <div className="nav-empty">No saved playlists yet</div>}
-          {manualPlaylists.map((playlist) => (
+        <div className="sidebar-scroll">
+          <nav className="nav-section">
+            <div className="nav-label">Browse</div>
             <button
-              key={playlist.id}
-              className={`nav-item nav-item-compact ${
-                view === 'tracks' && selectedPlaylist?.kind === 'manual' && selectedPlaylist.id === playlist.id
-                  ? 'active'
-                  : ''
-              }`}
+              className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
+              onClick={() => setView('dashboard')}
+            >
+              <span className="nav-icon">⌂</span>Dashboard
+            </button>
+            <button
+              className={`nav-item ${view === 'tracks' && !selectedPlaylist ? 'active' : ''}`}
               onClick={() => {
-                setSelectedPlaylist({ kind: 'manual', id: playlist.id });
-                setSelectedAlbum(null);
-                setSelectedArtist(null);
                 setView('tracks');
+                clearBrowsingFilters();
               }}
             >
-              <span className="nav-icon">{playlist.rule ? '↻' : '≣'}</span>
-              <span className="nav-item-copy">{playlist.name}</span>
-              <span className="nav-count">{playlist.track_paths.length}</span>
+              <span className="nav-icon">♪</span>Tracks
+              <span className="nav-count">{lib.track_count}</span>
             </button>
-          ))}
-          <div className="nav-sub-label">Smart</div>
-          {smartPlaylists.map((playlist) => (
             <button
-              key={playlist.id}
-              className={`nav-item nav-item-compact ${
-                view === 'tracks' && selectedPlaylist?.kind === 'smart' && selectedPlaylist.id === playlist.id
-                  ? 'active'
-                  : ''
-              }`}
-              onClick={() => {
-                setSelectedPlaylist({ kind: 'smart', id: playlist.id });
-                setSelectedAlbum(null);
-                setSelectedArtist(null);
-                setView('tracks');
-              }}
+              className={`nav-item ${view === 'albums' ? 'active' : ''}`}
+              onClick={() => setView('albums')}
             >
-              <span className="nav-icon">✦</span>
-              <span className="nav-item-copy">{playlist.name}</span>
-              <span className="nav-count">{playlist.tracks.length}</span>
+              <span className="nav-icon">◉</span>Albums
+              <span className="nav-count">{lib.album_count}</span>
             </button>
-          ))}
-        </nav>
+            <button
+              className={`nav-item ${view === 'artists' ? 'active' : ''}`}
+              onClick={() => setView('artists')}
+            >
+              <span className="nav-icon">☻</span>Artists
+              <span className="nav-count">{lib.artist_count}</span>
+            </button>
+          </nav>
 
-        <nav className="nav-section">
-          <div className="nav-label">App</div>
-          <button
-            className={`nav-item ${view === 'settings' ? 'active' : ''}`}
-            onClick={() => setView('settings')}
-          >
-            <span className="nav-icon">⚙</span>Settings
-          </button>
-        </nav>
+          <nav className="nav-section">
+            <div className="nav-label">Playlists</div>
+            <button className="nav-button" onClick={() => openPlaylistTarget([])}>
+              + New playlist
+            </button>
+            <div className="nav-sub-label">Saved</div>
+            {manualPlaylists.length === 0 && <div className="nav-empty">No saved playlists yet</div>}
+            {manualPlaylists.map((playlist) => (
+              <button
+                key={playlist.id}
+                className={`nav-item nav-item-compact ${
+                  view === 'tracks' && selectedPlaylist?.kind === 'manual' && selectedPlaylist.id === playlist.id
+                    ? 'active'
+                    : ''
+                }`}
+                onClick={() => {
+                  setSelectedPlaylist({ kind: 'manual', id: playlist.id });
+                  setSelectedAlbum(null);
+                  setSelectedArtist(null);
+                  setView('tracks');
+                }}
+              >
+                <span className="nav-icon">{playlist.rule ? '↻' : '≣'}</span>
+                <span className="nav-item-copy">{playlist.name}</span>
+                <span className="nav-count">{playlist.track_paths.length}</span>
+              </button>
+            ))}
+            <div className="nav-sub-label">Smart</div>
+            {smartPlaylists.map((playlist) => (
+              <button
+                key={playlist.id}
+                className={`nav-item nav-item-compact ${
+                  view === 'tracks' && selectedPlaylist?.kind === 'smart' && selectedPlaylist.id === playlist.id
+                    ? 'active'
+                    : ''
+                }`}
+                onClick={() => {
+                  setSelectedPlaylist({ kind: 'smart', id: playlist.id });
+                  setSelectedAlbum(null);
+                  setSelectedArtist(null);
+                  setView('tracks');
+                }}
+              >
+                <span className="nav-icon">✦</span>
+                <span className="nav-item-copy">{playlist.name}</span>
+                <span className="nav-count">{playlist.tracks.length}</span>
+              </button>
+            ))}
+          </nav>
 
-        <div className="sidebar-footer">{busy ?? 'Ready'}</div>
+          <nav className="nav-section">
+            <div className="nav-label">App</div>
+            <button
+              className={`nav-item ${view === 'settings' ? 'active' : ''}`}
+              onClick={() => setView('settings')}
+            >
+              <span className="nav-icon">⚙</span>Settings
+            </button>
+          </nav>
+        </div>
       </aside>
 
       <main className="content">

@@ -16,9 +16,11 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Licensed the project under `GPL-3.0-only` and added the full license text.
 - Updated project metadata and documentation to reflect the public open-source license.
 - Deferred Up Next queue artwork loading so long queues open more quickly instead of resolving every cover up front.
+- Expanded `Needs a first spin` to use the full set of unplayed tracks instead of a 50-track cap, so focused smart-playlist listening has a broader pool to draw from.
 - Streamlined track rows by stacking artist and album metadata, removing the `Queued` pill, and using the queue button itself as the queued-state indicator.
 - Simplified smart-playlist pages by hiding the generic track search/filter toolbar and preserving Needle's generated ordering.
 - Made smart-playlist playback and queue actions respect the currently focused subset instead of always using the full underlying playlist.
+- Removed the redundant sidebar status footer to free more vertical space for growing playlist lists.
 - Tightened sidebar active states so Tracks and playlist highlights only appear when that exact library or playlist view is on screen.
 
 ### Fixed

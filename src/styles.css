@@ -95,6 +95,7 @@ input, select {
 /* ------- App layout ------- */
 
 .app {
+  --bottom-ui-clearance: 136px;
   position: relative;
   display: grid;
   grid-template-columns: 260px 1fr;
@@ -108,11 +109,23 @@ input, select {
   grid-area: sidebar;
   background: var(--sidebar);
   border-right: 1px solid var(--border);
-  padding: 18px 14px 136px;
+  padding: 18px 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 18px;
   overflow-y: auto;
+  margin: 0 -6px;
+  padding: 0 6px var(--bottom-ui-clearance);
 }
 
 .content {
@@ -120,7 +133,7 @@ input, select {
   --content-x-pad: 36px;
   grid-area: content;
   overflow-y: auto;
-  padding: var(--content-top-pad) var(--content-x-pad) 136px;
+  padding: var(--content-top-pad) var(--content-x-pad) var(--bottom-ui-clearance);
 }
 
 .player-bar {
@@ -612,14 +625,6 @@ input, select {
   border-radius: 6px;
 }
 .folder-remove:hover { color: var(--danger); background: rgba(226, 73, 90, 0.1); }
-
-.sidebar-footer {
-  margin-top: auto;
-  padding: 10px;
-  font-size: 11px;
-  color: var(--muted);
-  border-top: 1px solid var(--border);
-}
 
 .toast-layer {
   position: absolute;
