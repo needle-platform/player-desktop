@@ -13,6 +13,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Added genre-focus pills for smart playlists so listeners can narrow a generated mix to one or more genres already present in that playlist.
 - Added opt-in loudness analysis and volume leveling, with FFmpeg-backed per-track gain stored locally and applied through mpv during playback.
 - Added vinyl-rip tag detection plus a record badge overlay on album artwork for tagged transfers.
+- Added structured loudness-analysis progress with checked/ analyzed/ fresh/ missing/ failed counts plus a failed-files list that can be copied from Settings.
 
 ### Changed
 - Licensed the project under `GPL-3.0-only` and added the full license text.
@@ -24,11 +25,14 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Made smart-playlist playback and queue actions respect the currently focused subset instead of always using the full underlying playlist.
 - Removed the redundant sidebar status footer to free more vertical space for growing playlist lists.
 - Tightened sidebar active states so Tracks and playlist highlights only appear when that exact library or playlist view is on screen.
-- Expanded Settings with a background loudness-analysis workflow, live progress logging, and clearer guidance that the first pass can take a while while the app remains usable.
+- Expanded Settings with a background loudness-analysis workflow, live progress logging, structured progress feedback, and clearer guidance that the first pass can take a while while the app remains usable.
+- Made volume leveling gentler by targeting a lower loudness and capping upward gain, so mixed playback feels more natural.
+- Increased loudness-analysis throughput by running two FFmpeg workers in parallel instead of processing the whole library strictly one track at a time.
 
 ### Fixed
 - Fixed album-page track clicks so choosing one song plays that track directly instead of queueing the rest of the album.
 - Fixed album-page track-heading spacing so the `Tracks` label has a little breathing room above the list.
+- Fixed stale end-of-album playback state so finished albums return to a working `Play` state instead of getting stuck behind a dead `Resume`.
 
 ## [0.1.0] - 2026-05-01
 

@@ -60,6 +60,22 @@ export interface BootstrapPayload {
   playback_session: PlaybackSession;
 }
 
+export interface LoudnessAnalysisProgress {
+  total_tracks: number;
+  processed_tracks: number;
+  analyzed_tracks: number;
+  unchanged_tracks: number;
+  missing_tracks: number;
+  failed_tracks: number;
+  failed_path: string | null;
+  failed_reason: string | null;
+}
+
+export interface LoudnessAnalysisFailure {
+  path: string;
+  reason: string;
+}
+
 export interface AudioDevice {
   name: string;
   description: string;

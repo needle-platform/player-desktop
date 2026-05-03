@@ -25,6 +25,7 @@ pub struct TrackLoudnessAnalysisCandidate {
     pub path: String,
     pub cached_file_size: Option<i64>,
     pub cached_file_modified_at: Option<i64>,
+    pub cached_analysis_version: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,7 @@ pub struct TrackLoudnessAnalysisRecord {
     pub target_gain_db: f32,
     pub file_size: i64,
     pub file_modified_at: i64,
+    pub analysis_version: i64,
 }
 
 pub fn init_database(db_path: &Path) -> Result<()> {
@@ -147,6 +149,7 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             target_gain_db REAL NOT NULL,
             file_size INTEGER NOT NULL,
             file_modified_at INTEGER NOT NULL,
+            analysis_version INTEGER NOT NULL DEFAULT 1,
             analyzed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         ",
@@ -189,6 +192,10 @@ pub fn init_database(db_path: &Path) -> Result<()> {
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN last_played_at TEXT", []);
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN rating INTEGER", []);
     let _ = connection.execute("ALTER TABLE artist_info ADD COLUMN gender TEXT", []);
+    let _ = connection.execute(
+        "ALTER TABLE track_loudness ADD COLUMN analysis_version INTEGER NOT NULL DEFAULT 1",
+        [],
+    );
     let _ = connection.execute(
         "UPDATE tracks SET added_at = CURRENT_TIMESTAMP WHERE added_at IS NULL",
         [],
@@ -896,7 +903,8 @@ pub fn list_tracks_for_loudness_analysis(
         "
         SELECT t.path,
                tl.file_size,
-               tl.file_modified_at
+               tl.file_modified_at,
+               tl.analysis_version
         FROM tracks t
         LEFT JOIN track_loudness tl ON tl.track_path = t.path
         ORDER BY t.path
@@ -909,6 +917,7 @@ pub fn list_tracks_for_loudness_analysis(
                 path: row.get(0)?,
                 cached_file_size: row.get(1)?,
                 cached_file_modified_at: row.get(2)?,
+                cached_analysis_version: row.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -936,14 +945,16 @@ pub fn save_track_loudness_records(
             target_gain_db,
             file_size,
             file_modified_at,
+            analysis_version,
             analyzed_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
         ON CONFLICT(track_path) DO UPDATE SET
             integrated_lufs = excluded.integrated_lufs,
             true_peak_db = excluded.true_peak_db,
             target_gain_db = excluded.target_gain_db,
             file_size = excluded.file_size,
             file_modified_at = excluded.file_modified_at,
+            analysis_version = excluded.analysis_version,
             analyzed_at = excluded.analyzed_at
         ",
     )?;
@@ -956,6 +967,7 @@ pub fn save_track_loudness_records(
             record.target_gain_db,
             record.file_size,
             record.file_modified_at,
+            record.analysis_version,
         ])?;
     }
 

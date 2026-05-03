@@ -678,8 +678,12 @@ async fn run_loudness_analysis(
         let emit_log = |message: String| {
             let _ = app_handle.emit("loudness-analysis-log", message);
         };
+        let emit_progress = |progress: loudness::LoudnessAnalysisProgress| {
+            let _ = app_handle.emit("loudness-analysis-progress", progress);
+        };
 
-        loudness::analyze_library(&db_path, emit_log).map_err(|error| error.to_string())?;
+        loudness::analyze_library(&db_path, emit_log, emit_progress)
+            .map_err(|error| error.to_string())?;
         db::load_bootstrap(&db_path).map_err(|error| error.to_string())
     })
     .await

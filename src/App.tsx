@@ -48,6 +48,8 @@ import type {
   AppSettings,
   BootstrapPayload,
   EqualizerPreset,
+  LoudnessAnalysisFailure,
+  LoudnessAnalysisProgress,
   PlaybackSession,
   RepeatMode,
   SavedPlaylist,
@@ -993,6 +995,8 @@ function App() {
   const [maintenanceLog, setMaintenanceLog] = useState<string[]>([]);
   const [isLoudnessAnalysisRunning, setIsLoudnessAnalysisRunning] = useState(false);
   const [loudnessAnalysisLog, setLoudnessAnalysisLog] = useState<string[]>([]);
+  const [loudnessAnalysisProgress, setLoudnessAnalysisProgress] = useState<LoudnessAnalysisProgress | null>(null);
+  const [loudnessAnalysisFailures, setLoudnessAnalysisFailures] = useState<LoudnessAnalysisFailure[]>([]);
   const [missingLibraryRoots, setMissingLibraryRoots] = useState<string[]>([]);
   const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
   const [status, setStatus] = useState('');
@@ -1399,6 +1403,47 @@ function App() {
         }
 
         setMaintenanceLog((current) => [...current.slice(-79), formatMaintenanceLogLine(message)]);
+      });
+      if (cancelled) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const dispose = await listen<LoudnessAnalysisProgress>('loudness-analysis-progress', (event) => {
+        const payload = event.payload;
+        if (!payload || typeof payload !== 'object') {
+          return;
+        }
+
+        setLoudnessAnalysisProgress(payload);
+        if (payload.failed_path && payload.failed_reason) {
+          const failedPath = payload.failed_path;
+          const failedReason = payload.failed_reason;
+          setLoudnessAnalysisFailures((current) => {
+            if (current.some((entry) => entry.path === failedPath)) {
+              return current;
+            }
+            return [
+              ...current,
+              {
+                path: failedPath,
+                reason: failedReason,
+              },
+            ];
+          });
+        }
       });
       if (cancelled) {
         dispose();
@@ -2087,6 +2132,10 @@ function App() {
     () => (currentPath ? trackByPath.get(currentPath) ?? null : currentQueueTrack),
     [currentPath, currentQueueTrack, trackByPath],
   );
+  const activeTrack = useMemo(
+    () => (currentPath ? trackByPath.get(currentPath) ?? currentQueueTrack ?? null : null),
+    [currentPath, currentQueueTrack, trackByPath],
+  );
   const selectedAlbumSummary = useMemo(
     () => albums.find((album) => album.key === selectedAlbum) ?? null,
     [albums, selectedAlbum],
@@ -2192,8 +2241,8 @@ function App() {
     selectedRawOutputDevice?.description ??
       (selectedAudioDevice === 'auto' ? defaultAudioDevice.description : selectedAudioDevice),
   );
-  const currentAlbum = currentTrack?.album ?? null;
-  const currentAlbumKey = currentTrack ? trackAlbumKey(currentTrack) : null;
+  const currentAlbum = activeTrack?.album ?? null;
+  const currentAlbumKey = activeTrack ? trackAlbumKey(activeTrack) : null;
   const outputDevices = useMemo(() => {
     const devices = audioDevices.length > 0 ? audioDevices : [defaultAudioDevice];
 
@@ -2318,6 +2367,8 @@ function App() {
     try {
       setIsLoudnessAnalysisRunning(true);
       setLoudnessAnalysisLog([formatMaintenanceLogLine('Queued loudness analysis…')]);
+      setLoudnessAnalysisProgress(null);
+      setLoudnessAnalysisFailures([]);
       setBusy('Analyzing loudness…');
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       const next = await runLoudnessAnalysis();
@@ -2333,6 +2384,26 @@ function App() {
     } finally {
       setIsLoudnessAnalysisRunning(false);
       setBusy(null);
+    }
+  };
+
+  const copyLoudnessAnalysisFailures = async () => {
+    if (loudnessAnalysisFailures.length === 0) {
+      return;
+    }
+
+    try {
+      const payload = loudnessAnalysisFailures
+        .map((entry) => `${entry.path}${entry.reason ? ` — ${entry.reason}` : ''}`)
+        .join('\n');
+      await navigator.clipboard.writeText(payload);
+      setStatus(
+        loudnessAnalysisFailures.length === 1
+          ? 'Copied 1 failed file path'
+          : `Copied ${loudnessAnalysisFailures.length} failed file paths`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -3018,27 +3089,29 @@ function App() {
   };
 
   const togglePlayPause = async () => {
-    if (!currentTrack) {
-      const first = queueTracks[0] ?? filteredTracks[0];
-      if (first) {
-        if (queueTracks.length > 0) {
-          await syncSession(
-            {
-              ...playbackSession,
-              current_index: Math.max(queueTracks.findIndex((track) => track.path === first.path), 0),
-              position_seconds: 0,
-              paused: false,
-            },
-            { label: `Playing ${first.title}` },
-          );
-        } else {
-          await play(first);
-        }
+    if (!currentPath) {
+      const restartTrack = currentQueueTrack ?? queueTracks[0] ?? filteredTracks[0] ?? null;
+      if (!restartTrack) return;
+
+      if (queueTracks.length > 0) {
+        await syncSession(
+          {
+            ...playbackSession,
+            current_index: Math.max(queueTracks.findIndex((track) => track.path === restartTrack.path), 0),
+            position_seconds: 0,
+            paused: false,
+          },
+          { label: `Playing ${restartTrack.title}` },
+        );
+      } else {
+        await play(restartTrack);
       }
       return;
     }
     try {
       if (!isBackendPlaybackLoaded) {
+        const resumeTrack = currentTrack ?? currentQueueTrack ?? queueTracks[currentQueueIndex] ?? null;
+        if (!resumeTrack) return;
         await syncSession(
           {
             ...playbackSession,
@@ -3046,7 +3119,7 @@ function App() {
             position_seconds: 0,
             paused: false,
           },
-          { label: `Playing ${currentTrack.title}` },
+          { label: `Playing ${resumeTrack.title}` },
         );
         return;
       }
@@ -4048,6 +4121,9 @@ function App() {
             maintenanceLog={maintenanceLog}
             loudnessAnalysisBusy={isLoudnessAnalysisRunning}
             loudnessAnalysisLog={loudnessAnalysisLog}
+            loudnessAnalysisProgress={loudnessAnalysisProgress}
+            loudnessAnalysisFailures={loudnessAnalysisFailures}
+            onCopyLoudnessFailures={copyLoudnessAnalysisFailures}
             missingLibraryRoots={missingLibraryRoots}
           />
         )}
@@ -6881,6 +6957,9 @@ interface SettingsViewProps {
   maintenanceLog: string[];
   loudnessAnalysisBusy: boolean;
   loudnessAnalysisLog: string[];
+  loudnessAnalysisProgress: LoudnessAnalysisProgress | null;
+  loudnessAnalysisFailures: LoudnessAnalysisFailure[];
+  onCopyLoudnessFailures: () => void;
   missingLibraryRoots: string[];
 }
 
@@ -6897,6 +6976,9 @@ function SettingsView({
   maintenanceLog,
   loudnessAnalysisBusy,
   loudnessAnalysisLog,
+  loudnessAnalysisProgress,
+  loudnessAnalysisFailures,
+  onCopyLoudnessFailures,
   missingLibraryRoots,
 }: SettingsViewProps) {
   const isManualEqualizer = settings.equalizer_preset === 'manual';
@@ -6909,6 +6991,10 @@ function SettingsView({
   const maintenanceLogRef = useRef<HTMLDivElement | null>(null);
   const loudnessAnalysisLogRef = useRef<HTMLDivElement | null>(null);
   const missingRootsSet = useMemo(() => new Set(missingLibraryRoots), [missingLibraryRoots]);
+  const loudnessProgressRatio = loudnessAnalysisProgress?.total_tracks
+    ? Math.min(1, loudnessAnalysisProgress.processed_tracks / loudnessAnalysisProgress.total_tracks)
+    : 0;
+  const loudnessProgressPercent = Math.round(loudnessProgressRatio * 100);
 
   useEffect(() => {
     setManualBandsDraft(normalizeEqualizerBands(settings.equalizer_bands));
@@ -7274,6 +7360,46 @@ function SettingsView({
                 ? `Last run ${lastLoudnessAnalysisLabel}`
                 : 'No loudness analysis recorded yet.'}
             </div>
+            {loudnessAnalysisProgress && (
+              <div className="settings-analysis-summary" aria-live="polite">
+                <div className="settings-analysis-summary-head">
+                  <div className="settings-analysis-summary-copy">
+                    <strong>
+                      {loudnessAnalysisProgress.processed_tracks.toLocaleString()} /{' '}
+                      {loudnessAnalysisProgress.total_tracks.toLocaleString()}
+                    </strong>{' '}
+                    tracks checked
+                  </div>
+                  <div className="settings-analysis-summary-copy">
+                    {loudnessAnalysisProgress.total_tracks > 0 ? `${loudnessProgressPercent}% complete` : 'Ready'}
+                  </div>
+                </div>
+                <div className="settings-analysis-progress" aria-hidden="true">
+                  <div
+                    className="settings-analysis-progress-bar"
+                    style={{ width: `${loudnessProgressPercent}%` }}
+                  />
+                </div>
+                <div className="settings-analysis-stats">
+                  <div className="settings-analysis-stat">
+                    <span className="settings-analysis-stat-label">Analyzed</span>
+                    <strong>{loudnessAnalysisProgress.analyzed_tracks.toLocaleString()}</strong>
+                  </div>
+                  <div className="settings-analysis-stat">
+                    <span className="settings-analysis-stat-label">Fresh</span>
+                    <strong>{loudnessAnalysisProgress.unchanged_tracks.toLocaleString()}</strong>
+                  </div>
+                  <div className="settings-analysis-stat">
+                    <span className="settings-analysis-stat-label">Missing</span>
+                    <strong>{loudnessAnalysisProgress.missing_tracks.toLocaleString()}</strong>
+                  </div>
+                  <div className="settings-analysis-stat">
+                    <span className="settings-analysis-stat-label">Failed</span>
+                    <strong>{loudnessAnalysisProgress.failed_tracks.toLocaleString()}</strong>
+                  </div>
+                </div>
+              </div>
+            )}
             <div
               className={`settings-maintenance-console ${loudnessAnalysisBusy ? 'is-live' : ''}`}
               aria-live="polite"
@@ -7293,6 +7419,29 @@ function SettingsView({
                 </div>
               )}
             </div>
+            {loudnessAnalysisFailures.length > 0 && (
+              <div className="settings-analysis-failures">
+                <div className="settings-analysis-failures-head">
+                  <div>
+                    <label className="settings-label">Failed files</label>
+                    <p className="settings-hint">
+                      Needle skipped these files during analysis. They can still stay in your library.
+                    </p>
+                  </div>
+                  <button className="ghost-button" onClick={onCopyLoudnessFailures}>
+                    Copy failed paths
+                  </button>
+                </div>
+                <div className="settings-analysis-failure-list">
+                  {loudnessAnalysisFailures.map((entry) => (
+                    <div key={entry.path} className="settings-analysis-failure-item">
+                      <div className="settings-analysis-failure-path">{entry.path}</div>
+                      <div className="settings-analysis-failure-reason">{entry.reason}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           <div className="settings-row">
             <div className="settings-row-copy">
