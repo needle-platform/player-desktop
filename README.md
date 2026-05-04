@@ -206,6 +206,7 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 - **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
 - **User ratings** (`rating`) drive a `Top rated` smart playlist built from the stars you assign
 - **Embedded BPM tags** drive compact tempo details plus vibe buckets such as Slowdown, Cruise, Groove, Lift, Energy, and Chaos
+- **Vibe playlists use those BPM buckets directly**, so tracks without BPM stay out of tempo-led mixes instead of being guessed into one
 - **Local BPM corrections** are stored in Needle so halve / double-time mistakes can be fixed without touching the source files
 - **Optional loudness analysis** stores LUFS / peak-derived gain data locally so Needle can level mixed queues when you enable volume leveling
 - **Two-worker loudness scans** make the first analysis pass much more practical on modern Macs without overcommitting the whole machine

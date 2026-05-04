@@ -270,9 +270,7 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
       track,
       ...scoreTrackForVibeMix(track, ['slowdown'], [], CHILL_HINTS),
     }))
-    .filter(
-      ({ vibe, hintMatches }) => vibe === 'slowdown' || (vibe == null && hintMatches >= 2),
-    )
+    .filter(({ vibe }) => vibe === 'slowdown')
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -296,10 +294,7 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
       track,
       ...scoreTrackForVibeMix(track, ['cruise', 'groove'], ['slowdown'], GROOVE_HINTS),
     }))
-    .filter(
-      ({ score, vibe, hintMatches }) =>
-        score >= 4 || vibe === 'cruise' || vibe === 'groove' || hintMatches >= 2,
-    )
+    .filter(({ vibe }) => vibe === 'cruise' || vibe === 'groove')
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -323,10 +318,7 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
       track,
       ...scoreTrackForVibeMix(track, ['lift', 'energy'], ['groove'], UPLIFT_HINTS),
     }))
-    .filter(
-      ({ score, vibe, hintMatches }) =>
-        score >= 4 || vibe === 'lift' || vibe === 'energy' || hintMatches >= 2,
-    )
+    .filter(({ vibe }) => vibe === 'lift' || vibe === 'energy')
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -350,10 +342,7 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
       track,
       ...scoreTrackForVibeMix(track, ['energy', 'chaos'], ['lift'], DANCE_HINTS),
     }))
-    .filter(
-      ({ score, vibe, hintMatches }) =>
-        score >= 5 || vibe === 'energy' || vibe === 'chaos' || hintMatches >= 2,
-    )
+    .filter(({ vibe }) => vibe === 'energy' || vibe === 'chaos')
     .sort(
       (a, b) =>
         b.score - a.score ||

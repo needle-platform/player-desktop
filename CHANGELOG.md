@@ -41,6 +41,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Fixed sidebar scrolling so Settings no longer disappears behind the now-playing bar when playlist lists grow.
 - Fixed track-row alignment when BPM controls are unavailable for some rows.
 - Fixed BPM-correction toasts so they auto-dismiss like other success confirmations.
+- Fixed vibe playlists so they now follow the actual BPM buckets only, excluding tracks with no BPM and preventing cross-bucket bleed from metadata hints.
 
 ## [0.1.0] - 2026-05-01
 
