@@ -2,9 +2,11 @@ use std::path::Path;
 
 use anyhow::Result;
 use lofty::{
-    prelude::{Accessor, AudioFile, TaggedFileExt},
+    config::WriteOptions,
+    file::TaggedFileExt,
+    prelude::{Accessor, AudioFile},
     probe::Probe,
-    tag::ItemKey,
+    tag::{ItemKey, Tag},
 };
 use walkdir::{DirEntry, WalkDir};
 
@@ -39,7 +41,7 @@ pub fn scan_folder(folder: &str) -> Result<Vec<Track>> {
     Ok(tracks)
 }
 
-fn read_track(path: &Path) -> Track {
+pub fn read_track(path: &Path) -> Track {
     let inferred_title = path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -55,7 +57,9 @@ fn read_track(path: &Path) -> Track {
     let mut bit_depth = None;
     let mut disc_number = None;
     let mut track_number = None;
+    let mut bpm = None;
     let mut genre = None;
+    let mut is_vinyl_rip = false;
     let mut year = None;
 
     if let Ok(tagged_file) = Probe::open(path).and_then(|probe| probe.read()) {
@@ -78,7 +82,9 @@ fn read_track(path: &Path) -> Track {
                 .map(|value| value.to_string());
             disc_number = tag.disk().map(|value| value as i64);
             track_number = tag.track().map(|value| value as i64);
+            bpm = read_bpm(tag);
             genre = tag.genre().map(|value| value.to_string());
+            is_vinyl_rip = tag_marks_vinyl_rip(tag);
             year = tag.year().map(|value| value as i64);
         }
     }
@@ -107,14 +113,119 @@ fn read_track(path: &Path) -> Track {
         bit_depth,
         disc_number,
         track_number,
+        bpm,
+        bpm_overridden: false,
         genre,
         primary_genre: None,
+        is_vinyl_rip,
         year,
         added_at: None,
         play_count: 0,
         last_played_at: None,
         rating: None,
     }
+}
+
+pub fn write_track_genre(path: &Path, genre: Option<&str>) -> Result<Track> {
+    let mut tagged_file = Probe::open(path)?.read()?;
+    let normalized = genre.map(str::trim).filter(|value| !value.is_empty());
+    let tag = editable_tag(&mut tagged_file);
+
+    match normalized {
+        Some(value) => tag.set_genre(value.to_string()),
+        None => tag.remove_genre(),
+    }
+
+    tagged_file.save_to_path(path, WriteOptions::default())?;
+    Ok(read_track(path))
+}
+
+pub fn write_track_bpm(path: &Path, bpm: Option<i64>) -> Result<Track> {
+    let mut tagged_file = Probe::open(path)?.read()?;
+    let tag = editable_tag(&mut tagged_file);
+    tag.take(&ItemKey::Bpm).for_each(drop);
+    tag.take(&ItemKey::IntegerBpm).for_each(drop);
+
+    if let Some(value) = bpm.filter(|value| *value > 0) {
+        if !tag.insert_text(ItemKey::IntegerBpm, value.to_string()) {
+            let _ = tag.insert_text(ItemKey::Bpm, value.to_string());
+        }
+    }
+
+    tagged_file.save_to_path(path, WriteOptions::default())?;
+    Ok(read_track(path))
+}
+
+fn editable_tag(tagged_file: &mut lofty::file::TaggedFile) -> &mut Tag {
+    if tagged_file.primary_tag().is_none() && tagged_file.first_tag().is_none() {
+        tagged_file.insert_tag(Tag::new(tagged_file.primary_tag_type()));
+    }
+
+    let primary_tag_type = tagged_file.primary_tag_type();
+    let has_primary_tag = tagged_file.primary_tag().is_some();
+
+    if has_primary_tag {
+        tagged_file
+            .tag_mut(primary_tag_type)
+            .expect("primary tag should be available after insertion")
+    } else {
+        tagged_file
+            .first_tag_mut()
+            .expect("tagged file should provide a tag after insertion")
+    }
+}
+
+fn read_bpm(tag: &lofty::tag::Tag) -> Option<i64> {
+    tag.get_string(&ItemKey::Bpm)
+        .or_else(|| tag.get_string(&ItemKey::IntegerBpm))
+        .and_then(parse_bpm_value)
+}
+
+fn parse_bpm_value(value: &str) -> Option<i64> {
+    let numeric: String = value
+        .trim()
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || matches!(ch, '.' | ','))
+        .collect();
+    if numeric.is_empty() {
+        return None;
+    }
+
+    numeric
+        .replace(',', ".")
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.round() as i64)
+        .filter(|value| *value > 0)
+}
+
+fn tag_marks_vinyl_rip(tag: &lofty::tag::Tag) -> bool {
+    tag.items().any(|item| {
+        let matches_key = match item.key() {
+            ItemKey::PodcastKeywords | ItemKey::Comment => true,
+            ItemKey::Unknown(key) => {
+                let normalized = key.trim().to_ascii_lowercase();
+                normalized == "tags" || normalized == "tag" || normalized == "keywords"
+            }
+            _ => false,
+        };
+
+        matches_key && item.value().text().is_some_and(value_marks_vinyl_rip)
+    })
+}
+
+fn value_marks_vinyl_rip(value: &str) -> bool {
+    value
+        .split(|ch| matches!(ch, ',' | ';' | '/' | '|'))
+        .map(str::trim)
+        .any(|part| {
+            let normalized = part.to_ascii_lowercase();
+            matches!(
+                normalized.as_str(),
+                "vinyl" | "vinyl-rip" | "needledrop" | "needle-drop"
+            )
+        })
 }
 
 fn is_supported_audio_file(path: &Path) -> bool {

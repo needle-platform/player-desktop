@@ -2,10 +2,12 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   AppSettings,
   BootstrapPayload,
+  MetadataEditMode,
   PlaybackSession,
   PlaybackState,
   RepeatMode,
   SavedPlaylistRule,
+  TrackBpmAdjustment,
 } from '../types';
 
 export const bootstrapApp = () => invoke<BootstrapPayload>('bootstrap_app');
@@ -69,7 +71,12 @@ export const setAudioDevice = (deviceName: string) =>
 export const setRepeatMode = (repeatMode: RepeatMode) =>
   invoke<void>('set_repeat_mode', { repeatMode });
 
+export const applyVolumeLevelingForTrack = (path: string | null) =>
+  invoke<void>('apply_volume_leveling_for_track', { path });
+
 export const runMaintenance = () => invoke<BootstrapPayload>('run_maintenance');
+
+export const runLoudnessAnalysis = () => invoke<BootstrapPayload>('run_loudness_analysis');
 
 export const removeLibraryRoot = (folder: string) =>
   invoke<BootstrapPayload>('remove_library_root', { folder });
@@ -106,8 +113,22 @@ export const setAlbumPrimaryGenre = (
   primaryGenre: string | null,
 ) => invoke<BootstrapPayload>('set_album_primary_genre', { album, albumArtist, primaryGenre });
 
+export const saveAlbumGenre = (
+  album: string,
+  albumArtist: string | null,
+  trackPaths: string[],
+  genre: string | null,
+  mode: MetadataEditMode,
+) => invoke<BootstrapPayload>('save_album_genre', { album, albumArtist, trackPaths, genre, mode });
+
 export const setTrackRating = (path: string, rating: number | null) =>
   invoke<BootstrapPayload>('set_track_rating', { path, rating });
+
+export const saveTrackBpm = (path: string, bpm: number, mode: MetadataEditMode) =>
+  invoke<BootstrapPayload>('save_track_bpm', { path, bpm, mode });
+
+export const adjustTrackBpm = (path: string, adjustment: TrackBpmAdjustment) =>
+  invoke<BootstrapPayload>('adjust_track_bpm', { path, adjustment });
 
 export interface CoverArt {
   data_url: string;

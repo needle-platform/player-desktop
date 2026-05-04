@@ -10,6 +10,7 @@ export type EqualizerPreset =
   | 'manual';
 
 export type RepeatMode = 'off' | 'one' | 'all';
+export type MetadataEditMode = 'needle_only' | 'write_to_files';
 
 export interface Track {
   id: number;
@@ -24,8 +25,11 @@ export interface Track {
   bit_depth: number | null;
   disc_number: number | null;
   track_number: number | null;
+  bpm: number | null;
+  bpm_overridden: boolean;
   genre: string | null;
   primary_genre: string | null;
+  is_vinyl_rip: boolean;
   year: number | null;
   added_at: string | null;
   play_count: number;
@@ -45,8 +49,11 @@ export interface AppSettings {
   accent_color: string | null;
   equalizer_preset: EqualizerPreset;
   equalizer_bands: number[];
+  volume_leveling_enabled: boolean;
+  metadata_edit_mode: MetadataEditMode;
   tracks_page_size: number;
   last_maintenance_at: string | null;
+  last_loudness_analysis_at: string | null;
   library_roots: string[];
 }
 
@@ -55,6 +62,22 @@ export interface BootstrapPayload {
   library: LibraryData;
   playlists: SavedPlaylist[];
   playback_session: PlaybackSession;
+}
+
+export interface LoudnessAnalysisProgress {
+  total_tracks: number;
+  processed_tracks: number;
+  analyzed_tracks: number;
+  unchanged_tracks: number;
+  missing_tracks: number;
+  failed_tracks: number;
+  failed_path: string | null;
+  failed_reason: string | null;
+}
+
+export interface LoudnessAnalysisFailure {
+  path: string;
+  reason: string;
 }
 
 export interface AudioDevice {
@@ -96,3 +119,5 @@ export interface SavedPlaylist {
   created_at: string;
   updated_at: string;
 }
+
+export type TrackBpmAdjustment = 'half' | 'double' | 'reset';

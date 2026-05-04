@@ -5,6 +5,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { CSSProperties, RefObject } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  adjustTrackBpm as persistTrackBpmAdjustment,
+  applyVolumeLevelingForTrack,
   appendTracksToPlaylist,
   appendQueue,
   bootstrapApp,
@@ -29,13 +31,15 @@ import {
   resumePlayback,
   runMaintenance,
   setAudioDevice as setPlaybackAudioDevice,
-  setAlbumPrimaryGenre as persistAlbumPrimaryGenre,
+  saveAlbumGenre as persistAlbumGenre,
+  saveTrackBpm as persistTrackBpmValue,
   setTrackRating as persistTrackRating,
   setPlaybackMuted,
   setPlaybackVolume as setPlaybackVolumeLevel,
   setRepeatMode as tauriSetRepeatMode,
   saveSettings,
   savePlaybackSession,
+  runLoudnessAnalysis,
   scanLibrary,
   seekPlayback,
   stopPlayback,
@@ -46,21 +50,34 @@ import type {
   AppSettings,
   BootstrapPayload,
   EqualizerPreset,
+  LoudnessAnalysisFailure,
+  LoudnessAnalysisProgress,
+  MetadataEditMode,
   PlaybackSession,
   RepeatMode,
   SavedPlaylist,
   SavedPlaylistRule,
   ThemeMode,
   Track,
+  TrackBpmAdjustment,
 } from './types';
 import { useCoverArt } from './lib/cover';
 import { useArtistImage } from './lib/artistImage';
 import { useArtistInfo } from './lib/artistInfo';
 import { useAlbumInfo } from './lib/albumInfo';
+import {
+  genreLabelFromKey,
+  normalizeGenreKey,
+  splitTrackGenreEntries,
+  splitTrackGenreKeys,
+  splitTrackGenres,
+} from './lib/genres';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
+import { formatBpm, vibeKeyForTrack, vibeLabelForTrack } from './lib/vibes';
 import dashboardIdleBackdrop from './assets/bg.jpg';
 import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
+import vinylRipBadgeIcon from './assets/vinyl-rip-badge.svg';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'artist' | 'settings';
 type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: number };
@@ -106,8 +123,12 @@ type SmartPlaylistGenreOption = {
 type AlbumGenreEditorState = {
   album: string;
   albumArtist: string | null;
-  currentPrimaryGenre: string | null;
+  trackPaths: string[];
+  currentGenre: string | null;
   suggestedGenres: string[];
+};
+type TrackBpmEditorState = {
+  track: Track;
 };
 type ResolvedPlaylist = {
   id: string;
@@ -124,6 +145,7 @@ type AlbumSummary = {
   year: number | null;
   count: number;
   samplePath: string;
+  is_vinyl_rip: boolean;
   addedAt: string | null;
 };
 type ArtistSummary = {
@@ -187,6 +209,9 @@ const inferNotificationTone = (message: string): NotificationTone => {
     normalized.includes('reordered') ||
     normalized.includes('plays next') ||
     normalized.includes('pinned') ||
+    normalized.includes('halved bpm') ||
+    normalized.includes('doubled bpm') ||
+    normalized.includes('bpm correction') ||
     normalized.includes('mini player on') ||
     normalized.includes('mini player off')
   ) {
@@ -323,6 +348,22 @@ const themeOptions: Array<{ value: ThemeMode; label: string }> = [
   { value: 'light', label: 'Light' },
   { value: 'dark', label: 'Dark' },
 ];
+const metadataEditModeOptions: Array<{
+  value: MetadataEditMode;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: 'needle_only',
+    label: 'Needle only',
+    hint: 'Save genre and BPM edits in Needle without modifying your music files.',
+  },
+  {
+    value: 'write_to_files',
+    label: 'Write to files',
+    hint: 'Update the embedded genre and BPM tags so other apps see the same edits too.',
+  },
+];
 const trackSortOptions: Array<{ value: TrackSortOption; label: string }> = [
   { value: 'title', label: 'Title (A-Z)' },
   { value: 'artist', label: 'Artist (A-Z)' },
@@ -371,7 +412,6 @@ const filteredPlaylistName = (artist: string, genre: string) => {
   return parts.length > 0 ? `${parts.join(' · ')} mix` : 'Filtered mix';
 };
 const effectiveTrackGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
-const genreKey = (genre: string) => genre.trim().toLocaleLowerCase();
 const uniqueSorted = (values: string[]) =>
   Array.from(new Set(values.filter(Boolean))).sort((a, b) => compareText(a, b));
 const dedupeTracksByPath = (tracks: Track[]) => Array.from(new Map(tracks.map((track) => [track.path, track])).values());
@@ -436,7 +476,26 @@ const formatQuality = (track: Track) => {
     track.sample_rate ? `${(track.sample_rate / 1000).toFixed(1)} kHz` : null,
     track.bit_depth ? `${track.bit_depth}-bit` : null,
   ].filter((v): v is string => Boolean(v));
+  return parts.join(' · ') || null;
+};
+
+const formatTrackPace = (track: Pick<Track, 'bpm'>) => {
+  const bpm = formatBpm(track.bpm);
+  const vibe = vibeLabelForTrack(track);
+  const parts = [bpm ? `${bpm} BPM` : null, vibe].filter((value): value is string => Boolean(value));
+  return parts.join(' · ') || null;
+};
+
+const formatTrackTechDetails = (track: Track) => formatQuality(track);
+
+const formatTrackDetails = (track: Track) => {
+  const parts = [formatQuality(track), formatTrackPace(track)].filter((value): value is string => Boolean(value));
   return parts.join(' · ') || '—';
+};
+
+const albumTrackVibeToneClass = (track: Pick<Track, 'bpm'>) => {
+  const vibeKey = vibeKeyForTrack(track);
+  return vibeKey ? `is-${vibeKey}` : '';
 };
 
 const defaultAudioDevice: AudioDevice = { name: 'auto', description: 'System default' };
@@ -457,11 +516,6 @@ const albumKey = (album: string | null | undefined, albumArtist: string | null |
 const trackAlbumKey = (track: Pick<Track, 'album' | 'album_artist' | 'artist'>) =>
   track.album ? albumKey(track.album, albumArtistForTrack(track)) : null;
 const albumTitleFromKey = (key: string) => key.split(albumIdentitySeparator)[0] ?? key;
-const splitTrackGenres = (genre: string | null | undefined) =>
-  (genre ?? '')
-    .split(/[;,/]/)
-    .map((part) => part.trim())
-    .filter(Boolean);
 const normalizePlaylistRuleText = (value: string | null | undefined) => {
   const trimmed = value?.trim() ?? '';
   return trimmed ? trimmed : null;
@@ -471,7 +525,7 @@ const formatPlaylistRuleSummary = (rule: SavedPlaylistRule) => {
     const parts = [
       rule.search ? `Search: ${rule.search}` : null,
       rule.artist,
-      rule.genre,
+      rule.genre ? genreLabelFromKey(normalizeGenreKey(rule.genre) ?? rule.genre) : null,
       formatTrackYearRange(
         rule.year_from != null ? String(rule.year_from) : allTrackFilterValue,
         rule.year_to != null ? String(rule.year_to) : allTrackFilterValue,
@@ -933,6 +987,154 @@ function TrackRatingControl({
   );
 }
 
+function TrackBpmControl({
+  track,
+  metadataEditMode,
+  disabled,
+  onAdjust,
+  onOpenEditor,
+}: {
+  track: Track;
+  metadataEditMode: MetadataEditMode;
+  disabled?: boolean;
+  onAdjust: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  onOpenEditor: (track: Track) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    };
+
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isOpen]);
+
+  const bpmLabel = formatBpm(track.bpm);
+  const vibeLabel = vibeLabelForTrack(track);
+  const halfBpm = track.bpm != null ? Math.max(1, Math.round(track.bpm / 2)) : null;
+  const doubleBpm = track.bpm != null ? Math.max(1, track.bpm * 2) : null;
+  const hasBpm = track.bpm != null && track.bpm > 0;
+  const modeCopy =
+    metadataEditMode === 'write_to_files' ? 'Saving into music files' : 'Saving in Needle only';
+
+  return (
+    <div
+      ref={menuRef}
+      className={`track-bpm-adjust ${track.bpm_overridden ? 'is-overridden' : ''}`}
+      role="group"
+      aria-label={`BPM correction for ${track.title}`}
+    >
+      <button
+        className={`track-bpm-chip ${isOpen ? 'is-open' : ''}`}
+        type="button"
+        disabled={disabled}
+        title={
+          bpmLabel
+            ? vibeLabel
+              ? `${bpmLabel} BPM · ${vibeLabel}`
+              : `${bpmLabel} BPM`
+            : 'Set BPM'
+        }
+        aria-label={
+          bpmLabel
+            ? `BPM ${bpmLabel}${vibeLabel ? `, ${vibeLabel}` : ''}. Open BPM correction options for ${track.title}`
+            : `Set BPM for ${track.title}`
+        }
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        onClick={(event) => {
+          event.stopPropagation();
+          setIsOpen((open) => !open);
+        }}
+      >
+        {bpmLabel ? `${bpmLabel} BPM` : 'Set BPM'}
+      </button>
+
+      {isOpen && (
+        <div className="track-bpm-menu-panel" role="menu" aria-label={`BPM options for ${track.title}`}>
+          <div className="track-bpm-menu-title">
+            {bpmLabel ? `${bpmLabel} BPM` : 'BPM'}
+            {vibeLabel ? ` · ${vibeLabel}` : ''}
+          </div>
+          <button
+            className="track-bpm-menu-option"
+            type="button"
+            disabled={disabled}
+            role="menuitem"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenEditor(track);
+              setIsOpen(false);
+            }}
+          >
+            {hasBpm ? 'Edit BPM…' : 'Set BPM…'}
+          </button>
+          <button
+            className="track-bpm-menu-option"
+            type="button"
+            disabled={disabled || halfBpm == null}
+            role="menuitem"
+            onClick={(event) => {
+              event.stopPropagation();
+              onAdjust(track, 'half');
+              setIsOpen(false);
+            }}
+          >
+            {halfBpm != null ? `Halve to ${halfBpm} BPM` : 'Halve BPM'}
+          </button>
+          <button
+            className="track-bpm-menu-option"
+            type="button"
+            disabled={disabled || doubleBpm == null}
+            role="menuitem"
+            onClick={(event) => {
+              event.stopPropagation();
+              onAdjust(track, 'double');
+              setIsOpen(false);
+            }}
+          >
+            {doubleBpm != null ? `Double to ${doubleBpm} BPM` : 'Double BPM'}
+          </button>
+          {metadataEditMode === 'needle_only' && (
+            <button
+              className="track-bpm-menu-option"
+              type="button"
+              disabled={disabled || !track.bpm_overridden}
+              role="menuitem"
+              onClick={(event) => {
+                event.stopPropagation();
+                onAdjust(track, 'reset');
+                setIsOpen(false);
+              }}
+            >
+              Reset to imported BPM
+            </button>
+          )}
+          <div className="track-bpm-menu-footnote">{modeCopy}</div>
+      </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
   const [view, setView] = useState<View>('dashboard');
@@ -958,6 +1160,7 @@ function App() {
   const [playlistComposer, setPlaylistComposer] = useState<PlaylistComposerState | null>(null);
   const [playlistTarget, setPlaylistTarget] = useState<PlaylistTargetState | null>(null);
   const [albumGenreEditor, setAlbumGenreEditor] = useState<AlbumGenreEditorState | null>(null);
+  const [trackBpmEditor, setTrackBpmEditor] = useState<TrackBpmEditorState | null>(null);
   const [queuePaths, setQueuePaths] = useState<string[]>([]);
   const [baseQueuePaths, setBaseQueuePaths] = useState<string[]>([]);
   const [currentQueueIndex, setCurrentQueueIndex] = useState(0);
@@ -984,9 +1187,14 @@ function App() {
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [pendingTrackRatings, setPendingTrackRatings] = useState<string[]>([]);
+  const [pendingTrackBpms, setPendingTrackBpms] = useState<string[]>([]);
   const [selectedSmartPlaylistGenres, setSelectedSmartPlaylistGenres] = useState<string[]>([]);
   const [isMaintenanceRunning, setIsMaintenanceRunning] = useState(false);
   const [maintenanceLog, setMaintenanceLog] = useState<string[]>([]);
+  const [isLoudnessAnalysisRunning, setIsLoudnessAnalysisRunning] = useState(false);
+  const [loudnessAnalysisLog, setLoudnessAnalysisLog] = useState<string[]>([]);
+  const [loudnessAnalysisProgress, setLoudnessAnalysisProgress] = useState<LoudnessAnalysisProgress | null>(null);
+  const [loudnessAnalysisFailures, setLoudnessAnalysisFailures] = useState<LoudnessAnalysisFailure[]>([]);
   const [missingLibraryRoots, setMissingLibraryRoots] = useState<string[]>([]);
   const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
   const [status, setStatus] = useState('');
@@ -999,6 +1207,7 @@ function App() {
   const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light');
   const effectiveTheme: 'light' | 'dark' = isMiniPlayer ? 'dark' : resolvedTheme;
   const customAccentColor = useMemo(() => normalizeAccentColor(data?.settings.accent_color ?? null), [data?.settings.accent_color]);
+  const metadataEditMode: MetadataEditMode = data?.settings.metadata_edit_mode ?? 'needle_only';
   const accentTheme = useMemo(
     () => (customAccentColor ? deriveAccentTheme(customAccentColor, effectiveTheme) : null),
     [customAccentColor, effectiveTheme],
@@ -1139,6 +1348,62 @@ function App() {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setPendingTrackRatings((current) => current.filter((path) => path !== track.path));
+    }
+  };
+  const adjustTrackBpmValue = async (track: Track, adjustment: TrackBpmAdjustment) => {
+    setPendingTrackBpms((current) =>
+      current.includes(track.path) ? current : current.concat(track.path),
+    );
+
+    try {
+      const next =
+        metadataEditMode === 'needle_only'
+          ? await persistTrackBpmAdjustment(track.path, adjustment)
+          : await (() => {
+              if (adjustment === 'reset') {
+                throw new Error('Reset is only available while Needle-only BPM edits are active');
+              }
+              if (track.bpm == null || track.bpm <= 0) {
+                throw new Error('No BPM available for this track');
+              }
+              const nextBpm =
+                adjustment === 'double'
+                  ? Math.max(1, track.bpm * 2)
+                  : Math.max(1, Math.round(track.bpm / 2));
+              return persistTrackBpmValue(track.path, nextBpm, metadataEditMode);
+            })();
+      setData(next);
+      setStatus(
+        metadataEditMode === 'write_to_files'
+          ? `Updated file BPM · ${track.title}`
+          : adjustment === 'reset'
+            ? `Reset BPM correction · ${track.title}`
+            : `${adjustment === 'double' ? 'Doubled' : 'Halved'} BPM · ${track.title}`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingTrackBpms((current) => current.filter((path) => path !== track.path));
+    }
+  };
+  const saveExactTrackBpmValue = async (track: Track, bpm: number) => {
+    setPendingTrackBpms((current) =>
+      current.includes(track.path) ? current : current.concat(track.path),
+    );
+
+    try {
+      setBusy('Saving BPM…');
+      const next = await persistTrackBpmValue(track.path, bpm, metadataEditMode);
+      setData(next);
+      setTrackBpmEditor(null);
+      setStatus(
+        `${metadataEditMode === 'write_to_files' ? 'Updated file BPM' : 'Saved BPM correction'} · ${track.title}`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+      setPendingTrackBpms((current) => current.filter((path) => path !== track.path));
     }
   };
   const resizeMiniPlayerWindow = async (height: number) => {
@@ -1408,6 +1673,72 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const dispose = await listen<LoudnessAnalysisProgress>('loudness-analysis-progress', (event) => {
+        const payload = event.payload;
+        if (!payload || typeof payload !== 'object') {
+          return;
+        }
+
+        setLoudnessAnalysisProgress(payload);
+        if (payload.failed_path && payload.failed_reason) {
+          const failedPath = payload.failed_path;
+          const failedReason = payload.failed_reason;
+          setLoudnessAnalysisFailures((current) => {
+            if (current.some((entry) => entry.path === failedPath)) {
+              return current;
+            }
+            return [
+              ...current,
+              {
+                path: failedPath,
+                reason: failedReason,
+              },
+            ];
+          });
+        }
+      });
+      if (cancelled) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const dispose = await listen<string>('loudness-analysis-log', (event) => {
+        const message = typeof event.payload === 'string' ? event.payload.trim() : '';
+        if (!message) {
+          return;
+        }
+
+        setLoudnessAnalysisLog((current) => [...current.slice(-79), formatMaintenanceLogLine(message)]);
+      });
+      if (cancelled) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(miniPlayerPinnedStorageKey, String(isMiniPlayerPinned));
   }, [isMiniPlayerPinned]);
@@ -1512,6 +1843,31 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = effectiveTheme;
   }, [effectiveTheme]);
+
+  useEffect(() => {
+    if (!data) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        await applyVolumeLevelingForTrack(currentPath);
+      } catch (error) {
+        if (!cancelled) {
+          setStatus(error instanceof Error ? error.message : String(error));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    currentPath,
+    data?.settings.last_loudness_analysis_at,
+    data?.settings.volume_leveling_enabled,
+  ]);
 
   useEffect(() => {
     const rootStyle = document.documentElement.style;
@@ -1720,6 +2076,32 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [allTracks, featuredSeed],
   );
+  const dashboardPlaylists = useMemo(() => {
+    const byId = new Map(smartPlaylists.map((playlist) => [playlist.id, playlist]));
+    const topGenrePlaylist = smartPlaylists.find((playlist) => playlist.id.startsWith('genre:')) ?? null;
+    const ordered: AutoPlaylist[] = [];
+
+    const pushIfPresent = (playlist: AutoPlaylist | null | undefined) => {
+      if (!playlist || ordered.some((entry) => entry.id === playlist.id)) return;
+      ordered.push(playlist);
+    };
+
+    pushIfPresent(byId.get('history:most-played'));
+    pushIfPresent(byId.get('history:recent'));
+    pushIfPresent(topGenrePlaylist);
+    pushIfPresent(byId.get('library:first-spin'));
+    pushIfPresent(byId.get('vibes:wind-down'));
+    pushIfPresent(byId.get('vibes:cruise-and-groove'));
+    pushIfPresent(byId.get('vibes:lift-and-energy'));
+    pushIfPresent(byId.get('vibes:get-on-your-feet'));
+
+    for (const playlist of smartPlaylists) {
+      if (ordered.length >= 8) break;
+      pushIfPresent(playlist);
+    }
+
+    return ordered.slice(0, 8);
+  }, [smartPlaylists]);
 
   const manualPlaylists = data?.playlists ?? [];
   const selectedPlaylistData = useMemo<ResolvedPlaylist | null>(() => {
@@ -1760,13 +2142,13 @@ function App() {
 
     const genres = new Map<string, SmartPlaylistGenreOption>();
     for (const track of selectedSmartPlaylist.tracks) {
-      for (const genre of splitTrackGenres(effectiveTrackGenre(track))) {
-        const key = genreKey(genre);
+      for (const genre of splitTrackGenreEntries(effectiveTrackGenre(track))) {
+        const key = genre.key;
         const existing = genres.get(key);
         if (existing) {
           existing.count += 1;
         } else {
-          genres.set(key, { key, label: genre, count: 1 });
+          genres.set(key, { key, label: genre.label, count: 1 });
         }
       }
     }
@@ -1787,6 +2169,10 @@ function App() {
     () => uniqueSorted(scopedTracks.map((track) => track.artist ?? '').filter(Boolean)),
     [scopedTracks],
   );
+  const libraryGenreOptions = useMemo(
+    () => uniqueSorted(allTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
+    [allTracks],
+  );
   const trackGenreOptions = useMemo(
     () => uniqueSorted(scopedTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
     [scopedTracks],
@@ -1802,15 +2188,18 @@ function App() {
     let list = scopedTracks;
     if (selectedSmartPlaylist && selectedSmartPlaylistGenres.length > 0) {
       list = list.filter((track) => {
-        const trackGenres = splitTrackGenres(effectiveTrackGenre(track)).map(genreKey);
+        const trackGenres = splitTrackGenreKeys(effectiveTrackGenre(track));
         return trackGenres.some((genre) => selectedSmartPlaylistGenres.includes(genre));
       });
     }
     if (!playlistMode && trackArtistFilter !== allTrackFilterValue) {
       list = list.filter((track) => (track.artist ?? '') === trackArtistFilter);
     }
+    const expectedTrackGenre = trackGenreFilter !== allTrackFilterValue ? normalizeGenreKey(trackGenreFilter) : null;
     if (!playlistMode && trackGenreFilter !== allTrackFilterValue) {
-      list = list.filter((track) => splitTrackGenres(effectiveTrackGenre(track)).includes(trackGenreFilter));
+      list = list.filter((track) =>
+        expectedTrackGenre ? splitTrackGenreKeys(effectiveTrackGenre(track)).includes(expectedTrackGenre) : true,
+      );
     }
     const startYear = playlistMode ? null : yearFilterNumber(trackYearFromFilter);
     const endYear = playlistMode ? null : yearFilterNumber(trackYearToFilter);
@@ -1893,6 +2282,9 @@ function App() {
         if (existing.year == null && t.year != null) {
           existing.year = t.year;
         }
+        if (t.is_vinyl_rip) {
+          existing.is_vinyl_rip = true;
+        }
       } else {
         map.set(key, {
           key,
@@ -1901,6 +2293,7 @@ function App() {
           year: t.year ?? null,
           count: 1,
           samplePath: t.path,
+          is_vinyl_rip: t.is_vinyl_rip,
           addedAt: t.added_at ?? null,
         });
       }
@@ -2027,6 +2420,10 @@ function App() {
     () => (currentPath ? trackByPath.get(currentPath) ?? null : currentQueueTrack),
     [currentPath, currentQueueTrack, trackByPath],
   );
+  const activeTrack = useMemo(
+    () => (currentPath ? trackByPath.get(currentPath) ?? currentQueueTrack ?? null : null),
+    [currentPath, currentQueueTrack, trackByPath],
+  );
   const selectedAlbumSummary = useMemo(
     () => albums.find((album) => album.key === selectedAlbum) ?? null,
     [albums, selectedAlbum],
@@ -2132,8 +2529,8 @@ function App() {
     selectedRawOutputDevice?.description ??
       (selectedAudioDevice === 'auto' ? defaultAudioDevice.description : selectedAudioDevice),
   );
-  const currentAlbum = currentTrack?.album ?? null;
-  const currentAlbumKey = currentTrack ? trackAlbumKey(currentTrack) : null;
+  const currentAlbum = activeTrack?.album ?? null;
+  const currentAlbumKey = activeTrack ? trackAlbumKey(activeTrack) : null;
   const outputDevices = useMemo(() => {
     const devices = audioDevices.length > 0 ? audioDevices : [defaultAudioDevice];
 
@@ -2251,6 +2648,50 @@ function App() {
     } finally {
       setIsMaintenanceRunning(false);
       setBusy(null);
+    }
+  };
+
+  const analyzeLoudness = async () => {
+    try {
+      setIsLoudnessAnalysisRunning(true);
+      setLoudnessAnalysisLog([formatMaintenanceLogLine('Queued loudness analysis…')]);
+      setLoudnessAnalysisProgress(null);
+      setLoudnessAnalysisFailures([]);
+      setBusy('Analyzing loudness…');
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      const next = await runLoudnessAnalysis();
+      setData(next);
+      setStatus('Volume leveling analysis finished');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLoudnessAnalysisLog((current) => [
+        ...current.slice(-79),
+        formatMaintenanceLogLine(`Loudness analysis failed · ${message}`),
+      ]);
+      setStatus(message);
+    } finally {
+      setIsLoudnessAnalysisRunning(false);
+      setBusy(null);
+    }
+  };
+
+  const copyLoudnessAnalysisFailures = async () => {
+    if (loudnessAnalysisFailures.length === 0) {
+      return;
+    }
+
+    try {
+      const payload = loudnessAnalysisFailures
+        .map((entry) => `${entry.path}${entry.reason ? ` — ${entry.reason}` : ''}`)
+        .join('\n');
+      await navigator.clipboard.writeText(payload);
+      setStatus(
+        loudnessAnalysisFailures.length === 1
+          ? 'Copied 1 failed file path'
+          : `Copied ${loudnessAnalysisFailures.length} failed file paths`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -2590,17 +3031,22 @@ function App() {
       setPlaylistTarget(null);
     }
   };
-  const saveAlbumPrimaryGenre = async (
+  const saveAlbumGenre = async (
     album: string,
     albumArtist: string | null,
-    primaryGenre: string | null,
+    trackPaths: string[],
+    genre: string | null,
   ) => {
     try {
-      setBusy('Saving primary genre…');
-      const next = await persistAlbumPrimaryGenre(album, albumArtist, primaryGenre);
+      setBusy('Saving genres…');
+      const next = await persistAlbumGenre(album, albumArtist, trackPaths, genre, metadataEditMode);
       setData(next);
       setAlbumGenreEditor(null);
-      setStatus(primaryGenre ? `Primary genre · ${primaryGenre}` : `Cleared primary genre · ${album}`);
+      setStatus(
+        genre
+          ? `${metadataEditMode === 'write_to_files' ? 'Updated file genres' : 'Saved Needle genres'} · ${album}`
+          : `${metadataEditMode === 'write_to_files' ? 'Cleared file genres' : 'Cleared Needle genres'} · ${album}`,
+      );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2936,27 +3382,29 @@ function App() {
   };
 
   const togglePlayPause = async () => {
-    if (!currentTrack) {
-      const first = queueTracks[0] ?? filteredTracks[0];
-      if (first) {
-        if (queueTracks.length > 0) {
-          await syncSession(
-            {
-              ...playbackSession,
-              current_index: Math.max(queueTracks.findIndex((track) => track.path === first.path), 0),
-              position_seconds: 0,
-              paused: false,
-            },
-            { label: `Playing ${first.title}` },
-          );
-        } else {
-          await play(first);
-        }
+    if (!currentPath) {
+      const restartTrack = currentQueueTrack ?? queueTracks[0] ?? filteredTracks[0] ?? null;
+      if (!restartTrack) return;
+
+      if (queueTracks.length > 0) {
+        await syncSession(
+          {
+            ...playbackSession,
+            current_index: Math.max(queueTracks.findIndex((track) => track.path === restartTrack.path), 0),
+            position_seconds: 0,
+            paused: false,
+          },
+          { label: `Playing ${restartTrack.title}` },
+        );
+      } else {
+        await play(restartTrack);
       }
       return;
     }
     try {
       if (!isBackendPlaybackLoaded) {
+        const resumeTrack = currentTrack ?? currentQueueTrack ?? queueTracks[currentQueueIndex] ?? null;
+        if (!resumeTrack) return;
         await syncSession(
           {
             ...playbackSession,
@@ -2964,7 +3412,7 @@ function App() {
             position_seconds: 0,
             paused: false,
           },
-          { label: `Playing ${currentTrack.title}` },
+          { label: `Playing ${resumeTrack.title}` },
         );
         return;
       }
@@ -3491,41 +3939,41 @@ function App() {
           </div>
         </div>
 
-        <div className="sidebar-scroll">
-          <nav className="nav-section">
-            <div className="nav-label">Browse</div>
-            <button
-              className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
-              onClick={() => setView('dashboard')}
-            >
-              <span className="nav-icon">⌂</span>Dashboard
-            </button>
-            <button
-              className={`nav-item ${view === 'tracks' && !selectedPlaylist ? 'active' : ''}`}
-              onClick={() => {
-                setView('tracks');
-                clearBrowsingFilters();
-              }}
-            >
-              <span className="nav-icon">♪</span>Tracks
-              <span className="nav-count">{lib.track_count}</span>
-            </button>
-            <button
-              className={`nav-item ${view === 'albums' ? 'active' : ''}`}
-              onClick={() => setView('albums')}
-            >
-              <span className="nav-icon">◉</span>Albums
-              <span className="nav-count">{lib.album_count}</span>
-            </button>
-            <button
-              className={`nav-item ${view === 'artists' ? 'active' : ''}`}
-              onClick={() => setView('artists')}
-            >
-              <span className="nav-icon">☻</span>Artists
-              <span className="nav-count">{lib.artist_count}</span>
-            </button>
-          </nav>
+        <nav className="nav-section">
+          <div className="nav-label">Browse</div>
+          <button
+            className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setView('dashboard')}
+          >
+            <span className="nav-icon">⌂</span>Dashboard
+          </button>
+          <button
+            className={`nav-item ${view === 'tracks' && !selectedPlaylist ? 'active' : ''}`}
+            onClick={() => {
+              setView('tracks');
+              clearBrowsingFilters();
+            }}
+          >
+            <span className="nav-icon">♪</span>Tracks
+            <span className="nav-count">{lib.track_count}</span>
+          </button>
+          <button
+            className={`nav-item ${view === 'albums' ? 'active' : ''}`}
+            onClick={() => setView('albums')}
+          >
+            <span className="nav-icon">◉</span>Albums
+            <span className="nav-count">{lib.album_count}</span>
+          </button>
+          <button
+            className={`nav-item ${view === 'artists' ? 'active' : ''}`}
+            onClick={() => setView('artists')}
+          >
+            <span className="nav-icon">☻</span>Artists
+            <span className="nav-count">{lib.artist_count}</span>
+          </button>
+        </nav>
 
+        <div className="sidebar-scroll">
           <nav className="nav-section">
             <div className="nav-label">Playlists</div>
             <button className="nav-button" onClick={() => openPlaylistTarget([])}>
@@ -3575,17 +4023,17 @@ function App() {
               </button>
             ))}
           </nav>
-
-          <nav className="nav-section">
-            <div className="nav-label">App</div>
-            <button
-              className={`nav-item ${view === 'settings' ? 'active' : ''}`}
-              onClick={() => setView('settings')}
-            >
-              <span className="nav-icon">⚙</span>Settings
-            </button>
-          </nav>
         </div>
+
+        <nav className="nav-section sidebar-app-nav">
+          <div className="nav-label">App</div>
+          <button
+            className={`nav-item ${view === 'settings' ? 'active' : ''}`}
+            onClick={() => setView('settings')}
+          >
+            <span className="nav-icon">⚙</span>Settings
+          </button>
+        </nav>
       </aside>
 
       <main className="content">
@@ -3595,7 +4043,7 @@ function App() {
             albums={albums}
             recentAlbums={recentAlbums}
             artists={allArtists}
-            playlists={smartPlaylists}
+            playlists={dashboardPlaylists}
             currentTrack={currentTrack}
             isPlaying={isPlaying}
             featuredSeed={featuredSeed}
@@ -3714,6 +4162,10 @@ function App() {
             onClearSmartPlaylistGenres={() => setSelectedSmartPlaylistGenres([])}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
+            metadataEditMode={metadataEditMode}
+            onAdjustBpm={adjustTrackBpmValue}
+            onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
+            pendingBpmPaths={pendingTrackBpms}
             playlistPrimaryActionLabel={selectedPlaylistData ? selectedPlaylistPrimaryActionLabel : undefined}
             onPlayPlaylistPrimaryAction={
               selectedPlaylistData
@@ -3798,6 +4250,7 @@ function App() {
             album={selectedAlbumSummary.album}
             albumKey={selectedAlbum}
             albumArtist={selectedAlbumSummary.artist}
+            isVinylRip={selectedAlbumSummary.is_vinyl_rip}
             tracks={allTracks}
             isMetadataRefreshing={metadataRefreshAlbumKey === selectedAlbum}
             currentPath={currentPath}
@@ -3827,11 +4280,16 @@ function App() {
             }
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
-            onEditPrimaryGenre={(currentPrimaryGenre, suggestedGenres) =>
+            metadataEditMode={metadataEditMode}
+            onAdjustBpm={adjustTrackBpmValue}
+            onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
+            pendingBpmPaths={pendingTrackBpms}
+            onEditGenre={(currentGenre, suggestedGenres, trackPaths) =>
               setAlbumGenreEditor({
                 album: selectedAlbumSummary.album,
                 albumArtist: selectedAlbumSummary.artist,
-                currentPrimaryGenre,
+                trackPaths,
+                currentGenre,
                 suggestedGenres,
               })
             }
@@ -3948,6 +4406,10 @@ function App() {
             }
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
+            metadataEditMode={metadataEditMode}
+            onAdjustBpm={adjustTrackBpmValue}
+            onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
+            pendingBpmPaths={pendingTrackBpms}
           />
         )}
 
@@ -3958,10 +4420,16 @@ function App() {
             onChange={updateSettings}
             onAddFolder={importFolder}
             onMaintenance={maintenance}
+            onLoudnessAnalysis={analyzeLoudness}
             onRemoveRoot={removeRoot}
             busy={!!busy}
             maintenanceBusy={isMaintenanceRunning}
             maintenanceLog={maintenanceLog}
+            loudnessAnalysisBusy={isLoudnessAnalysisRunning}
+            loudnessAnalysisLog={loudnessAnalysisLog}
+            loudnessAnalysisProgress={loudnessAnalysisProgress}
+            loudnessAnalysisFailures={loudnessAnalysisFailures}
+            onCopyLoudnessFailures={copyLoudnessAnalysisFailures}
             missingLibraryRoots={missingLibraryRoots}
           />
         )}
@@ -3990,15 +4458,28 @@ function App() {
       {albumGenreEditor && (
         <AlbumGenreEditorModal
           state={albumGenreEditor}
-          busy={busy === 'Saving primary genre…'}
+          availableGenres={libraryGenreOptions}
+          metadataEditMode={metadataEditMode}
+          busy={busy === 'Saving genres…'}
           onClose={() => setAlbumGenreEditor(null)}
-          onSubmit={(primaryGenre) =>
-            void saveAlbumPrimaryGenre(
+          onSubmit={(genre) =>
+            void saveAlbumGenre(
               albumGenreEditor.album,
               albumGenreEditor.albumArtist,
-              primaryGenre,
+              albumGenreEditor.trackPaths,
+              genre,
             )
           }
+        />
+      )}
+
+      {trackBpmEditor && (
+        <TrackBpmEditorModal
+          state={trackBpmEditor}
+          metadataEditMode={metadataEditMode}
+          busy={busy === 'Saving BPM…'}
+          onClose={() => setTrackBpmEditor(null)}
+          onSubmit={(bpm) => void saveExactTrackBpmValue(trackBpmEditor.track, bpm)}
         />
       )}
 
@@ -4284,11 +4765,12 @@ function PlaylistComposerModal({ composer, busy, onClose, onSubmit }: PlaylistCo
       return activeSource?.tracks ?? [];
     }
 
+    const expectedGenre = normalizeGenreKey(genreFilter);
     return composer.libraryTracks.filter((track) => {
       if (artistFilter && track.artist !== artistFilter) {
         return false;
       }
-      if (genreFilter && !splitTrackGenres(effectiveTrackGenre(track)).includes(genreFilter)) {
+      if (expectedGenre && !splitTrackGenreKeys(effectiveTrackGenre(track)).includes(expectedGenre)) {
         return false;
       }
       return true;
@@ -4566,17 +5048,33 @@ function PlaylistTargetModal({
 
 interface AlbumGenreEditorModalProps {
   state: AlbumGenreEditorState;
+  availableGenres: string[];
+  metadataEditMode: MetadataEditMode;
   busy: boolean;
   onClose: () => void;
-  onSubmit: (primaryGenre: string | null) => void;
+  onSubmit: (genre: string | null) => void;
 }
 
-function AlbumGenreEditorModal({ state, busy, onClose, onSubmit }: AlbumGenreEditorModalProps) {
-  const [value, setValue] = useState(state.currentPrimaryGenre ?? state.suggestedGenres[0] ?? '');
+function AlbumGenreEditorModal({
+  state,
+  availableGenres,
+  metadataEditMode,
+  busy,
+  onClose,
+  onSubmit,
+}: AlbumGenreEditorModalProps) {
+  const initialGenres = useMemo(
+    () => splitTrackGenres(state.currentGenre ?? state.suggestedGenres[0] ?? ''),
+    [state.currentGenre, state.suggestedGenres],
+  );
+  const [selectedGenres, setSelectedGenres] = useState<string[]>(initialGenres);
+  const [query, setQuery] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    setValue(state.currentPrimaryGenre ?? state.suggestedGenres[0] ?? '');
-  }, [state]);
+    setSelectedGenres(splitTrackGenres(state.currentGenre ?? state.suggestedGenres[0] ?? ''));
+    setQuery('');
+  }, [state.currentGenre, state.suggestedGenres]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -4589,10 +5087,75 @@ function AlbumGenreEditorModal({ state, busy, onClose, onSubmit }: AlbumGenreEdi
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [busy, onClose]);
 
-  const trimmedValue = value.trim();
-  const suggestedGenres = Array.from(
-    new Set([state.currentPrimaryGenre, ...state.suggestedGenres].filter(Boolean)),
-  ) as string[];
+  const selectedGenreKeys = new Set(selectedGenres.map((genre) => normalizeGenreKey(genre)).filter(Boolean));
+  const suggestedGenres = useMemo(
+    () =>
+      uniqueSorted(
+        [state.currentGenre, ...state.suggestedGenres]
+          .flatMap((value) => splitTrackGenres(value))
+          .filter(Boolean),
+      ),
+    [state.currentGenre, state.suggestedGenres],
+  );
+  const normalizedQuery = normalizeGenreKey(query);
+  const pendingGenres = useMemo(
+    () =>
+      uniqueSorted(splitTrackGenres(query)).filter(
+        (genre) => !selectedGenreKeys.has(normalizeGenreKey(genre) ?? ''),
+      ),
+    [query, selectedGenreKeys],
+  );
+  const filteredGenres = useMemo(() => {
+    const source = uniqueSorted([...suggestedGenres, ...availableGenres]);
+    const loweredQuery = query.trim().toLocaleLowerCase();
+    return source.filter((genre) => {
+      const key = normalizeGenreKey(genre);
+      if (!key || selectedGenreKeys.has(key)) return false;
+      if (!loweredQuery) return true;
+      return (
+        genre.toLocaleLowerCase().includes(loweredQuery) ||
+        key.includes(loweredQuery) ||
+        (normalizedQuery ? key.includes(normalizedQuery) : false)
+      );
+    });
+  }, [availableGenres, normalizedQuery, query, selectedGenreKeys, suggestedGenres]);
+  const genreString = selectedGenres.join('; ');
+  const modeCopy =
+    metadataEditMode === 'write_to_files'
+      ? 'This will update the embedded genre tags on every track on this album.'
+      : 'This will stay inside Needle and leave the audio files untouched.';
+  const addGenres = (genres: string[]) => {
+    if (genres.length === 0) return;
+    setSelectedGenres((current) => {
+      const next = current.slice();
+      const seen = new Set(current.map((genre) => normalizeGenreKey(genre)).filter(Boolean));
+      for (const genre of genres) {
+        const key = normalizeGenreKey(genre);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        next.push(genreLabelFromKey(key));
+      }
+      return next;
+    });
+    setQuery('');
+    inputRef.current?.focus();
+  };
+  const addGenre = (genre: string) => addGenres([genre]);
+  const addGenresFromText = (value: string) => {
+    const parsed = splitTrackGenres(value);
+    if (parsed.length > 0) {
+      addGenres(parsed);
+      return;
+    }
+    if (normalizedQuery) {
+      addGenres([genreLabelFromKey(normalizedQuery)]);
+    }
+  };
+  const removeGenre = (genre: string) => {
+    const key = normalizeGenreKey(genre);
+    setSelectedGenres((current) => current.filter((entry) => normalizeGenreKey(entry) !== key));
+    inputRef.current?.focus();
+  };
 
   return (
     <div className="modal-scrim" onClick={() => !busy && onClose()}>
@@ -4607,10 +5170,10 @@ function AlbumGenreEditorModal({ state, busy, onClose, onSubmit }: AlbumGenreEdi
           <div>
             <div className="view-eyebrow">Metadata</div>
             <h2 className="modal-title" id="album-genre-editor-title">
-              Primary genre
+              Album genres
             </h2>
             <p className="modal-copy">
-              Needle will use this for this album before falling back to the imported tags.
+              Edit the full genre string for this album. {modeCopy} Change the save mode in Settings.
             </p>
           </div>
           <button className="ghost-button" onClick={onClose} disabled={busy}>
@@ -4620,13 +5183,15 @@ function AlbumGenreEditorModal({ state, busy, onClose, onSubmit }: AlbumGenreEdi
 
         {suggestedGenres.length > 0 && (
           <div className="field">
-            <div className="field-label">Suggestions from your files</div>
+            <div className="field-label">Suggestions from this album</div>
             <div className="genre-choice-grid">
               {suggestedGenres.map((genre) => (
                 <button
                   key={genre}
-                  className={`genre-choice ${trimmedValue === genre ? 'is-selected' : ''}`}
-                  onClick={() => setValue(genre)}
+                  className={`genre-choice ${
+                    selectedGenreKeys.has(normalizeGenreKey(genre) ?? '') ? 'is-selected' : ''
+                  }`}
+                  onClick={() => addGenre(genre)}
                 >
                   {genre}
                 </button>
@@ -4635,27 +5200,173 @@ function AlbumGenreEditorModal({ state, busy, onClose, onSubmit }: AlbumGenreEdi
           </div>
         )}
 
+        <div className="field">
+          <span className="field-label">Genres for every track on this album</span>
+          <div className="genre-multiselect" onClick={() => inputRef.current?.focus()}>
+            <div className="genre-multiselect-values">
+              {selectedGenres.map((genre) => (
+                <button
+                  key={genre}
+                  type="button"
+                  className="genre-token"
+                  onClick={() => removeGenre(genre)}
+                  disabled={busy}
+                  aria-label={`Remove ${genre}`}
+                  title={`Remove ${genre}`}
+                >
+                  <span>{genre}</span>
+                  <span className="genre-token-remove" aria-hidden="true">
+                    ×
+                  </span>
+                </button>
+              ))}
+              <input
+                ref={inputRef}
+                className="genre-multiselect-input"
+                value={query}
+                onChange={(event) => setQuery(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    if (query.trim()) addGenresFromText(query);
+                  } else if (event.key === 'Backspace' && !query && selectedGenres.length > 0) {
+                    event.preventDefault();
+                    setSelectedGenres((current) => current.slice(0, -1));
+                  }
+                }}
+                placeholder={selectedGenres.length > 0 ? 'Add another genre…' : 'Search or add genres…'}
+                autoFocus
+                disabled={busy}
+              />
+            </div>
+          </div>
+          <div className="genre-picker-panel" role="listbox" aria-label="Available genres">
+            {pendingGenres.length > 0 &&
+              !pendingGenres.every((genre) => filteredGenres.some((option) => normalizeGenreKey(option) === normalizeGenreKey(genre))) && (
+              <button type="button" className="genre-picker-option is-create" onClick={() => addGenres(pendingGenres)}>
+                Add <strong>{pendingGenres.length === 1 ? pendingGenres[0] : `${pendingGenres.length} genres`}</strong>
+              </button>
+              )}
+            {filteredGenres.slice(0, 24).map((genre) => (
+              <button
+                key={genre}
+                type="button"
+                className="genre-picker-option"
+                onClick={() => addGenre(genre)}
+              >
+                {genre}
+              </button>
+            ))}
+            {pendingGenres.length === 0 && filteredGenres.length === 0 && (
+              <div className="genre-picker-empty">No matching genres yet. Type a new one and press Enter.</div>
+            )}
+          </div>
+          <div className="field-help">Needle will save this as: {genreString || 'No genres selected'}</div>
+        </div>
+
+        <div className="modal-actions">
+          <button className="ghost-button" onClick={() => onSubmit(null)} disabled={!state.currentGenre || busy}>
+            {metadataEditMode === 'write_to_files' ? 'Clear file genres' : 'Clear Needle genres'}
+          </button>
+          <button
+            className="primary-button"
+            onClick={() => onSubmit(genreString || null)}
+            disabled={!genreString || busy}
+          >
+            {busy ? 'Saving…' : metadataEditMode === 'write_to_files' ? 'Write genres' : 'Save in Needle'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface TrackBpmEditorModalProps {
+  state: TrackBpmEditorState;
+  metadataEditMode: MetadataEditMode;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (bpm: number) => void;
+}
+
+function TrackBpmEditorModal({
+  state,
+  metadataEditMode,
+  busy,
+  onClose,
+  onSubmit,
+}: TrackBpmEditorModalProps) {
+  const [value, setValue] = useState(formatBpm(state.track.bpm) ?? '');
+
+  useEffect(() => {
+    setValue(formatBpm(state.track.bpm) ?? '');
+  }, [state]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) {
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [busy, onClose]);
+
+  const parsed = Number.parseInt(value.trim(), 10);
+  const canSubmit = Number.isFinite(parsed) && parsed > 0;
+
+  return (
+    <div className="modal-scrim" onClick={() => !busy && onClose()}>
+      <div
+        className="modal-card genre-editor"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="track-bpm-editor-title"
+      >
+        <div className="modal-head">
+          <div>
+            <div className="view-eyebrow">Metadata</div>
+            <h2 className="modal-title" id="track-bpm-editor-title">
+              {state.track.bpm != null ? 'Edit BPM' : 'Set BPM'}
+            </h2>
+            <p className="modal-copy">
+              {metadataEditMode === 'write_to_files'
+                ? 'This will update the embedded BPM tag in the music file. Change the save mode in Settings.'
+                : 'This will stay inside Needle as a local BPM correction. Change the save mode in Settings.'}
+            </p>
+          </div>
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+        </div>
+
         <label className="field">
-          <span className="field-label">Genre Needle should use</span>
+          <span className="field-label">{state.track.title}</span>
           <input
             className="field-input"
             value={value}
             onChange={(event) => setValue(event.currentTarget.value)}
-            placeholder="Electronic"
+            placeholder="128"
+            inputMode="numeric"
             autoFocus
           />
         </label>
 
         <div className="modal-actions">
-          <button className="ghost-button" onClick={() => onSubmit(null)} disabled={!state.currentPrimaryGenre || busy}>
-            Clear override
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Cancel
           </button>
           <button
             className="primary-button"
-            onClick={() => onSubmit(trimmedValue || null)}
-            disabled={!trimmedValue || busy}
+            onClick={() => {
+              if (!canSubmit) return;
+              onSubmit(parsed);
+            }}
+            disabled={!canSubmit || busy}
           >
-            {busy ? 'Saving…' : 'Save primary genre'}
+            {busy ? 'Saving…' : metadataEditMode === 'write_to_files' ? 'Write BPM' : 'Save BPM'}
           </button>
         </div>
       </div>
@@ -5059,6 +5770,10 @@ interface TracksViewProps {
   onClearSmartPlaylistGenres?: () => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
+  metadataEditMode: MetadataEditMode;
+  onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  onOpenBpmEditor: (track: Track) => void;
+  pendingBpmPaths: string[];
   playlistPrimaryActionLabel?: string;
   onPlayPlaylistPrimaryAction?: () => void;
   onShufflePlaylist?: () => void;
@@ -5123,6 +5838,10 @@ function TracksView({
   onClearSmartPlaylistGenres,
   onSetRating,
   pendingRatingPaths,
+  metadataEditMode,
+  onAdjustBpm,
+  onOpenBpmEditor,
+  pendingBpmPaths,
   playlistPrimaryActionLabel,
   onPlayPlaylistPrimaryAction,
   onShufflePlaylist,
@@ -5404,6 +6123,7 @@ function TracksView({
                   ? playlistSourceTotalCount - 1
                   : Math.max(totalTracks - 1, 0);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
+              const bpmIsPending = pendingBpmPaths.includes(track.path);
               return (
                 <div key={track.id} className={`track-row ${isCurrent ? 'playing' : ''}`}>
                   <Cover
@@ -5453,6 +6173,13 @@ function TracksView({
                     </span>
                   </span>
                   <span className="album-track-actions">
+                    <TrackBpmControl
+                      track={track}
+                      metadataEditMode={metadataEditMode}
+                      disabled={bpmIsPending}
+                      onAdjust={onAdjustBpm}
+                      onOpenEditor={onOpenBpmEditor}
+                    />
                     <TrackRatingControl
                       track={track}
                       disabled={ratingIsPending}
@@ -5552,6 +6279,7 @@ interface AlbumDetailViewProps {
   album: string;
   albumKey: string;
   albumArtist: string | null;
+  isVinylRip: boolean;
   tracks: Track[];
   isMetadataRefreshing: boolean;
   currentPath: string | null;
@@ -5568,7 +6296,11 @@ interface AlbumDetailViewProps {
   onAddTrackToPlaylist: (track: Track) => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
-  onEditPrimaryGenre: (currentPrimaryGenre: string | null, suggestedGenres: string[]) => void;
+  metadataEditMode: MetadataEditMode;
+  onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  onOpenBpmEditor: (track: Track) => void;
+  pendingBpmPaths: string[];
+  onEditGenre: (currentGenre: string | null, suggestedGenres: string[], trackPaths: string[]) => void;
   onRefreshMetadata: () => void;
   onPlayAlbum: () => void;
   onShuffleAlbum: () => void;
@@ -5579,6 +6311,7 @@ function AlbumDetailView({
   album,
   albumKey,
   albumArtist,
+  isVinylRip,
   tracks,
   isMetadataRefreshing,
   currentPath,
@@ -5595,7 +6328,11 @@ function AlbumDetailView({
   onAddTrackToPlaylist,
   onSetRating,
   pendingRatingPaths,
-  onEditPrimaryGenre,
+  metadataEditMode,
+  onAdjustBpm,
+  onOpenBpmEditor,
+  pendingBpmPaths,
+  onEditGenre,
   onRefreshMetadata,
   onPlayAlbum,
   onShuffleAlbum,
@@ -5657,18 +6394,18 @@ function AlbumDetailView({
   const genres = useMemo(() => {
     const set = new Set<string>();
     for (const t of albumTracks) {
-      if (!t.genre) continue;
-      for (const part of splitTrackGenres(t.genre)) {
+      for (const part of splitTrackGenres(effectiveTrackGenre(t))) {
         set.add(part);
       }
     }
-    return Array.from(set).slice(0, 5);
+    return Array.from(set);
   }, [albumTracks]);
-  const primaryGenre = albumTracks.find((track) => track.primary_genre)?.primary_genre ?? null;
-  const secondaryGenres = useMemo(
-    () => (primaryGenre ? genres.filter((genre) => compareText(genre, primaryGenre) !== 0) : genres),
-    [genres, primaryGenre],
+  const suggestedGenreValues = useMemo(
+    () => uniqueSorted(albumTracks.map((track) => effectiveTrackGenre(track) ?? '').filter(Boolean)),
+    [albumTracks],
   );
+  const currentGenreValue =
+    suggestedGenreValues.length === 1 ? suggestedGenreValues[0] : (suggestedGenreValues[0] ?? null);
 
   const qualityHint = useMemo(() => {
     if (albumTracks.length === 0) return null;
@@ -5749,6 +6486,7 @@ function AlbumDetailView({
             trackPath={samplePath}
             fallback={album[0]?.toUpperCase() ?? '◉'}
             size="hero"
+            vinylRip={isVinylRip}
           />
           {isMetadataRefreshing && (
             <div className="artist-image-refresh-overlay" aria-hidden="true">
@@ -5794,22 +6532,22 @@ function AlbumDetailView({
               .join(' · ')}
           </div>
           <div className="album-primary-genre">
-            <span className="album-primary-genre-label">Primary genre</span>
-            <span className={`album-primary-genre-pill ${primaryGenre ? 'is-set' : ''}`}>
-              {primaryGenre ?? 'Not set'}
+            <span className="album-primary-genre-label">Genres</span>
+            <span className={`album-primary-genre-pill ${genres.length > 0 ? 'is-set' : ''}`}>
+              {genres.length === 0 ? 'Not set' : `${genres.length} tag${genres.length === 1 ? '' : 's'}`}
             </span>
             <button
               className="album-primary-genre-edit"
-              onClick={() => onEditPrimaryGenre(primaryGenre, genres)}
-              title={primaryGenre ? `Edit primary genre · ${primaryGenre}` : 'Set primary genre'}
-              aria-label={primaryGenre ? `Edit primary genre · ${primaryGenre}` : 'Set primary genre'}
+              onClick={() => onEditGenre(currentGenreValue, suggestedGenreValues, albumTracks.map((track) => track.path))}
+              title={currentGenreValue ? `Edit genres · ${currentGenreValue}` : 'Edit genres'}
+              aria-label={currentGenreValue ? `Edit genres · ${currentGenreValue}` : 'Edit genres'}
             >
               <PencilIcon />
             </button>
           </div>
-          {secondaryGenres.length > 0 && (
+          {genres.length > 0 && (
             <div className="album-hero-genres">
-              {secondaryGenres.map((g) => (
+              {genres.map((g) => (
                 <span key={g} className="album-genre-pill">
                   {g}
                 </span>
@@ -5881,6 +6619,9 @@ function AlbumDetailView({
                   const isCurrent = currentPath === t.path;
                   const isQueued = queuePaths.includes(t.path);
                   const ratingIsPending = pendingRatingPaths.includes(t.path);
+                  const bpmIsPending = pendingBpmPaths.includes(t.path);
+                  const techDetails = formatTrackTechDetails(t);
+                  const vibeLabel = vibeLabelForTrack(t);
                   return (
                     <div
                       key={t.id}
@@ -5893,15 +6634,33 @@ function AlbumDetailView({
                         <span className="album-track-num">
                           {isCurrent ? <PlayingIndicator /> : (t.track_number ?? '—')}
                         </span>
-                        <span className="album-track-title">{t.title}</span>
-                        <span className="album-track-meta muted">
-                          {formatQuality(t)}
+                        <span className="album-track-copy">
+                          <span className="album-track-title">{t.title}</span>
+                          {(techDetails || vibeLabel) && (
+                            <span className="album-track-meta muted">
+                              {techDetails && <span className="album-track-tech">{techDetails}</span>}
+                              {vibeLabel && (
+                                <span
+                                  className={`album-track-vibe ${techDetails ? 'has-tech' : ''} ${albumTrackVibeToneClass(t)}`}
+                                >
+                                  {vibeLabel}
+                                </span>
+                              )}
+                            </span>
+                          )}
                         </span>
-                      <span className="album-track-duration">
+                        <span className="album-track-duration">
                           {formatDuration(t.duration_seconds)}
                         </span>
                       </button>
                       <span className="album-track-actions">
+                        <TrackBpmControl
+                          track={t}
+                          metadataEditMode={metadataEditMode}
+                          disabled={bpmIsPending}
+                          onAdjust={onAdjustBpm}
+                          onOpenEditor={onOpenBpmEditor}
+                        />
                         <TrackRatingControl
                           track={t}
                           disabled={ratingIsPending}
@@ -5981,6 +6740,10 @@ interface ArtistDetailViewProps {
   onAddTrackToPlaylist: (track: Track) => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
+  metadataEditMode: MetadataEditMode;
+  onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  onOpenBpmEditor: (track: Track) => void;
+  pendingBpmPaths: string[];
 }
 
 function ArtistDetailView({
@@ -6011,6 +6774,10 @@ function ArtistDetailView({
   onAddTrackToPlaylist,
   onSetRating,
   pendingRatingPaths,
+  metadataEditMode,
+  onAdjustBpm,
+  onOpenBpmEditor,
+  pendingBpmPaths,
 }: ArtistDetailViewProps) {
   const [isBioExpanded, setIsBioExpanded] = useState(false);
   const [isImageMenuOpen, setIsImageMenuOpen] = useState(false);
@@ -6254,6 +7021,7 @@ function ArtistDetailView({
                     trackPath={album.samplePath}
                     fallback={album.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
+                    vinylRip={album.is_vinyl_rip}
                   />
                   <div className="card-title">{album.album}</div>
                   <div className="card-sub">{album.year ?? relativeAdded(album.addedAt)}</div>
@@ -6320,6 +7088,7 @@ function ArtistDetailView({
               const isQueued = queuePaths.includes(track.path);
               const albumKeyValue = trackAlbumKey(track);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
+              const bpmIsPending = pendingBpmPaths.includes(track.path);
               return (
                 <div key={track.id} className={`album-track-row artist-top-track-row ${isCurrent ? 'playing' : ''}`}>
                   <Cover
@@ -6355,8 +7124,15 @@ function ArtistDetailView({
                       <span className="artist-track-album-link is-static">Standalone track</span>
                     )}
                   </span>
-                  <span className="artist-track-format">{formatQuality(track)}</span>
+                  <span className="artist-track-format">{formatTrackDetails(track)}</span>
                   <span className="album-track-actions">
+                    <TrackBpmControl
+                      track={track}
+                      metadataEditMode={metadataEditMode}
+                      disabled={bpmIsPending}
+                      onAdjust={onAdjustBpm}
+                      onOpenEditor={onOpenBpmEditor}
+                    />
                     <TrackRatingControl
                       track={track}
                       disabled={ratingIsPending}
@@ -6454,6 +7230,7 @@ function AlbumsView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
+                    vinylRip={a.is_vinyl_rip}
                     imageMode="deferred"
                     lazyLoad
                   />
@@ -6499,11 +7276,19 @@ interface CoverProps {
   trackPath: string | null;
   fallback: string;
   size: 'md' | 'card' | 'hero' | 'queue' | 'mini';
+  vinylRip?: boolean;
   imageMode?: 'default' | 'cache_only' | 'deferred';
   lazyLoad?: boolean;
 }
 
-function Cover({ trackPath, fallback, size, imageMode = 'default', lazyLoad = false }: CoverProps) {
+function Cover({
+  trackPath,
+  fallback,
+  size,
+  vinylRip = false,
+  imageMode = 'default',
+  lazyLoad = false,
+}: CoverProps) {
   const { ref, isNearViewport } = useNearViewport(lazyLoad);
   const url = useCoverArt(trackPath, {
     cacheOnly: imageMode === 'cache_only',
@@ -6525,6 +7310,7 @@ function Cover({ trackPath, fallback, size, imageMode = 'default', lazyLoad = fa
     return (
       <div className={className} ref={ref}>
         <img src={url} alt="" className="cover-img" />
+        {vinylRip && <VinylRipBadge size={size} />}
       </div>
     );
   }
@@ -6532,7 +7318,16 @@ function Cover({ trackPath, fallback, size, imageMode = 'default', lazyLoad = fa
   return (
     <div className={className} ref={ref}>
       {fallback}
+      {vinylRip && <VinylRipBadge size={size} />}
     </div>
+  );
+}
+
+function VinylRipBadge({ size }: { size: CoverProps['size'] }) {
+  return (
+    <span className={`vinyl-rip-badge vinyl-rip-badge-${size}`} title="Vinyl rip" aria-label="Vinyl rip">
+      <img src={vinylRipBadgeIcon} alt="" className="vinyl-rip-badge-img" />
+    </span>
   );
 }
 
@@ -6765,10 +7560,16 @@ interface SettingsViewProps {
   onChange: (next: AppSettings) => void;
   onAddFolder: () => void;
   onMaintenance: () => void;
+  onLoudnessAnalysis: () => void;
   onRemoveRoot: (folder: string) => void;
   busy: boolean;
   maintenanceBusy: boolean;
   maintenanceLog: string[];
+  loudnessAnalysisBusy: boolean;
+  loudnessAnalysisLog: string[];
+  loudnessAnalysisProgress: LoudnessAnalysisProgress | null;
+  loudnessAnalysisFailures: LoudnessAnalysisFailure[];
+  onCopyLoudnessFailures: () => void;
   missingLibraryRoots: string[];
 }
 
@@ -6778,20 +7579,32 @@ function SettingsView({
   onChange,
   onAddFolder,
   onMaintenance,
+  onLoudnessAnalysis,
   onRemoveRoot,
   busy,
   maintenanceBusy,
   maintenanceLog,
+  loudnessAnalysisBusy,
+  loudnessAnalysisLog,
+  loudnessAnalysisProgress,
+  loudnessAnalysisFailures,
+  onCopyLoudnessFailures,
   missingLibraryRoots,
 }: SettingsViewProps) {
   const isManualEqualizer = settings.equalizer_preset === 'manual';
   const accentColorValue = normalizeAccentColor(settings.accent_color) ?? currentAccentColor;
   const lastMaintenanceLabel = formatMaintenanceTimestamp(settings.last_maintenance_at);
+  const lastLoudnessAnalysisLabel = formatMaintenanceTimestamp(settings.last_loudness_analysis_at);
   const [manualBandsDraft, setManualBandsDraft] = useState(() =>
     normalizeEqualizerBands(settings.equalizer_bands),
   );
   const maintenanceLogRef = useRef<HTMLDivElement | null>(null);
+  const loudnessAnalysisLogRef = useRef<HTMLDivElement | null>(null);
   const missingRootsSet = useMemo(() => new Set(missingLibraryRoots), [missingLibraryRoots]);
+  const loudnessProgressRatio = loudnessAnalysisProgress?.total_tracks
+    ? Math.min(1, loudnessAnalysisProgress.processed_tracks / loudnessAnalysisProgress.total_tracks)
+    : 0;
+  const loudnessProgressPercent = Math.round(loudnessProgressRatio * 100);
 
   useEffect(() => {
     setManualBandsDraft(normalizeEqualizerBands(settings.equalizer_bands));
@@ -6805,6 +7618,15 @@ function SettingsView({
 
     node.scrollTop = node.scrollHeight;
   }, [maintenanceLog]);
+
+  useEffect(() => {
+    const node = loudnessAnalysisLogRef.current;
+    if (!node) {
+      return;
+    }
+
+    node.scrollTop = node.scrollHeight;
+  }, [loudnessAnalysisLog]);
 
   const equalizerBands = isManualEqualizer ? manualBandsDraft : displayedEqualizerBands(settings);
 
@@ -6996,6 +7818,43 @@ function SettingsView({
 
         <section className="settings-section">
           <div className="settings-section-head">
+            <h2>Metadata edits</h2>
+            <p>Choose whether genre and BPM changes should stay inside Needle or update the files themselves.</p>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <label className="settings-label">Save mode</label>
+              <p className="settings-hint">
+                Needle will only show the currently selected behavior inside genre and BPM editors.
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <div className="seg">
+                {metadataEditModeOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    className={`seg-btn ${settings.metadata_edit_mode === option.value ? 'on' : ''}`}
+                    onClick={() =>
+                      onChange({
+                        ...settings,
+                        metadata_edit_mode: option.value,
+                      })
+                    }
+                    title={option.hint}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <p className="settings-inline-note">
+                {metadataEditModeOptions.find((option) => option.value === settings.metadata_edit_mode)?.hint}
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-section-head">
             <h2>Library</h2>
             <p>Keep your library database in sync without touching the underlying audio files.</p>
           </div>
@@ -7093,6 +7952,143 @@ function SettingsView({
           <div className="settings-section-head">
             <h2>Playback</h2>
             <p>Needle plays through mpv for local, bit-perfect playback.</p>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <label className="settings-label">Volume leveling</label>
+              <p className="settings-hint">
+                Analyze your library once, then let Needle nudge mixed queues toward a steadier loudness without changing your main listening volume.
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <div className="seg">
+                {[
+                  { value: false, label: 'Off' },
+                  { value: true, label: 'On' },
+                ].map((opt) => (
+                  <button
+                    key={String(opt.value)}
+                    className={`seg-btn ${settings.volume_leveling_enabled === opt.value ? 'on' : ''}`}
+                    onClick={() => onChange({ ...settings, volume_leveling_enabled: opt.value })}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="settings-row settings-row-block">
+            <div className="settings-row-copy">
+              <label className="settings-label">Loudness analysis</label>
+              <p className="settings-hint">
+                Runs a local FFmpeg pass across your library, stores LUFS and peak data in Needle’s database, and only re-checks files that changed.
+              </p>
+              <p className="settings-hint">
+                It keeps running while you browse or play music. The first pass can take a while on larger libraries, but later runs only revisit changed files.
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <button
+                className="primary settings-maintenance-button"
+                onClick={onLoudnessAnalysis}
+                disabled={busy}
+              >
+                <span
+                  className={`settings-maintenance-icon ${loudnessAnalysisBusy ? 'is-spinning' : ''}`}
+                  aria-hidden="true"
+                >
+                  ↻
+                </span>
+                <span>{loudnessAnalysisBusy ? 'Analyzing loudness…' : 'Analyze library'}</span>
+              </button>
+            </div>
+            <div className="settings-maintenance-meta">
+              {lastLoudnessAnalysisLabel
+                ? `Last run ${lastLoudnessAnalysisLabel}`
+                : 'No loudness analysis recorded yet.'}
+            </div>
+            {loudnessAnalysisProgress && (
+              <div className="settings-analysis-summary" aria-live="polite">
+                <div className="settings-analysis-summary-head">
+                  <div className="settings-analysis-summary-copy">
+                    <strong>
+                      {loudnessAnalysisProgress.processed_tracks.toLocaleString()} /{' '}
+                      {loudnessAnalysisProgress.total_tracks.toLocaleString()}
+                    </strong>{' '}
+                    tracks checked
+                  </div>
+                  <div className="settings-analysis-summary-copy">
+                    {loudnessAnalysisProgress.total_tracks > 0 ? `${loudnessProgressPercent}% complete` : 'Ready'}
+                  </div>
+                </div>
+                <div className="settings-analysis-progress" aria-hidden="true">
+                  <div
+                    className="settings-analysis-progress-bar"
+                    style={{ width: `${loudnessProgressPercent}%` }}
+                  />
+                </div>
+                <div className="settings-analysis-stats">
+                  <div className="settings-analysis-stat">
+                    <span className="settings-analysis-stat-label">Analyzed</span>
+                    <strong>{loudnessAnalysisProgress.analyzed_tracks.toLocaleString()}</strong>
+                  </div>
+                  <div className="settings-analysis-stat">
+                    <span className="settings-analysis-stat-label">Fresh</span>
+                    <strong>{loudnessAnalysisProgress.unchanged_tracks.toLocaleString()}</strong>
+                  </div>
+                  <div className="settings-analysis-stat">
+                    <span className="settings-analysis-stat-label">Missing</span>
+                    <strong>{loudnessAnalysisProgress.missing_tracks.toLocaleString()}</strong>
+                  </div>
+                  <div className="settings-analysis-stat">
+                    <span className="settings-analysis-stat-label">Failed</span>
+                    <strong>{loudnessAnalysisProgress.failed_tracks.toLocaleString()}</strong>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div
+              className={`settings-maintenance-console ${loudnessAnalysisBusy ? 'is-live' : ''}`}
+              aria-live="polite"
+              aria-busy={loudnessAnalysisBusy}
+            >
+              {loudnessAnalysisLog.length === 0 ? (
+                <div className="settings-maintenance-empty">
+                  No loudness analysis yet. The next run will stream its progress here.
+                </div>
+              ) : (
+                <div className="settings-maintenance-log" ref={loudnessAnalysisLogRef}>
+                  {loudnessAnalysisLog.map((line, index) => (
+                    <div key={`${index}-${line}`} className="settings-maintenance-line">
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            {loudnessAnalysisFailures.length > 0 && (
+              <div className="settings-analysis-failures">
+                <div className="settings-analysis-failures-head">
+                  <div>
+                    <label className="settings-label">Failed files</label>
+                    <p className="settings-hint">
+                      Needle skipped these files during analysis. They can still stay in your library.
+                    </p>
+                  </div>
+                  <button className="ghost-button" onClick={onCopyLoudnessFailures}>
+                    Copy failed paths
+                  </button>
+                </div>
+                <div className="settings-analysis-failure-list">
+                  {loudnessAnalysisFailures.map((entry) => (
+                    <div key={entry.path} className="settings-analysis-failure-item">
+                      <div className="settings-analysis-failure-path">{entry.path}</div>
+                      <div className="settings-analysis-failure-reason">{entry.reason}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           <div className="settings-row">
             <div className="settings-row-copy">
@@ -7278,6 +8274,7 @@ function DashboardView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
+                    vinylRip={a.is_vinyl_rip}
                     imageMode="deferred"
                     lazyLoad
                   />
@@ -7372,6 +8369,7 @@ function DashboardView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
+                    vinylRip={a.is_vinyl_rip}
                     imageMode="deferred"
                     lazyLoad
                   />

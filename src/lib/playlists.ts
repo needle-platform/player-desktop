@@ -1,4 +1,6 @@
 import type { Track } from '../types';
+import { genreLabelFromKey, normalizeGenreKey, splitTrackGenreKeys } from './genres';
+import { vibeKeyForTrack, type VibeKey } from './vibes';
 
 export interface AutoPlaylist {
   id: string;
@@ -21,23 +23,78 @@ const ACCENTS = [
 
 const accent = (n: number) => ACCENTS[n % ACCENTS.length];
 
-const titleCase = (value: string) =>
-  value
-    .toLowerCase()
-    .split(/[\s/_-]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
-
-const splitGenres = (raw: string): string[] =>
-  raw
-    .split(/[;,/]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
 const effectiveGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
+const normalizedGenres = (track: Pick<Track, 'primary_genre' | 'genre'>) =>
+  splitTrackGenreKeys(effectiveGenre(track));
+const normalizeHint = (value: string) => normalizeGenreKey(value) ?? value.toLocaleLowerCase();
 
 const REDISCOVER_AFTER_DAYS = 30;
 const dayMs = 24 * 60 * 60 * 1000;
+const CHILL_HINTS = [
+  'ambient',
+  'downtempo',
+  'chill',
+  'chillout',
+  'lounge',
+  'jazz',
+  'soul',
+  'neo soul',
+  'r&b',
+  'blues',
+  'acoustic',
+  'folk',
+  'trip-hop',
+  'trip hop',
+  'bossa',
+  'singer-songwriter',
+  'singer songwriter',
+] as const;
+const DANCE_HINTS = [
+  'dance',
+  'disco',
+  'house',
+  'techno',
+  'electronic',
+  'electro',
+  'synthpop',
+  'synth-pop',
+  'funk',
+  'pop',
+  'hip hop',
+  'hip-hop',
+  'rap',
+  'latin',
+  'reggaeton',
+  'club',
+] as const;
+const GROOVE_HINTS = [
+  'soul',
+  'neo soul',
+  'r&b',
+  'funk',
+  'jazz',
+  'lounge',
+  'pop',
+  'electronic',
+  'house',
+  'downtempo',
+] as const;
+const UPLIFT_HINTS = [
+  'pop',
+  'dance',
+  'disco',
+  'funk',
+  'house',
+  'electronic',
+  'electro',
+  'synthpop',
+  'indie pop',
+  'rock',
+] as const;
+const NORMALIZED_CHILL_HINTS = CHILL_HINTS.map(normalizeHint);
+const NORMALIZED_DANCE_HINTS = DANCE_HINTS.map(normalizeHint);
+const NORMALIZED_GROOVE_HINTS = GROOVE_HINTS.map(normalizeHint);
+const NORMALIZED_UPLIFT_HINTS = UPLIFT_HINTS.map(normalizeHint);
 
 const timestampOf = (value: string | null | undefined): number => {
   if (!value) return Number.NaN;
@@ -70,6 +127,36 @@ const sample = <T,>(arr: T[], n: number): T[] => {
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy.slice(0, n);
+};
+
+const countGenreHints = (genres: string[], hints: readonly string[]) =>
+  genres.reduce(
+    (count, genre) =>
+      count +
+      (hints.some((hint) => genre === hint || genre.includes(hint) || hint.includes(genre)) ? 1 : 0),
+    0,
+  );
+
+const scoreTrackForVibeMix = (
+  track: Track,
+  preferredVibes: readonly VibeKey[],
+  supportingVibes: readonly VibeKey[],
+  hints: readonly string[],
+) => {
+  const vibe = vibeKeyForTrack(track);
+  const genres = normalizedGenres(track);
+  const hintMatches = countGenreHints(genres, hints);
+
+  let score = 0;
+  if (vibe && preferredVibes.includes(vibe)) score += 4;
+  else if (vibe && supportingVibes.includes(vibe)) score += 2;
+
+  score += hintMatches * 2;
+
+  if ((track.rating ?? 0) >= 4) score += 1;
+  if ((track.play_count ?? 0) >= 5) score += 1;
+
+  return { score, vibe, hintMatches };
 };
 
 export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
@@ -145,6 +232,125 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
     });
   }
 
+  // One top-genre mix, placed early so it stays on the first dashboard row.
+  const genreBuckets = new Map<string, Track[]>();
+  for (const t of tracks) {
+    for (const key of normalizedGenres(t)) {
+      const existing = genreBuckets.get(key);
+      if (existing) existing.push(t);
+      else genreBuckets.set(key, [t]);
+    }
+  }
+  const topGenre = Array.from(genreBuckets.entries())
+    .filter(([, list]) => list.length >= 5)
+    .sort((a, b) => b[1].length - a[1].length)[0];
+  if (topGenre) {
+    const [genre, list] = topGenre;
+    playlists.push({
+      id: `genre:${genre}`,
+      name: 'From your top genre',
+      description: `${genreLabelFromKey(genre)} · ${list.length} tracks across your library`,
+      accent: accent(accentIndex++),
+      tracks: sample(list, 60),
+    });
+  }
+
+  const windDown = tracks
+    .map((track) => ({
+      track,
+      ...scoreTrackForVibeMix(track, ['slowdown'], [], NORMALIZED_CHILL_HINTS),
+    }))
+    .filter(({ vibe }) => vibe === 'slowdown')
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        (b.track.rating ?? 0) - (a.track.rating ?? 0) ||
+        compareTimestamps(a.track.last_played_at, b.track.last_played_at, 'asc') ||
+        a.track.title.localeCompare(b.track.title),
+    )
+    .map(({ track }) => track);
+  if (windDown.length >= 8) {
+    playlists.push({
+      id: 'vibes:wind-down',
+      name: 'Wind down',
+      description: 'Slower songs to help the room exhale',
+      accent: accent(accentIndex++),
+      tracks: windDown,
+    });
+  }
+
+  const cruiseAndGroove = tracks
+    .map((track) => ({
+      track,
+      ...scoreTrackForVibeMix(track, ['cruise', 'groove'], ['slowdown'], NORMALIZED_GROOVE_HINTS),
+    }))
+    .filter(({ vibe }) => vibe === 'cruise' || vibe === 'groove')
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        (b.track.rating ?? 0) - (a.track.rating ?? 0) ||
+        compareTimestamps(a.track.last_played_at, b.track.last_played_at, 'asc') ||
+        a.track.title.localeCompare(b.track.title),
+    )
+    .map(({ track }) => track);
+  if (cruiseAndGroove.length >= 8) {
+    playlists.push({
+      id: 'vibes:cruise-and-groove',
+      name: 'Cruise & groove',
+      description: 'Easy motion, warm rhythm, no rush',
+      accent: accent(accentIndex++),
+      tracks: cruiseAndGroove,
+    });
+  }
+
+  const liftAndEnergy = tracks
+    .map((track) => ({
+      track,
+      ...scoreTrackForVibeMix(track, ['lift', 'energy'], ['groove'], NORMALIZED_UPLIFT_HINTS),
+    }))
+    .filter(({ vibe }) => vibe === 'lift' || vibe === 'energy')
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        (b.track.rating ?? 0) - (a.track.rating ?? 0) ||
+        (b.track.play_count ?? 0) - (a.track.play_count ?? 0) ||
+        a.track.title.localeCompare(b.track.title),
+    )
+    .map(({ track }) => track);
+  if (liftAndEnergy.length >= 8) {
+    playlists.push({
+      id: 'vibes:lift-and-energy',
+      name: 'Lift & energy',
+      description: 'Bright momentum when you want to feel lighter',
+      accent: accent(accentIndex++),
+      tracks: liftAndEnergy,
+    });
+  }
+
+  const getOnYourFeet = tracks
+    .map((track) => ({
+      track,
+      ...scoreTrackForVibeMix(track, ['energy', 'chaos'], ['lift'], NORMALIZED_DANCE_HINTS),
+    }))
+    .filter(({ vibe }) => vibe === 'energy' || vibe === 'chaos')
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        (b.track.rating ?? 0) - (a.track.rating ?? 0) ||
+        (b.track.play_count ?? 0) - (a.track.play_count ?? 0) ||
+        a.track.title.localeCompare(b.track.title),
+    )
+    .map(({ track }) => track);
+  if (getOnYourFeet.length >= 8) {
+    playlists.push({
+      id: 'vibes:get-on-your-feet',
+      name: 'Get on your feet',
+      description: 'The ones that make standing still unlikely',
+      accent: accent(accentIndex++),
+      tracks: getOnYourFeet,
+    });
+  }
+
   // Needs a first spin
   const needsFirstSpin = tracks
     .filter((t) => (t.play_count ?? 0) === 0)
@@ -188,32 +394,6 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
       description: 'Played before, not recently',
       accent: accent(accentIndex++),
       tracks: rediscover,
-    });
-  }
-
-  // One top-genre mix, not a wall of genre cards.
-  const genreBuckets = new Map<string, Track[]>();
-  for (const t of tracks) {
-    const rawGenre = effectiveGenre(t);
-    if (!rawGenre) continue;
-    for (const g of splitGenres(rawGenre)) {
-      const key = titleCase(g);
-      const existing = genreBuckets.get(key);
-      if (existing) existing.push(t);
-      else genreBuckets.set(key, [t]);
-    }
-  }
-  const topGenre = Array.from(genreBuckets.entries())
-    .filter(([, list]) => list.length >= 5)
-    .sort((a, b) => b[1].length - a[1].length)[0];
-  if (topGenre) {
-    const [genre, list] = topGenre;
-    playlists.push({
-      id: `genre:${genre}`,
-      name: 'From your top genre',
-      description: `${genre} · ${list.length} tracks across your library`,
-      accent: accent(accentIndex++),
-      tracks: sample(list, 60),
     });
   }
 
