@@ -6,6 +6,8 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-04
+
 ### Added
 - Added a README screenshot for the public GitHub repository.
 - Added persistent 1-5 star ratings for tracks across the library, album, and artist views.
