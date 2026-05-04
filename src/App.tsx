@@ -65,6 +65,13 @@ import { useCoverArt } from './lib/cover';
 import { useArtistImage } from './lib/artistImage';
 import { useArtistInfo } from './lib/artistInfo';
 import { useAlbumInfo } from './lib/albumInfo';
+import {
+  genreLabelFromKey,
+  normalizeGenreKey,
+  splitTrackGenreEntries,
+  splitTrackGenreKeys,
+  splitTrackGenres,
+} from './lib/genres';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
 import { formatBpm, vibeKeyForTrack, vibeLabelForTrack } from './lib/vibes';
 import dashboardIdleBackdrop from './assets/bg.jpg';
@@ -405,7 +412,6 @@ const filteredPlaylistName = (artist: string, genre: string) => {
   return parts.length > 0 ? `${parts.join(' · ')} mix` : 'Filtered mix';
 };
 const effectiveTrackGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
-const genreKey = (genre: string) => genre.trim().toLocaleLowerCase();
 const uniqueSorted = (values: string[]) =>
   Array.from(new Set(values.filter(Boolean))).sort((a, b) => compareText(a, b));
 const dedupeTracksByPath = (tracks: Track[]) => Array.from(new Map(tracks.map((track) => [track.path, track])).values());
@@ -510,11 +516,6 @@ const albumKey = (album: string | null | undefined, albumArtist: string | null |
 const trackAlbumKey = (track: Pick<Track, 'album' | 'album_artist' | 'artist'>) =>
   track.album ? albumKey(track.album, albumArtistForTrack(track)) : null;
 const albumTitleFromKey = (key: string) => key.split(albumIdentitySeparator)[0] ?? key;
-const splitTrackGenres = (genre: string | null | undefined) =>
-  (genre ?? '')
-    .split(/[;,/]/)
-    .map((part) => part.trim())
-    .filter(Boolean);
 const normalizePlaylistRuleText = (value: string | null | undefined) => {
   const trimmed = value?.trim() ?? '';
   return trimmed ? trimmed : null;
@@ -524,7 +525,7 @@ const formatPlaylistRuleSummary = (rule: SavedPlaylistRule) => {
     const parts = [
       rule.search ? `Search: ${rule.search}` : null,
       rule.artist,
-      rule.genre,
+      rule.genre ? genreLabelFromKey(normalizeGenreKey(rule.genre) ?? rule.genre) : null,
       formatTrackYearRange(
         rule.year_from != null ? String(rule.year_from) : allTrackFilterValue,
         rule.year_to != null ? String(rule.year_to) : allTrackFilterValue,
@@ -2141,13 +2142,13 @@ function App() {
 
     const genres = new Map<string, SmartPlaylistGenreOption>();
     for (const track of selectedSmartPlaylist.tracks) {
-      for (const genre of splitTrackGenres(effectiveTrackGenre(track))) {
-        const key = genreKey(genre);
+      for (const genre of splitTrackGenreEntries(effectiveTrackGenre(track))) {
+        const key = genre.key;
         const existing = genres.get(key);
         if (existing) {
           existing.count += 1;
         } else {
-          genres.set(key, { key, label: genre, count: 1 });
+          genres.set(key, { key, label: genre.label, count: 1 });
         }
       }
     }
@@ -2168,6 +2169,10 @@ function App() {
     () => uniqueSorted(scopedTracks.map((track) => track.artist ?? '').filter(Boolean)),
     [scopedTracks],
   );
+  const libraryGenreOptions = useMemo(
+    () => uniqueSorted(allTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
+    [allTracks],
+  );
   const trackGenreOptions = useMemo(
     () => uniqueSorted(scopedTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
     [scopedTracks],
@@ -2183,15 +2188,18 @@ function App() {
     let list = scopedTracks;
     if (selectedSmartPlaylist && selectedSmartPlaylistGenres.length > 0) {
       list = list.filter((track) => {
-        const trackGenres = splitTrackGenres(effectiveTrackGenre(track)).map(genreKey);
+        const trackGenres = splitTrackGenreKeys(effectiveTrackGenre(track));
         return trackGenres.some((genre) => selectedSmartPlaylistGenres.includes(genre));
       });
     }
     if (!playlistMode && trackArtistFilter !== allTrackFilterValue) {
       list = list.filter((track) => (track.artist ?? '') === trackArtistFilter);
     }
+    const expectedTrackGenre = trackGenreFilter !== allTrackFilterValue ? normalizeGenreKey(trackGenreFilter) : null;
     if (!playlistMode && trackGenreFilter !== allTrackFilterValue) {
-      list = list.filter((track) => splitTrackGenres(effectiveTrackGenre(track)).includes(trackGenreFilter));
+      list = list.filter((track) =>
+        expectedTrackGenre ? splitTrackGenreKeys(effectiveTrackGenre(track)).includes(expectedTrackGenre) : true,
+      );
     }
     const startYear = playlistMode ? null : yearFilterNumber(trackYearFromFilter);
     const endYear = playlistMode ? null : yearFilterNumber(trackYearToFilter);
@@ -4450,6 +4458,7 @@ function App() {
       {albumGenreEditor && (
         <AlbumGenreEditorModal
           state={albumGenreEditor}
+          availableGenres={libraryGenreOptions}
           metadataEditMode={metadataEditMode}
           busy={busy === 'Saving genres…'}
           onClose={() => setAlbumGenreEditor(null)}
@@ -4756,11 +4765,12 @@ function PlaylistComposerModal({ composer, busy, onClose, onSubmit }: PlaylistCo
       return activeSource?.tracks ?? [];
     }
 
+    const expectedGenre = normalizeGenreKey(genreFilter);
     return composer.libraryTracks.filter((track) => {
       if (artistFilter && track.artist !== artistFilter) {
         return false;
       }
-      if (genreFilter && !splitTrackGenres(effectiveTrackGenre(track)).includes(genreFilter)) {
+      if (expectedGenre && !splitTrackGenreKeys(effectiveTrackGenre(track)).includes(expectedGenre)) {
         return false;
       }
       return true;
@@ -5038,6 +5048,7 @@ function PlaylistTargetModal({
 
 interface AlbumGenreEditorModalProps {
   state: AlbumGenreEditorState;
+  availableGenres: string[];
   metadataEditMode: MetadataEditMode;
   busy: boolean;
   onClose: () => void;
@@ -5046,16 +5057,24 @@ interface AlbumGenreEditorModalProps {
 
 function AlbumGenreEditorModal({
   state,
+  availableGenres,
   metadataEditMode,
   busy,
   onClose,
   onSubmit,
 }: AlbumGenreEditorModalProps) {
-  const [value, setValue] = useState(state.currentGenre ?? state.suggestedGenres[0] ?? '');
+  const initialGenres = useMemo(
+    () => splitTrackGenres(state.currentGenre ?? state.suggestedGenres[0] ?? ''),
+    [state.currentGenre, state.suggestedGenres],
+  );
+  const [selectedGenres, setSelectedGenres] = useState<string[]>(initialGenres);
+  const [query, setQuery] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    setValue(state.currentGenre ?? state.suggestedGenres[0] ?? '');
-  }, [state]);
+    setSelectedGenres(splitTrackGenres(state.currentGenre ?? state.suggestedGenres[0] ?? ''));
+    setQuery('');
+  }, [state.currentGenre, state.suggestedGenres]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -5068,14 +5087,75 @@ function AlbumGenreEditorModal({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [busy, onClose]);
 
-  const trimmedValue = value.trim();
-  const suggestedGenres = Array.from(
-    new Set([state.currentGenre, ...state.suggestedGenres].filter(Boolean)),
-  ) as string[];
+  const selectedGenreKeys = new Set(selectedGenres.map((genre) => normalizeGenreKey(genre)).filter(Boolean));
+  const suggestedGenres = useMemo(
+    () =>
+      uniqueSorted(
+        [state.currentGenre, ...state.suggestedGenres]
+          .flatMap((value) => splitTrackGenres(value))
+          .filter(Boolean),
+      ),
+    [state.currentGenre, state.suggestedGenres],
+  );
+  const normalizedQuery = normalizeGenreKey(query);
+  const pendingGenres = useMemo(
+    () =>
+      uniqueSorted(splitTrackGenres(query)).filter(
+        (genre) => !selectedGenreKeys.has(normalizeGenreKey(genre) ?? ''),
+      ),
+    [query, selectedGenreKeys],
+  );
+  const filteredGenres = useMemo(() => {
+    const source = uniqueSorted([...suggestedGenres, ...availableGenres]);
+    const loweredQuery = query.trim().toLocaleLowerCase();
+    return source.filter((genre) => {
+      const key = normalizeGenreKey(genre);
+      if (!key || selectedGenreKeys.has(key)) return false;
+      if (!loweredQuery) return true;
+      return (
+        genre.toLocaleLowerCase().includes(loweredQuery) ||
+        key.includes(loweredQuery) ||
+        (normalizedQuery ? key.includes(normalizedQuery) : false)
+      );
+    });
+  }, [availableGenres, normalizedQuery, query, selectedGenreKeys, suggestedGenres]);
+  const genreString = selectedGenres.join('; ');
   const modeCopy =
     metadataEditMode === 'write_to_files'
       ? 'This will update the embedded genre tags on every track on this album.'
       : 'This will stay inside Needle and leave the audio files untouched.';
+  const addGenres = (genres: string[]) => {
+    if (genres.length === 0) return;
+    setSelectedGenres((current) => {
+      const next = current.slice();
+      const seen = new Set(current.map((genre) => normalizeGenreKey(genre)).filter(Boolean));
+      for (const genre of genres) {
+        const key = normalizeGenreKey(genre);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        next.push(genreLabelFromKey(key));
+      }
+      return next;
+    });
+    setQuery('');
+    inputRef.current?.focus();
+  };
+  const addGenre = (genre: string) => addGenres([genre]);
+  const addGenresFromText = (value: string) => {
+    const parsed = splitTrackGenres(value);
+    if (parsed.length > 0) {
+      addGenres(parsed);
+      return;
+    }
+    if (normalizedQuery) {
+      addGenres([genreLabelFromKey(normalizedQuery)]);
+    }
+  };
+  const removeGenre = (genre: string) => {
+    const key = normalizeGenreKey(genre);
+    setSelectedGenres((current) => current.filter((entry) => normalizeGenreKey(entry) !== key));
+    inputRef.current?.focus();
+  };
 
   return (
     <div className="modal-scrim" onClick={() => !busy && onClose()}>
@@ -5103,13 +5183,15 @@ function AlbumGenreEditorModal({
 
         {suggestedGenres.length > 0 && (
           <div className="field">
-            <div className="field-label">Suggestions from your files</div>
+            <div className="field-label">Suggestions from this album</div>
             <div className="genre-choice-grid">
               {suggestedGenres.map((genre) => (
                 <button
                   key={genre}
-                  className={`genre-choice ${trimmedValue === genre ? 'is-selected' : ''}`}
-                  onClick={() => setValue(genre)}
+                  className={`genre-choice ${
+                    selectedGenreKeys.has(normalizeGenreKey(genre) ?? '') ? 'is-selected' : ''
+                  }`}
+                  onClick={() => addGenre(genre)}
                 >
                   {genre}
                 </button>
@@ -5118,16 +5200,69 @@ function AlbumGenreEditorModal({
           </div>
         )}
 
-        <label className="field">
-          <span className="field-label">Genre string for every track on this album</span>
-          <input
-            className="field-input"
-            value={value}
-            onChange={(event) => setValue(event.currentTarget.value)}
-            placeholder="Rock; Pop; Folk, World, & Country"
-            autoFocus
-          />
-        </label>
+        <div className="field">
+          <span className="field-label">Genres for every track on this album</span>
+          <div className="genre-multiselect" onClick={() => inputRef.current?.focus()}>
+            <div className="genre-multiselect-values">
+              {selectedGenres.map((genre) => (
+                <button
+                  key={genre}
+                  type="button"
+                  className="genre-token"
+                  onClick={() => removeGenre(genre)}
+                  disabled={busy}
+                  aria-label={`Remove ${genre}`}
+                  title={`Remove ${genre}`}
+                >
+                  <span>{genre}</span>
+                  <span className="genre-token-remove" aria-hidden="true">
+                    ×
+                  </span>
+                </button>
+              ))}
+              <input
+                ref={inputRef}
+                className="genre-multiselect-input"
+                value={query}
+                onChange={(event) => setQuery(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    if (query.trim()) addGenresFromText(query);
+                  } else if (event.key === 'Backspace' && !query && selectedGenres.length > 0) {
+                    event.preventDefault();
+                    setSelectedGenres((current) => current.slice(0, -1));
+                  }
+                }}
+                placeholder={selectedGenres.length > 0 ? 'Add another genre…' : 'Search or add genres…'}
+                autoFocus
+                disabled={busy}
+              />
+            </div>
+          </div>
+          <div className="genre-picker-panel" role="listbox" aria-label="Available genres">
+            {pendingGenres.length > 0 &&
+              !pendingGenres.every((genre) => filteredGenres.some((option) => normalizeGenreKey(option) === normalizeGenreKey(genre))) && (
+              <button type="button" className="genre-picker-option is-create" onClick={() => addGenres(pendingGenres)}>
+                Add <strong>{pendingGenres.length === 1 ? pendingGenres[0] : `${pendingGenres.length} genres`}</strong>
+              </button>
+              )}
+            {filteredGenres.slice(0, 24).map((genre) => (
+              <button
+                key={genre}
+                type="button"
+                className="genre-picker-option"
+                onClick={() => addGenre(genre)}
+              >
+                {genre}
+              </button>
+            ))}
+            {pendingGenres.length === 0 && filteredGenres.length === 0 && (
+              <div className="genre-picker-empty">No matching genres yet. Type a new one and press Enter.</div>
+            )}
+          </div>
+          <div className="field-help">Needle will save this as: {genreString || 'No genres selected'}</div>
+        </div>
 
         <div className="modal-actions">
           <button className="ghost-button" onClick={() => onSubmit(null)} disabled={!state.currentGenre || busy}>
@@ -5135,8 +5270,8 @@ function AlbumGenreEditorModal({
           </button>
           <button
             className="primary-button"
-            onClick={() => onSubmit(trimmedValue || null)}
-            disabled={!trimmedValue || busy}
+            onClick={() => onSubmit(genreString || null)}
+            disabled={!genreString || busy}
           >
             {busy ? 'Saving…' : metadataEditMode === 'write_to_files' ? 'Write genres' : 'Save in Needle'}
           </button>

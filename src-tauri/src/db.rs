@@ -1696,11 +1696,45 @@ fn effective_genre<'a>(primary_genre: Option<&'a str>, genre: Option<&'a str>) -
     primary_genre.or(genre)
 }
 
-fn split_track_genres(genre: &str) -> impl Iterator<Item = &str> {
+fn normalize_genre_key(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut normalized = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars().flat_map(char::to_lowercase) {
+        match ch {
+            '&' => normalized.push_str(" and "),
+            '-' | '_' | '‐' | '‑' | '–' | '—' => normalized.push(' '),
+            _ => normalized.push(ch),
+        }
+    }
+
+    let mut normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(stripped) = normalized.strip_prefix("and ") {
+        normalized = stripped.to_string();
+    }
+    if let Some(stripped) = normalized.strip_suffix(" and") {
+        normalized = stripped.to_string();
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let alias = match normalized.as_str() {
+        "drum and base" | "drum n bass" => "drum and bass",
+        "r and b" | "rnb" => "r&b",
+        _ => normalized.as_str(),
+    };
+
+    Some(alias.to_string())
+}
+
+fn split_track_genres(genre: &str) -> impl Iterator<Item = String> + '_ {
     genre
         .split(|ch| matches!(ch, ';' | ',' | '/'))
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
+        .filter_map(normalize_genre_key)
 }
 
 fn track_paths_for_playlist_rule(
@@ -1782,11 +1816,7 @@ fn track_paths_for_playlist_rule(
                 }
             }
 
-            if let Some(expected_genre) = genre
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
+            if let Some(expected_genre) = genre.as_deref().and_then(normalize_genre_key) {
                 let Some(current_genre) = genre_value else {
                     return false;
                 };
