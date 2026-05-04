@@ -16,6 +16,12 @@
   --danger: #e2495a;
   --row-hover: rgba(91, 124, 255, 0.08);
   --row-current: rgba(91, 124, 255, 0.16);
+  --vibe-slowdown: #3f7f70;
+  --vibe-cruise: #4f78aa;
+  --vibe-groove: #8a6a3a;
+  --vibe-lift: #a36549;
+  --vibe-energy: #a35149;
+  --vibe-chaos: #7a58a1;
   --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
   --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.08);
   --player-surface: rgba(255, 255, 255, 0.74);
@@ -37,6 +43,12 @@
   --danger: #ff6f7d;
   --row-hover: rgba(135, 160, 255, 0.08);
   --row-current: rgba(135, 160, 255, 0.18);
+  --vibe-slowdown: #9ed2c4;
+  --vibe-cruise: #9fbeee;
+  --vibe-groove: #e2c98c;
+  --vibe-lift: #efb08f;
+  --vibe-energy: #f0a39a;
+  --vibe-chaos: #c6addf;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.45);
   --player-surface: rgba(20, 23, 31, 0.68);
@@ -4249,7 +4261,7 @@ input, select {
 .album-track-row-main {
   grid-column: 1 / 5;
   display: grid;
-  grid-template-columns: 40px minmax(180px, 1fr) auto auto;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
   gap: 16px;
   align-items: center;
   min-width: 0;
@@ -4278,6 +4290,12 @@ input, select {
   justify-content: center;
   min-height: 14px;
 }
+.album-track-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
 .album-track-title {
   font-size: 14px;
   color: var(--text);
@@ -4287,7 +4305,47 @@ input, select {
   white-space: nowrap;
 }
 .album-track-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   font-size: 12px;
+}
+.album-track-tech {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.album-track-vibe {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.album-track-vibe.has-tech::before {
+  content: '•';
+  margin-right: 8px;
+  color: var(--muted);
+}
+.album-track-vibe.is-slowdown {
+  color: var(--vibe-slowdown);
+}
+.album-track-vibe.is-cruise {
+  color: var(--vibe-cruise);
+}
+.album-track-vibe.is-groove {
+  color: var(--vibe-groove);
+}
+.album-track-vibe.is-lift {
+  color: var(--vibe-lift);
+}
+.album-track-vibe.is-energy {
+  color: var(--vibe-energy);
+}
+.album-track-vibe.is-chaos {
+  color: var(--vibe-chaos);
 }
 .album-track-duration {
   font-size: 12px;

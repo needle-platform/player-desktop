@@ -66,7 +66,7 @@ import { useArtistImage } from './lib/artistImage';
 import { useArtistInfo } from './lib/artistInfo';
 import { useAlbumInfo } from './lib/albumInfo';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
-import { formatBpm, vibeLabelForTrack } from './lib/vibes';
+import { formatBpm, vibeKeyForTrack, vibeLabelForTrack } from './lib/vibes';
 import dashboardIdleBackdrop from './assets/bg.jpg';
 import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
@@ -480,9 +480,16 @@ const formatTrackPace = (track: Pick<Track, 'bpm'>) => {
   return parts.join(' · ') || null;
 };
 
+const formatTrackTechDetails = (track: Track) => formatQuality(track);
+
 const formatTrackDetails = (track: Track) => {
   const parts = [formatQuality(track), formatTrackPace(track)].filter((value): value is string => Boolean(value));
   return parts.join(' · ') || '—';
+};
+
+const albumTrackVibeToneClass = (track: Pick<Track, 'bpm'>) => {
+  const vibeKey = vibeKeyForTrack(track);
+  return vibeKey ? `is-${vibeKey}` : '';
 };
 
 const defaultAudioDevice: AudioDevice = { name: 'auto', description: 'System default' };
@@ -6478,6 +6485,8 @@ function AlbumDetailView({
                   const isQueued = queuePaths.includes(t.path);
                   const ratingIsPending = pendingRatingPaths.includes(t.path);
                   const bpmIsPending = pendingBpmPaths.includes(t.path);
+                  const techDetails = formatTrackTechDetails(t);
+                  const vibeLabel = vibeLabelForTrack(t);
                   return (
                     <div
                       key={t.id}
@@ -6490,11 +6499,22 @@ function AlbumDetailView({
                         <span className="album-track-num">
                           {isCurrent ? <PlayingIndicator /> : (t.track_number ?? '—')}
                         </span>
-                        <span className="album-track-title">{t.title}</span>
-                        <span className="album-track-meta muted">
-                          {formatTrackDetails(t)}
+                        <span className="album-track-copy">
+                          <span className="album-track-title">{t.title}</span>
+                          {(techDetails || vibeLabel) && (
+                            <span className="album-track-meta muted">
+                              {techDetails && <span className="album-track-tech">{techDetails}</span>}
+                              {vibeLabel && (
+                                <span
+                                  className={`album-track-vibe ${techDetails ? 'has-tech' : ''} ${albumTrackVibeToneClass(t)}`}
+                                >
+                                  {vibeLabel}
+                                </span>
+                              )}
+                            </span>
+                          )}
                         </span>
-                      <span className="album-track-duration">
+                        <span className="album-track-duration">
                           {formatDuration(t.duration_seconds)}
                         </span>
                       </button>
