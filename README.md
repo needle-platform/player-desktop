@@ -96,13 +96,13 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Views
 - **Dashboard** (default landing screen)
 - **Tracks** with live search, sorting, and filters for artist / genre / year range, plus album / artist / playlist context
-- **Compact BPM details** on track rows, album pages, and artist pages, with a click-to-open correction menu for halve / double / reset actions
-- **Albums** with cover art, sorting, and direct playlist actions
+- **Compact BPM details** on track rows, album pages, and artist pages, with a click-to-open editor for set / edit plus quick halve / double actions
+- **Albums** with cover art, sorting, direct playlist actions, and album-wide genre editing
 - **Large library browsers** lazily load offscreen covers / portraits and stage media work near the viewport instead of trying to resolve every image at once
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
 - **Vinyl-rip badge support** detects `vinyl-rip` tags from your files and marks matching albums with a small record badge on album artwork
 - **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
-- **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, loudness analysis with live progress output, structured progress counts, failed-file review/copy tools, live equalizer presets, and manual 10-band EQ
+- **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, loudness analysis with live progress output, structured progress counts, failed-file review/copy tools, live equalizer presets, manual 10-band EQ, and a metadata save-mode switch for `Needle only` vs `Write to files`
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
@@ -113,8 +113,8 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - Subtitle-aware fallback matching now also trims common edition markers after separators like `:` / `-`, and can fall back from long parenthetical subtitles to the core album title when MusicBrainz files the release more tersely
 - When a release group has no linked Wikipedia or Wikidata page, Needle now falls back to a simple factual note from MusicBrainz itself instead of leaving the album page blank
 - Cached in SQLite (`album_info`) so repeat opens are instant and we avoid repeat lookups
-- **Album page genres** are derived from the imported track tags already embedded in your files
-- **Primary genre override** lets you set a local album-level genre Needle should prefer for browsing, filtering, and smart-playlist logic without rewriting the source files
+- **Album page genres** are derived from the effective per-track genre tags Needle is using, whether they come straight from the files or from Needle-only edits
+- **Album-wide genre editing** can either stay local to Needle or write directly into the music files, depending on your Settings preference
 - **Refresh failures are now surfaced clearly** when MusicBrainz is temporarily rate-limiting or unavailable, so you get a friendly “try again later” message instead of a cryptic backend error
 - Graceful fallback when no article exists for obscure releases, compilations, or local-only metadata
 
@@ -158,7 +158,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - `src/lib/playlists.ts` — auto-playlist generators from tags + heuristics
 - `src/styles.css` — full theming + layout
 - `src-tauri/src/lib.rs` — Tauri command surface, app setup, and native external-URL opening
-- `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, saved playlists, artist-image cache, artist-info cache, album-info cache, album primary-genre overrides
+- `src-tauri/src/db.rs` — SQLite schema, migrations, library/playback persistence, saved playlists, artist-image cache, artist-info cache, album-info cache, and metadata edit preferences / overrides
 - `src-tauri/src/library.rs` — folder scanner, dotfile filter, metadata via `lofty`
 - `src-tauri/src/artist.rs` — MusicBrainz → Wikidata → Commons artist portrait lookup with Wikipedia image fallback, Wikipedia-backed artist biography lookup, and collaboration-credit fallback matching
 - `src-tauri/src/album.rs` — MusicBrainz → Wikidata → Wikipedia album lookup with collaboration-credit matching and MusicBrainz factual fallback when no article is linked
@@ -207,12 +207,12 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 - **User ratings** (`rating`) drive a `Top rated` smart playlist built from the stars you assign
 - **Embedded BPM tags** drive compact tempo details plus vibe buckets such as Slowdown, Cruise, Groove, Lift, Energy, and Chaos
 - **Vibe playlists use those BPM buckets directly**, so tracks without BPM stay out of tempo-led mixes instead of being guessed into one
-- **Local BPM corrections** are stored in Needle so halve / double-time mistakes can be fixed without touching the source files
+- **BPM editing** can stay local to Needle or write back to the embedded file tags, depending on the metadata save mode you choose in Settings
 - **Optional loudness analysis** stores LUFS / peak-derived gain data locally so Needle can level mixed queues when you enable volume leveling
 - **Two-worker loudness scans** make the first analysis pass much more practical on modern Macs without overcommitting the whole machine
 - **Playlist-local genre focus** lets smart playlists keep their generated order while narrowing the current mix to one or more genres already represented in that playlist
 - **Library state** (`play_count = 0`) drives Needs a first spin
-- **Genre tags** and local overrides (`primary_genre`) drive one top-genre mix when your collection has a clear favorite
+- **Genre tags** and Needle-local genre edits drive one top-genre mix when your collection has a clear favorite
 - **Vinyl-rip tags** (for example `vinyl-rip`) can mark your own transfers visually without rewriting how Needle handles the rest of your metadata
 - **Artist enrichment** (`gender` when MusicBrainz provides it) gives future artist-radio style mixes another optional signal without blocking playback when metadata is incomplete
 - **`added_at`** (preserved across rescans) drives the Recently added albums row
@@ -222,8 +222,8 @@ Needle treats imported metadata as a starting point, not untouchable truth:
 - **Raw embedded tags** stay preserved exactly as imported
 - **Local overrides** can refine how the app interprets your library without modifying audio files
 - **MusicBrainz album refresh** adds those overrides only for albums you explicitly choose to repair from the album page
-- **Album-level primary genre** currently flows down to tracks from that album for filtering and smarter playlist generation
-- **BPM corrections** stay local to Needle, so bad embedded values can be fixed without rewriting your music files
+- **Needle-only metadata edits** can refine browsing and filtering without modifying audio files
+- **Write-to-file metadata edits** can make those same genre/BPM fixes visible to other music apps too
 
 Needle already makes use of embedded BPM when your files provide it. A future opt-in analysis pass could still add missing BPM/key data for files that have none, or improve obviously broken source tags, but it is no longer required for vibe-aware smart playlists.
 

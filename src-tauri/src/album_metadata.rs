@@ -560,6 +560,7 @@ fn build_overrides(
             disc_number: Some(remote.disc_number),
             track_number: Some(remote.track_number),
             bpm: None,
+            genre: None,
             year: candidate.year.or(local.year),
             recording_mbid: remote.recording_mbid.clone(),
             release_track_mbid: remote.release_track_mbid.clone(),

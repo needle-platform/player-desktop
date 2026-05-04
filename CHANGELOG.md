@@ -17,6 +17,8 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Added embedded-BPM import plus vibe bucketing so smart mixes can quietly use tempo without exposing raw BPM as a primary browsing filter.
 - Added local BPM correction controls with halve / double / reset actions stored in Needle rather than written back to audio files.
 - Added four vibe-led smart mixes on the dashboard: `Wind down`, `Cruise & groove`, `Lift & energy`, and `Get on your feet`.
+- Added a metadata save-mode setting so genre and BPM edits can either stay in Needle or write directly into the music files.
+- Added album-wide genre editing plus an in-app BPM editor modal that respect the selected metadata save mode.
 
 ### Changed
 - Licensed the project under `GPL-3.0-only` and added the full license text.
@@ -33,6 +35,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Increased loudness-analysis throughput by running two FFmpeg workers in parallel instead of processing the whole library strictly one track at a time.
 - Reworked the dashboard playlist lineup so the top row stays utility/history-focused and the second row is reserved for the four vibe mixes.
 - Replaced cramped inline BPM math buttons with a compact BPM chip that opens a clearer correction menu.
+- Reworked album genre editing around the actual genre string used for filtering, rather than the older single “primary genre” shortcut.
 
 ### Fixed
 - Fixed album-page track clicks so choosing one song plays that track directly instead of queueing the rest of the album.

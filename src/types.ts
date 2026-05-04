@@ -10,6 +10,7 @@ export type EqualizerPreset =
   | 'manual';
 
 export type RepeatMode = 'off' | 'one' | 'all';
+export type MetadataEditMode = 'needle_only' | 'write_to_files';
 
 export interface Track {
   id: number;
@@ -49,6 +50,7 @@ export interface AppSettings {
   equalizer_preset: EqualizerPreset;
   equalizer_bands: number[];
   volume_leveling_enabled: boolean;
+  metadata_edit_mode: MetadataEditMode;
   tracks_page_size: number;
   last_maintenance_at: string | null;
   last_loudness_analysis_at: string | null;

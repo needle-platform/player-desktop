@@ -2,9 +2,11 @@ use std::path::Path;
 
 use anyhow::Result;
 use lofty::{
-    prelude::{Accessor, AudioFile, TaggedFileExt},
+    config::WriteOptions,
+    file::TaggedFileExt,
+    prelude::{Accessor, AudioFile},
     probe::Probe,
-    tag::ItemKey,
+    tag::{ItemKey, Tag},
 };
 use walkdir::{DirEntry, WalkDir};
 
@@ -39,7 +41,7 @@ pub fn scan_folder(folder: &str) -> Result<Vec<Track>> {
     Ok(tracks)
 }
 
-fn read_track(path: &Path) -> Track {
+pub fn read_track(path: &Path) -> Track {
     let inferred_title = path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -121,6 +123,55 @@ fn read_track(path: &Path) -> Track {
         play_count: 0,
         last_played_at: None,
         rating: None,
+    }
+}
+
+pub fn write_track_genre(path: &Path, genre: Option<&str>) -> Result<Track> {
+    let mut tagged_file = Probe::open(path)?.read()?;
+    let normalized = genre.map(str::trim).filter(|value| !value.is_empty());
+    let tag = editable_tag(&mut tagged_file);
+
+    match normalized {
+        Some(value) => tag.set_genre(value.to_string()),
+        None => tag.remove_genre(),
+    }
+
+    tagged_file.save_to_path(path, WriteOptions::default())?;
+    Ok(read_track(path))
+}
+
+pub fn write_track_bpm(path: &Path, bpm: Option<i64>) -> Result<Track> {
+    let mut tagged_file = Probe::open(path)?.read()?;
+    let tag = editable_tag(&mut tagged_file);
+    tag.take(&ItemKey::Bpm).for_each(drop);
+    tag.take(&ItemKey::IntegerBpm).for_each(drop);
+
+    if let Some(value) = bpm.filter(|value| *value > 0) {
+        if !tag.insert_text(ItemKey::IntegerBpm, value.to_string()) {
+            let _ = tag.insert_text(ItemKey::Bpm, value.to_string());
+        }
+    }
+
+    tagged_file.save_to_path(path, WriteOptions::default())?;
+    Ok(read_track(path))
+}
+
+fn editable_tag(tagged_file: &mut lofty::file::TaggedFile) -> &mut Tag {
+    if tagged_file.primary_tag().is_none() && tagged_file.first_tag().is_none() {
+        tagged_file.insert_tag(Tag::new(tagged_file.primary_tag_type()));
+    }
+
+    let primary_tag_type = tagged_file.primary_tag_type();
+    let has_primary_tag = tagged_file.primary_tag().is_some();
+
+    if has_primary_tag {
+        tagged_file
+            .tag_mut(primary_tag_type)
+            .expect("primary tag should be available after insertion")
+    } else {
+        tagged_file
+            .first_tag_mut()
+            .expect("tagged file should provide a tag after insertion")
     }
 }
 

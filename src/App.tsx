@@ -31,7 +31,8 @@ import {
   resumePlayback,
   runMaintenance,
   setAudioDevice as setPlaybackAudioDevice,
-  setAlbumPrimaryGenre as persistAlbumPrimaryGenre,
+  saveAlbumGenre as persistAlbumGenre,
+  saveTrackBpm as persistTrackBpmValue,
   setTrackRating as persistTrackRating,
   setPlaybackMuted,
   setPlaybackVolume as setPlaybackVolumeLevel,
@@ -51,6 +52,7 @@ import type {
   EqualizerPreset,
   LoudnessAnalysisFailure,
   LoudnessAnalysisProgress,
+  MetadataEditMode,
   PlaybackSession,
   RepeatMode,
   SavedPlaylist,
@@ -114,8 +116,12 @@ type SmartPlaylistGenreOption = {
 type AlbumGenreEditorState = {
   album: string;
   albumArtist: string | null;
-  currentPrimaryGenre: string | null;
+  trackPaths: string[];
+  currentGenre: string | null;
   suggestedGenres: string[];
+};
+type TrackBpmEditorState = {
+  track: Track;
 };
 type ResolvedPlaylist = {
   id: string;
@@ -334,6 +340,22 @@ const themeOptions: Array<{ value: ThemeMode; label: string }> = [
   { value: 'system', label: 'System' },
   { value: 'light', label: 'Light' },
   { value: 'dark', label: 'Dark' },
+];
+const metadataEditModeOptions: Array<{
+  value: MetadataEditMode;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: 'needle_only',
+    label: 'Needle only',
+    hint: 'Save genre and BPM edits in Needle without modifying your music files.',
+  },
+  {
+    value: 'write_to_files',
+    label: 'Write to files',
+    hint: 'Update the embedded genre and BPM tags so other apps see the same edits too.',
+  },
 ];
 const trackSortOptions: Array<{ value: TrackSortOption; label: string }> = [
   { value: 'title', label: 'Title (A-Z)' },
@@ -959,12 +981,16 @@ function TrackRatingControl({
 
 function TrackBpmControl({
   track,
+  metadataEditMode,
   disabled,
   onAdjust,
+  onOpenEditor,
 }: {
   track: Track;
+  metadataEditMode: MetadataEditMode;
   disabled?: boolean;
   onAdjust: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  onOpenEditor: (track: Track) => void;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -997,14 +1023,9 @@ function TrackBpmControl({
   const vibeLabel = vibeLabelForTrack(track);
   const halfBpm = track.bpm != null ? Math.max(1, Math.round(track.bpm / 2)) : null;
   const doubleBpm = track.bpm != null ? Math.max(1, track.bpm * 2) : null;
-
-  if (track.bpm == null && !track.bpm_overridden) {
-    return (
-      <div className="track-bpm-adjust is-empty" aria-hidden="true">
-        <span className="track-bpm-chip">000 BPM</span>
-      </div>
-    );
-  }
+  const hasBpm = track.bpm != null && track.bpm > 0;
+  const modeCopy =
+    metadataEditMode === 'write_to_files' ? 'Saving into music files' : 'Saving in Needle only';
 
   return (
     <div
@@ -1016,18 +1037,18 @@ function TrackBpmControl({
       <button
         className={`track-bpm-chip ${isOpen ? 'is-open' : ''}`}
         type="button"
-        disabled={disabled || track.bpm == null}
+        disabled={disabled}
         title={
           bpmLabel
             ? vibeLabel
               ? `${bpmLabel} BPM · ${vibeLabel}`
               : `${bpmLabel} BPM`
-            : 'No BPM available'
+            : 'Set BPM'
         }
         aria-label={
           bpmLabel
             ? `BPM ${bpmLabel}${vibeLabel ? `, ${vibeLabel}` : ''}. Open BPM correction options for ${track.title}`
-            : `No BPM available for ${track.title}`
+            : `Set BPM for ${track.title}`
         }
         aria-haspopup="menu"
         aria-expanded={isOpen}
@@ -1036,7 +1057,7 @@ function TrackBpmControl({
           setIsOpen((open) => !open);
         }}
       >
-        {bpmLabel ? `${bpmLabel} BPM` : 'BPM'}
+        {bpmLabel ? `${bpmLabel} BPM` : 'Set BPM'}
       </button>
 
       {isOpen && (
@@ -1045,6 +1066,19 @@ function TrackBpmControl({
             {bpmLabel ? `${bpmLabel} BPM` : 'BPM'}
             {vibeLabel ? ` · ${vibeLabel}` : ''}
           </div>
+          <button
+            className="track-bpm-menu-option"
+            type="button"
+            disabled={disabled}
+            role="menuitem"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenEditor(track);
+              setIsOpen(false);
+            }}
+          >
+            {hasBpm ? 'Edit BPM…' : 'Set BPM…'}
+          </button>
           <button
             className="track-bpm-menu-option"
             type="button"
@@ -1071,19 +1105,22 @@ function TrackBpmControl({
           >
             {doubleBpm != null ? `Double to ${doubleBpm} BPM` : 'Double BPM'}
           </button>
-          <button
-            className="track-bpm-menu-option"
-            type="button"
-            disabled={disabled || !track.bpm_overridden}
-            role="menuitem"
-            onClick={(event) => {
-              event.stopPropagation();
-              onAdjust(track, 'reset');
-              setIsOpen(false);
-            }}
-          >
-            Reset to imported BPM
-          </button>
+          {metadataEditMode === 'needle_only' && (
+            <button
+              className="track-bpm-menu-option"
+              type="button"
+              disabled={disabled || !track.bpm_overridden}
+              role="menuitem"
+              onClick={(event) => {
+                event.stopPropagation();
+                onAdjust(track, 'reset');
+                setIsOpen(false);
+              }}
+            >
+              Reset to imported BPM
+            </button>
+          )}
+          <div className="track-bpm-menu-footnote">{modeCopy}</div>
       </div>
       )}
     </div>
@@ -1115,6 +1152,7 @@ function App() {
   const [playlistComposer, setPlaylistComposer] = useState<PlaylistComposerState | null>(null);
   const [playlistTarget, setPlaylistTarget] = useState<PlaylistTargetState | null>(null);
   const [albumGenreEditor, setAlbumGenreEditor] = useState<AlbumGenreEditorState | null>(null);
+  const [trackBpmEditor, setTrackBpmEditor] = useState<TrackBpmEditorState | null>(null);
   const [queuePaths, setQueuePaths] = useState<string[]>([]);
   const [baseQueuePaths, setBaseQueuePaths] = useState<string[]>([]);
   const [currentQueueIndex, setCurrentQueueIndex] = useState(0);
@@ -1161,6 +1199,7 @@ function App() {
   const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light');
   const effectiveTheme: 'light' | 'dark' = isMiniPlayer ? 'dark' : resolvedTheme;
   const customAccentColor = useMemo(() => normalizeAccentColor(data?.settings.accent_color ?? null), [data?.settings.accent_color]);
+  const metadataEditMode: MetadataEditMode = data?.settings.metadata_edit_mode ?? 'needle_only';
   const accentTheme = useMemo(
     () => (customAccentColor ? deriveAccentTheme(customAccentColor, effectiveTheme) : null),
     [customAccentColor, effectiveTheme],
@@ -1309,16 +1348,53 @@ function App() {
     );
 
     try {
-      const next = await persistTrackBpmAdjustment(track.path, adjustment);
+      const next =
+        metadataEditMode === 'needle_only'
+          ? await persistTrackBpmAdjustment(track.path, adjustment)
+          : await (() => {
+              if (adjustment === 'reset') {
+                throw new Error('Reset is only available while Needle-only BPM edits are active');
+              }
+              if (track.bpm == null || track.bpm <= 0) {
+                throw new Error('No BPM available for this track');
+              }
+              const nextBpm =
+                adjustment === 'double'
+                  ? Math.max(1, track.bpm * 2)
+                  : Math.max(1, Math.round(track.bpm / 2));
+              return persistTrackBpmValue(track.path, nextBpm, metadataEditMode);
+            })();
       setData(next);
       setStatus(
-        adjustment === 'reset'
-          ? `Reset BPM correction · ${track.title}`
-          : `${adjustment === 'double' ? 'Doubled' : 'Halved'} BPM · ${track.title}`,
+        metadataEditMode === 'write_to_files'
+          ? `Updated file BPM · ${track.title}`
+          : adjustment === 'reset'
+            ? `Reset BPM correction · ${track.title}`
+            : `${adjustment === 'double' ? 'Doubled' : 'Halved'} BPM · ${track.title}`,
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
+      setPendingTrackBpms((current) => current.filter((path) => path !== track.path));
+    }
+  };
+  const saveExactTrackBpmValue = async (track: Track, bpm: number) => {
+    setPendingTrackBpms((current) =>
+      current.includes(track.path) ? current : current.concat(track.path),
+    );
+
+    try {
+      setBusy('Saving BPM…');
+      const next = await persistTrackBpmValue(track.path, bpm, metadataEditMode);
+      setData(next);
+      setTrackBpmEditor(null);
+      setStatus(
+        `${metadataEditMode === 'write_to_files' ? 'Updated file BPM' : 'Saved BPM correction'} · ${track.title}`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
       setPendingTrackBpms((current) => current.filter((path) => path !== track.path));
     }
   };
@@ -2940,17 +3016,22 @@ function App() {
       setPlaylistTarget(null);
     }
   };
-  const saveAlbumPrimaryGenre = async (
+  const saveAlbumGenre = async (
     album: string,
     albumArtist: string | null,
-    primaryGenre: string | null,
+    trackPaths: string[],
+    genre: string | null,
   ) => {
     try {
-      setBusy('Saving primary genre…');
-      const next = await persistAlbumPrimaryGenre(album, albumArtist, primaryGenre);
+      setBusy('Saving genres…');
+      const next = await persistAlbumGenre(album, albumArtist, trackPaths, genre, metadataEditMode);
       setData(next);
       setAlbumGenreEditor(null);
-      setStatus(primaryGenre ? `Primary genre · ${primaryGenre}` : `Cleared primary genre · ${album}`);
+      setStatus(
+        genre
+          ? `${metadataEditMode === 'write_to_files' ? 'Updated file genres' : 'Saved Needle genres'} · ${album}`
+          : `${metadataEditMode === 'write_to_files' ? 'Cleared file genres' : 'Cleared Needle genres'} · ${album}`,
+      );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -4066,7 +4147,9 @@ function App() {
             onClearSmartPlaylistGenres={() => setSelectedSmartPlaylistGenres([])}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
+            metadataEditMode={metadataEditMode}
             onAdjustBpm={adjustTrackBpmValue}
+            onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
             pendingBpmPaths={pendingTrackBpms}
             playlistPrimaryActionLabel={selectedPlaylistData ? selectedPlaylistPrimaryActionLabel : undefined}
             onPlayPlaylistPrimaryAction={
@@ -4182,13 +4265,16 @@ function App() {
             }
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
+            metadataEditMode={metadataEditMode}
             onAdjustBpm={adjustTrackBpmValue}
+            onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
             pendingBpmPaths={pendingTrackBpms}
-            onEditPrimaryGenre={(currentPrimaryGenre, suggestedGenres) =>
+            onEditGenre={(currentGenre, suggestedGenres, trackPaths) =>
               setAlbumGenreEditor({
                 album: selectedAlbumSummary.album,
                 albumArtist: selectedAlbumSummary.artist,
-                currentPrimaryGenre,
+                trackPaths,
+                currentGenre,
                 suggestedGenres,
               })
             }
@@ -4305,7 +4391,9 @@ function App() {
             }
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
+            metadataEditMode={metadataEditMode}
             onAdjustBpm={adjustTrackBpmValue}
+            onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
             pendingBpmPaths={pendingTrackBpms}
           />
         )}
@@ -4355,15 +4443,27 @@ function App() {
       {albumGenreEditor && (
         <AlbumGenreEditorModal
           state={albumGenreEditor}
-          busy={busy === 'Saving primary genre…'}
+          metadataEditMode={metadataEditMode}
+          busy={busy === 'Saving genres…'}
           onClose={() => setAlbumGenreEditor(null)}
-          onSubmit={(primaryGenre) =>
-            void saveAlbumPrimaryGenre(
+          onSubmit={(genre) =>
+            void saveAlbumGenre(
               albumGenreEditor.album,
               albumGenreEditor.albumArtist,
-              primaryGenre,
+              albumGenreEditor.trackPaths,
+              genre,
             )
           }
+        />
+      )}
+
+      {trackBpmEditor && (
+        <TrackBpmEditorModal
+          state={trackBpmEditor}
+          metadataEditMode={metadataEditMode}
+          busy={busy === 'Saving BPM…'}
+          onClose={() => setTrackBpmEditor(null)}
+          onSubmit={(bpm) => void saveExactTrackBpmValue(trackBpmEditor.track, bpm)}
         />
       )}
 
@@ -4931,16 +5031,23 @@ function PlaylistTargetModal({
 
 interface AlbumGenreEditorModalProps {
   state: AlbumGenreEditorState;
+  metadataEditMode: MetadataEditMode;
   busy: boolean;
   onClose: () => void;
-  onSubmit: (primaryGenre: string | null) => void;
+  onSubmit: (genre: string | null) => void;
 }
 
-function AlbumGenreEditorModal({ state, busy, onClose, onSubmit }: AlbumGenreEditorModalProps) {
-  const [value, setValue] = useState(state.currentPrimaryGenre ?? state.suggestedGenres[0] ?? '');
+function AlbumGenreEditorModal({
+  state,
+  metadataEditMode,
+  busy,
+  onClose,
+  onSubmit,
+}: AlbumGenreEditorModalProps) {
+  const [value, setValue] = useState(state.currentGenre ?? state.suggestedGenres[0] ?? '');
 
   useEffect(() => {
-    setValue(state.currentPrimaryGenre ?? state.suggestedGenres[0] ?? '');
+    setValue(state.currentGenre ?? state.suggestedGenres[0] ?? '');
   }, [state]);
 
   useEffect(() => {
@@ -4956,8 +5063,12 @@ function AlbumGenreEditorModal({ state, busy, onClose, onSubmit }: AlbumGenreEdi
 
   const trimmedValue = value.trim();
   const suggestedGenres = Array.from(
-    new Set([state.currentPrimaryGenre, ...state.suggestedGenres].filter(Boolean)),
+    new Set([state.currentGenre, ...state.suggestedGenres].filter(Boolean)),
   ) as string[];
+  const modeCopy =
+    metadataEditMode === 'write_to_files'
+      ? 'This will update the embedded genre tags on every track on this album.'
+      : 'This will stay inside Needle and leave the audio files untouched.';
 
   return (
     <div className="modal-scrim" onClick={() => !busy && onClose()}>
@@ -4972,10 +5083,10 @@ function AlbumGenreEditorModal({ state, busy, onClose, onSubmit }: AlbumGenreEdi
           <div>
             <div className="view-eyebrow">Metadata</div>
             <h2 className="modal-title" id="album-genre-editor-title">
-              Primary genre
+              Album genres
             </h2>
             <p className="modal-copy">
-              Needle will use this for this album before falling back to the imported tags.
+              Edit the full genre string for this album. {modeCopy} Change the save mode in Settings.
             </p>
           </div>
           <button className="ghost-button" onClick={onClose} disabled={busy}>
@@ -5001,26 +5112,119 @@ function AlbumGenreEditorModal({ state, busy, onClose, onSubmit }: AlbumGenreEdi
         )}
 
         <label className="field">
-          <span className="field-label">Genre Needle should use</span>
+          <span className="field-label">Genre string for every track on this album</span>
           <input
             className="field-input"
             value={value}
             onChange={(event) => setValue(event.currentTarget.value)}
-            placeholder="Electronic"
+            placeholder="Rock; Pop; Folk, World, & Country"
             autoFocus
           />
         </label>
 
         <div className="modal-actions">
-          <button className="ghost-button" onClick={() => onSubmit(null)} disabled={!state.currentPrimaryGenre || busy}>
-            Clear override
+          <button className="ghost-button" onClick={() => onSubmit(null)} disabled={!state.currentGenre || busy}>
+            {metadataEditMode === 'write_to_files' ? 'Clear file genres' : 'Clear Needle genres'}
           </button>
           <button
             className="primary-button"
             onClick={() => onSubmit(trimmedValue || null)}
             disabled={!trimmedValue || busy}
           >
-            {busy ? 'Saving…' : 'Save primary genre'}
+            {busy ? 'Saving…' : metadataEditMode === 'write_to_files' ? 'Write genres' : 'Save in Needle'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface TrackBpmEditorModalProps {
+  state: TrackBpmEditorState;
+  metadataEditMode: MetadataEditMode;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (bpm: number) => void;
+}
+
+function TrackBpmEditorModal({
+  state,
+  metadataEditMode,
+  busy,
+  onClose,
+  onSubmit,
+}: TrackBpmEditorModalProps) {
+  const [value, setValue] = useState(formatBpm(state.track.bpm) ?? '');
+
+  useEffect(() => {
+    setValue(formatBpm(state.track.bpm) ?? '');
+  }, [state]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) {
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [busy, onClose]);
+
+  const parsed = Number.parseInt(value.trim(), 10);
+  const canSubmit = Number.isFinite(parsed) && parsed > 0;
+
+  return (
+    <div className="modal-scrim" onClick={() => !busy && onClose()}>
+      <div
+        className="modal-card genre-editor"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="track-bpm-editor-title"
+      >
+        <div className="modal-head">
+          <div>
+            <div className="view-eyebrow">Metadata</div>
+            <h2 className="modal-title" id="track-bpm-editor-title">
+              {state.track.bpm != null ? 'Edit BPM' : 'Set BPM'}
+            </h2>
+            <p className="modal-copy">
+              {metadataEditMode === 'write_to_files'
+                ? 'This will update the embedded BPM tag in the music file. Change the save mode in Settings.'
+                : 'This will stay inside Needle as a local BPM correction. Change the save mode in Settings.'}
+            </p>
+          </div>
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+        </div>
+
+        <label className="field">
+          <span className="field-label">{state.track.title}</span>
+          <input
+            className="field-input"
+            value={value}
+            onChange={(event) => setValue(event.currentTarget.value)}
+            placeholder="128"
+            inputMode="numeric"
+            autoFocus
+          />
+        </label>
+
+        <div className="modal-actions">
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            className="primary-button"
+            onClick={() => {
+              if (!canSubmit) return;
+              onSubmit(parsed);
+            }}
+            disabled={!canSubmit || busy}
+          >
+            {busy ? 'Saving…' : metadataEditMode === 'write_to_files' ? 'Write BPM' : 'Save BPM'}
           </button>
         </div>
       </div>
@@ -5424,7 +5628,9 @@ interface TracksViewProps {
   onClearSmartPlaylistGenres?: () => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
+  metadataEditMode: MetadataEditMode;
   onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  onOpenBpmEditor: (track: Track) => void;
   pendingBpmPaths: string[];
   playlistPrimaryActionLabel?: string;
   onPlayPlaylistPrimaryAction?: () => void;
@@ -5490,7 +5696,9 @@ function TracksView({
   onClearSmartPlaylistGenres,
   onSetRating,
   pendingRatingPaths,
+  metadataEditMode,
   onAdjustBpm,
+  onOpenBpmEditor,
   pendingBpmPaths,
   playlistPrimaryActionLabel,
   onPlayPlaylistPrimaryAction,
@@ -5825,8 +6033,10 @@ function TracksView({
                   <span className="album-track-actions">
                     <TrackBpmControl
                       track={track}
+                      metadataEditMode={metadataEditMode}
                       disabled={bpmIsPending}
                       onAdjust={onAdjustBpm}
+                      onOpenEditor={onOpenBpmEditor}
                     />
                     <TrackRatingControl
                       track={track}
@@ -5944,9 +6154,11 @@ interface AlbumDetailViewProps {
   onAddTrackToPlaylist: (track: Track) => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
+  metadataEditMode: MetadataEditMode;
   onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  onOpenBpmEditor: (track: Track) => void;
   pendingBpmPaths: string[];
-  onEditPrimaryGenre: (currentPrimaryGenre: string | null, suggestedGenres: string[]) => void;
+  onEditGenre: (currentGenre: string | null, suggestedGenres: string[], trackPaths: string[]) => void;
   onRefreshMetadata: () => void;
   onPlayAlbum: () => void;
   onShuffleAlbum: () => void;
@@ -5974,9 +6186,11 @@ function AlbumDetailView({
   onAddTrackToPlaylist,
   onSetRating,
   pendingRatingPaths,
+  metadataEditMode,
   onAdjustBpm,
+  onOpenBpmEditor,
   pendingBpmPaths,
-  onEditPrimaryGenre,
+  onEditGenre,
   onRefreshMetadata,
   onPlayAlbum,
   onShuffleAlbum,
@@ -6038,18 +6252,18 @@ function AlbumDetailView({
   const genres = useMemo(() => {
     const set = new Set<string>();
     for (const t of albumTracks) {
-      if (!t.genre) continue;
-      for (const part of splitTrackGenres(t.genre)) {
+      for (const part of splitTrackGenres(effectiveTrackGenre(t))) {
         set.add(part);
       }
     }
-    return Array.from(set).slice(0, 5);
+    return Array.from(set);
   }, [albumTracks]);
-  const primaryGenre = albumTracks.find((track) => track.primary_genre)?.primary_genre ?? null;
-  const secondaryGenres = useMemo(
-    () => (primaryGenre ? genres.filter((genre) => compareText(genre, primaryGenre) !== 0) : genres),
-    [genres, primaryGenre],
+  const suggestedGenreValues = useMemo(
+    () => uniqueSorted(albumTracks.map((track) => effectiveTrackGenre(track) ?? '').filter(Boolean)),
+    [albumTracks],
   );
+  const currentGenreValue =
+    suggestedGenreValues.length === 1 ? suggestedGenreValues[0] : (suggestedGenreValues[0] ?? null);
 
   const qualityHint = useMemo(() => {
     if (albumTracks.length === 0) return null;
@@ -6176,22 +6390,22 @@ function AlbumDetailView({
               .join(' · ')}
           </div>
           <div className="album-primary-genre">
-            <span className="album-primary-genre-label">Primary genre</span>
-            <span className={`album-primary-genre-pill ${primaryGenre ? 'is-set' : ''}`}>
-              {primaryGenre ?? 'Not set'}
+            <span className="album-primary-genre-label">Genres</span>
+            <span className={`album-primary-genre-pill ${genres.length > 0 ? 'is-set' : ''}`}>
+              {genres.length === 0 ? 'Not set' : `${genres.length} tag${genres.length === 1 ? '' : 's'}`}
             </span>
             <button
               className="album-primary-genre-edit"
-              onClick={() => onEditPrimaryGenre(primaryGenre, genres)}
-              title={primaryGenre ? `Edit primary genre · ${primaryGenre}` : 'Set primary genre'}
-              aria-label={primaryGenre ? `Edit primary genre · ${primaryGenre}` : 'Set primary genre'}
+              onClick={() => onEditGenre(currentGenreValue, suggestedGenreValues, albumTracks.map((track) => track.path))}
+              title={currentGenreValue ? `Edit genres · ${currentGenreValue}` : 'Edit genres'}
+              aria-label={currentGenreValue ? `Edit genres · ${currentGenreValue}` : 'Edit genres'}
             >
               <PencilIcon />
             </button>
           </div>
-          {secondaryGenres.length > 0 && (
+          {genres.length > 0 && (
             <div className="album-hero-genres">
-              {secondaryGenres.map((g) => (
+              {genres.map((g) => (
                 <span key={g} className="album-genre-pill">
                   {g}
                 </span>
@@ -6287,8 +6501,10 @@ function AlbumDetailView({
                       <span className="album-track-actions">
                         <TrackBpmControl
                           track={t}
+                          metadataEditMode={metadataEditMode}
                           disabled={bpmIsPending}
                           onAdjust={onAdjustBpm}
+                          onOpenEditor={onOpenBpmEditor}
                         />
                         <TrackRatingControl
                           track={t}
@@ -6369,7 +6585,9 @@ interface ArtistDetailViewProps {
   onAddTrackToPlaylist: (track: Track) => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
+  metadataEditMode: MetadataEditMode;
   onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  onOpenBpmEditor: (track: Track) => void;
   pendingBpmPaths: string[];
 }
 
@@ -6401,7 +6619,9 @@ function ArtistDetailView({
   onAddTrackToPlaylist,
   onSetRating,
   pendingRatingPaths,
+  metadataEditMode,
   onAdjustBpm,
+  onOpenBpmEditor,
   pendingBpmPaths,
 }: ArtistDetailViewProps) {
   const [isBioExpanded, setIsBioExpanded] = useState(false);
@@ -6753,8 +6973,10 @@ function ArtistDetailView({
                   <span className="album-track-actions">
                     <TrackBpmControl
                       track={track}
+                      metadataEditMode={metadataEditMode}
                       disabled={bpmIsPending}
                       onAdjust={onAdjustBpm}
+                      onOpenEditor={onOpenBpmEditor}
                     />
                     <TrackRatingControl
                       track={track}
@@ -7435,6 +7657,43 @@ function SettingsView({
                   </div>
                 );
               })}
+            </div>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-section-head">
+            <h2>Metadata edits</h2>
+            <p>Choose whether genre and BPM changes should stay inside Needle or update the files themselves.</p>
+          </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <label className="settings-label">Save mode</label>
+              <p className="settings-hint">
+                Needle will only show the currently selected behavior inside genre and BPM editors.
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <div className="seg">
+                {metadataEditModeOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    className={`seg-btn ${settings.metadata_edit_mode === option.value ? 'on' : ''}`}
+                    onClick={() =>
+                      onChange({
+                        ...settings,
+                        metadata_edit_mode: option.value,
+                      })
+                    }
+                    title={option.hint}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <p className="settings-inline-note">
+                {metadataEditModeOptions.find((option) => option.value === settings.metadata_edit_mode)?.hint}
+              </p>
             </div>
           </div>
         </section>

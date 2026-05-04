@@ -1553,10 +1553,6 @@ input, select {
   align-items: center;
   margin-right: 8px;
 }
-.track-bpm-adjust.is-empty {
-  visibility: hidden;
-  pointer-events: none;
-}
 .track-bpm-chip {
   min-width: 88px;
   height: 28px;
@@ -1616,6 +1612,12 @@ input, select {
 .track-bpm-menu-option:disabled {
   color: var(--muted);
   cursor: default;
+}
+.track-bpm-menu-footnote {
+  padding: 10px 12px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
 }
 .track-rating-star {
   width: 22px;
@@ -2518,8 +2520,19 @@ input, select {
 
 .settings-row-control {
   display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   justify-content: flex-end;
   flex-shrink: 0;
+}
+
+.settings-inline-note {
+  max-width: 320px;
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+  text-align: right;
 }
 
 .settings-accent-control {

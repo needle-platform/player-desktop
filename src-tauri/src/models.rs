@@ -31,6 +31,14 @@ pub enum RepeatMode {
     All,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataEditMode {
+    #[default]
+    NeedleOnly,
+    WriteToFiles,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub id: i64,
@@ -69,6 +77,7 @@ pub struct TrackMetadataOverride {
     pub disc_number: Option<i64>,
     pub track_number: Option<i64>,
     pub bpm: Option<i64>,
+    pub genre: Option<String>,
     pub year: Option<i64>,
     pub recording_mbid: Option<String>,
     pub release_track_mbid: Option<String>,
@@ -103,6 +112,8 @@ pub struct AppSettings {
     pub equalizer_bands: [f32; 10],
     #[serde(default)]
     pub volume_leveling_enabled: bool,
+    #[serde(default)]
+    pub metadata_edit_mode: MetadataEditMode,
     #[serde(default = "default_tracks_page_size")]
     pub tracks_page_size: u32,
     #[serde(default)]

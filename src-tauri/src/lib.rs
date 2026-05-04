@@ -12,7 +12,8 @@ use std::{fs, path::Path, process::Command, sync::Mutex, time::Instant};
 
 use models::{
     AlbumMetadataRefreshResult, AlbumMetadataRefreshStatus, AppSettings, BootstrapPayload,
-    PlaybackSession, PlaybackState, RepeatMode, SavedPlaylistRule, TrackBpmAdjustment,
+    MetadataEditMode, PlaybackSession, PlaybackState, RepeatMode, SavedPlaylistRule,
+    TrackBpmAdjustment,
 };
 use mpv::MpvController;
 use tauri::{Emitter, Manager};
@@ -514,12 +515,84 @@ fn set_album_primary_genre(
 }
 
 #[tauri::command]
+fn save_album_genre(
+    album: String,
+    album_artist: Option<String>,
+    track_paths: Vec<String>,
+    genre: Option<String>,
+    mode: MetadataEditMode,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    if track_paths.is_empty() {
+        return Err("No tracks were provided for this album edit".to_string());
+    }
+
+    match mode {
+        MetadataEditMode::NeedleOnly => db::set_album_genre_override(
+            &state.db_path,
+            &album,
+            album_artist.as_deref(),
+            &track_paths,
+            genre.as_deref(),
+        )
+        .map_err(|error| error.to_string())?,
+        MetadataEditMode::WriteToFiles => {
+            let mut updated_tracks = Vec::with_capacity(track_paths.len());
+            for path in &track_paths {
+                updated_tracks.push(
+                    library::write_track_genre(Path::new(path), genre.as_deref())
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            db::sync_tracks_from_files(&state.db_path, &updated_tracks)
+                .map_err(|error| error.to_string())?;
+            db::set_album_genre_override(
+                &state.db_path,
+                &album,
+                album_artist.as_deref(),
+                &track_paths,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn set_track_rating(
     path: String,
     rating: Option<i64>,
     state: tauri::State<'_, AppState>,
 ) -> Result<BootstrapPayload, String> {
     db::set_track_rating(&state.db_path, &path, rating).map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_track_bpm(
+    path: String,
+    bpm: i64,
+    mode: MetadataEditMode,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    let normalized_bpm = bpm.max(1);
+    match mode {
+        MetadataEditMode::NeedleOnly => {
+            db::set_track_bpm_override(&state.db_path, &path, Some(normalized_bpm))
+                .map_err(|error| error.to_string())?;
+        }
+        MetadataEditMode::WriteToFiles => {
+            let updated = library::write_track_bpm(Path::new(&path), Some(normalized_bpm))
+                .map_err(|error| error.to_string())?;
+            db::sync_tracks_from_files(&state.db_path, &[updated])
+                .map_err(|error| error.to_string())?;
+            db::set_track_bpm_override(&state.db_path, &path, None)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
     db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
 }
 
@@ -1179,7 +1252,9 @@ pub fn run() {
             remove_playlist_track,
             move_playlist_track,
             set_album_primary_genre,
+            save_album_genre,
             set_track_rating,
+            save_track_bpm,
             adjust_track_bpm,
             set_playback_volume,
             set_playback_muted,
