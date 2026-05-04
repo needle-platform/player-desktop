@@ -11,7 +11,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Library
 - **Local library** stored in SQLite under the OS app-data directory
 - **Folder import** with recursive scan of FLAC, ALAC, WAV, AIFF, M4A, AAC, MP3, OGG, Opus
-- **Tag extraction** via `lofty`: title, artist, album, track number, **genre**, **year**, sample rate, bit depth
+- **Tag extraction** via `lofty`: title, artist, album, track number, **genre**, **year**, **BPM**, sample rate, bit depth
 - **On-demand MusicBrainz album refresh** from the album page right-click menu when an imported release needs cleaner metadata
 - **Hidden files ignored** — dotfiles and dot-directories are skipped during scan
 - **Maintenance command** rescans your folders for changes and purges any dotfile entries from the library (never touches your audio files), with live Settings progress output and a recorded last-run timestamp
@@ -31,6 +31,11 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
   - **Rediscover** for tracks you played before but have not visited in a while
   - **From your top genre** for one focused genre mix instead of a wall of auto-generated buckets
 - **Featured albums** & **Top artists** rows
+- **Vibe row** with four BPM-informed smart mixes:
+  - **Wind down** for slower songs that help the room exhale
+  - **Cruise & groove** for easy motion and warm rhythm
+  - **Lift & energy** for brighter momentum
+  - **Get on your feet** for the songs that make stillness unlikely
 - **Quick picks** — random tracks playable in one click
 
 ### Playback
@@ -72,6 +77,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Smart playlists** surfaced as first-class library views generated from your collection and listening history
 - **Ratings-driven smart playlist** automatically keeps a `Top rated` mix in sync with your own stars
 - **Smart-playlist genre focus pills** let you narrow a generated mix to the genres currently present in that playlist, including multi-select combinations like pop + r&b
+- **Embedded-BPM vibe playlists** quietly map tempo into mood buckets instead of turning the library into a wall of raw numbers
 
 ### Artist portraits & bios
 - **Artist portraits** pulled for free via **MusicBrainz → Wikidata → Wikimedia Commons**
@@ -90,6 +96,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 ### Views
 - **Dashboard** (default landing screen)
 - **Tracks** with live search, sorting, and filters for artist / genre / year range, plus album / artist / playlist context
+- **Compact BPM details** on track rows, album pages, and artist pages, with a click-to-open correction menu for halve / double / reset actions
 - **Albums** with cover art, sorting, and direct playlist actions
 - **Large library browsers** lazily load offscreen covers / portraits and stage media work near the viewport instead of trying to resolve every image at once
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
@@ -198,11 +205,13 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 
 - **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
 - **User ratings** (`rating`) drive a `Top rated` smart playlist built from the stars you assign
+- **Embedded BPM tags** drive compact tempo details plus vibe buckets such as Slowdown, Cruise, Groove, Lift, Energy, and Chaos
+- **Local BPM corrections** are stored in Needle so halve / double-time mistakes can be fixed without touching the source files
 - **Optional loudness analysis** stores LUFS / peak-derived gain data locally so Needle can level mixed queues when you enable volume leveling
 - **Two-worker loudness scans** make the first analysis pass much more practical on modern Macs without overcommitting the whole machine
 - **Playlist-local genre focus** lets smart playlists keep their generated order while narrowing the current mix to one or more genres already represented in that playlist
 - **Library state** (`play_count = 0`) drives Needs a first spin
-- **Tags** and local overrides (`primary_genre`) drive one top-genre mix when your collection has a clear favorite
+- **Genre tags** and local overrides (`primary_genre`) drive one top-genre mix when your collection has a clear favorite
 - **Vinyl-rip tags** (for example `vinyl-rip`) can mark your own transfers visually without rewriting how Needle handles the rest of your metadata
 - **Artist enrichment** (`gender` when MusicBrainz provides it) gives future artist-radio style mixes another optional signal without blocking playback when metadata is incomplete
 - **`added_at`** (preserved across rescans) drives the Recently added albums row
@@ -213,8 +222,9 @@ Needle treats imported metadata as a starting point, not untouchable truth:
 - **Local overrides** can refine how the app interprets your library without modifying audio files
 - **MusicBrainz album refresh** adds those overrides only for albums you explicitly choose to repair from the album page
 - **Album-level primary genre** currently flows down to tracks from that album for filtering and smarter playlist generation
+- **BPM corrections** stay local to Needle, so bad embedded values can be fixed without rewriting your music files
 
-Real **BPM and key analysis** would unlock proper mood detection (energy, workout, slow groove). It's tractable in Rust via onset-detection / autocorrelation, but it's CPU-heavy and best done as an opt-in background "Analyze library" maintenance step. Tracked in the roadmap.
+Needle already makes use of embedded BPM when your files provide it. A future opt-in analysis pass could still add missing BPM/key data for files that have none, or improve obviously broken source tags, but it is no longer required for vibe-aware smart playlists.
 
 ## Roadmap
 

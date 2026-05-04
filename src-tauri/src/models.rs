@@ -45,6 +45,9 @@ pub struct Track {
     pub bit_depth: Option<u8>,
     pub disc_number: Option<i64>,
     pub track_number: Option<i64>,
+    pub bpm: Option<i64>,
+    #[serde(default)]
+    pub bpm_overridden: bool,
     pub genre: Option<String>,
     pub primary_genre: Option<String>,
     #[serde(default)]
@@ -65,12 +68,21 @@ pub struct TrackMetadataOverride {
     pub album_artist: Option<String>,
     pub disc_number: Option<i64>,
     pub track_number: Option<i64>,
+    pub bpm: Option<i64>,
     pub year: Option<i64>,
     pub recording_mbid: Option<String>,
     pub release_track_mbid: Option<String>,
     pub release_mbid: Option<String>,
     pub release_group_mbid: Option<String>,
     pub confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackBpmAdjustment {
+    Half,
+    Double,
+    Reset,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -6,6 +6,7 @@ import type {
   PlaybackState,
   RepeatMode,
   SavedPlaylistRule,
+  TrackBpmAdjustment,
 } from '../types';
 
 export const bootstrapApp = () => invoke<BootstrapPayload>('bootstrap_app');
@@ -113,6 +114,9 @@ export const setAlbumPrimaryGenre = (
 
 export const setTrackRating = (path: string, rating: number | null) =>
   invoke<BootstrapPayload>('set_track_rating', { path, rating });
+
+export const adjustTrackBpm = (path: string, adjustment: TrackBpmAdjustment) =>
+  invoke<BootstrapPayload>('adjust_track_bpm', { path, adjustment });
 
 export interface CoverArt {
   data_url: string;

@@ -24,6 +24,8 @@ export interface Track {
   bit_depth: number | null;
   disc_number: number | null;
   track_number: number | null;
+  bpm: number | null;
+  bpm_overridden: boolean;
   genre: string | null;
   primary_genre: string | null;
   is_vinyl_rip: boolean;
@@ -115,3 +117,5 @@ export interface SavedPlaylist {
   created_at: string;
   updated_at: string;
 }
+
+export type TrackBpmAdjustment = 'half' | 'double' | 'reset';

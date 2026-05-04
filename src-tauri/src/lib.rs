@@ -12,7 +12,7 @@ use std::{fs, path::Path, process::Command, sync::Mutex, time::Instant};
 
 use models::{
     AlbumMetadataRefreshResult, AlbumMetadataRefreshStatus, AppSettings, BootstrapPayload,
-    PlaybackSession, PlaybackState, RepeatMode, SavedPlaylistRule,
+    PlaybackSession, PlaybackState, RepeatMode, SavedPlaylistRule, TrackBpmAdjustment,
 };
 use mpv::MpvController;
 use tauri::{Emitter, Manager};
@@ -520,6 +520,16 @@ fn set_track_rating(
     state: tauri::State<'_, AppState>,
 ) -> Result<BootstrapPayload, String> {
     db::set_track_rating(&state.db_path, &path, rating).map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn adjust_track_bpm(
+    path: String,
+    adjustment: TrackBpmAdjustment,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::adjust_track_bpm(&state.db_path, &path, adjustment).map_err(|error| error.to_string())?;
     db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
 }
 
@@ -1170,6 +1180,7 @@ pub fn run() {
             move_playlist_track,
             set_album_primary_genre,
             set_track_rating,
+            adjust_track_bpm,
             set_playback_volume,
             set_playback_muted,
             set_audio_device,

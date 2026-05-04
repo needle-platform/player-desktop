@@ -14,6 +14,9 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Added opt-in loudness analysis and volume leveling, with FFmpeg-backed per-track gain stored locally and applied through mpv during playback.
 - Added vinyl-rip tag detection plus a record badge overlay on album artwork for tagged transfers.
 - Added structured loudness-analysis progress with checked/ analyzed/ fresh/ missing/ failed counts plus a failed-files list that can be copied from Settings.
+- Added embedded-BPM import plus vibe bucketing so smart mixes can quietly use tempo without exposing raw BPM as a primary browsing filter.
+- Added local BPM correction controls with halve / double / reset actions stored in Needle rather than written back to audio files.
+- Added four vibe-led smart mixes on the dashboard: `Wind down`, `Cruise & groove`, `Lift & energy`, and `Get on your feet`.
 
 ### Changed
 - Licensed the project under `GPL-3.0-only` and added the full license text.
@@ -28,11 +31,16 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Expanded Settings with a background loudness-analysis workflow, live progress logging, structured progress feedback, and clearer guidance that the first pass can take a while while the app remains usable.
 - Made volume leveling gentler by targeting a lower loudness and capping upward gain, so mixed playback feels more natural.
 - Increased loudness-analysis throughput by running two FFmpeg workers in parallel instead of processing the whole library strictly one track at a time.
+- Reworked the dashboard playlist lineup so the top row stays utility/history-focused and the second row is reserved for the four vibe mixes.
+- Replaced cramped inline BPM math buttons with a compact BPM chip that opens a clearer correction menu.
 
 ### Fixed
 - Fixed album-page track clicks so choosing one song plays that track directly instead of queueing the rest of the album.
 - Fixed album-page track-heading spacing so the `Tracks` label has a little breathing room above the list.
 - Fixed stale end-of-album playback state so finished albums return to a working `Play` state instead of getting stuck behind a dead `Resume`.
+- Fixed sidebar scrolling so Settings no longer disappears behind the now-playing bar when playlist lists grow.
+- Fixed track-row alignment when BPM controls are unavailable for some rows.
+- Fixed BPM-correction toasts so they auto-dismiss like other success confirmations.
 
 ## [0.1.0] - 2026-05-01
 

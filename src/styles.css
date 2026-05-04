@@ -125,7 +125,9 @@ input, select {
   gap: 18px;
   overflow-y: auto;
   margin: 0 -6px;
-  padding: 0 6px var(--bottom-ui-clearance);
+  padding: 0 6px 8px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .content {
@@ -548,6 +550,13 @@ input, select {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-height: 0;
+}
+
+.sidebar-app-nav {
+  flex: 0 0 auto;
+  margin-top: auto;
+  margin-bottom: var(--bottom-ui-clearance);
 }
 
 .nav-label {
@@ -1537,6 +1546,76 @@ input, select {
   align-items: center;
   gap: 4px;
   margin-right: 8px;
+}
+.track-bpm-adjust {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-right: 8px;
+}
+.track-bpm-adjust.is-empty {
+  visibility: hidden;
+  pointer-events: none;
+}
+.track-bpm-chip {
+  min-width: 88px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text-2);
+  font-size: 11px;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.track-bpm-chip:hover {
+  background: var(--row-hover);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+}
+.track-bpm-chip.is-open,
+.track-bpm-adjust.is-overridden .track-bpm-chip {
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel-2));
+  color: var(--accent);
+}
+.track-bpm-menu-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 10px);
+  min-width: 188px;
+  padding: 8px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  z-index: 12;
+}
+.track-bpm-menu-title {
+  padding: 8px 10px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.track-bpm-menu-option {
+  width: 100%;
+  display: block;
+  padding: 10px 12px;
+  border-radius: 12px;
+  text-align: left;
+  color: var(--text-2);
+}
+.track-bpm-menu-option:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+.track-bpm-menu-option:disabled {
+  color: var(--muted);
+  cursor: default;
 }
 .track-rating-star {
   width: 22px;
@@ -3524,8 +3603,26 @@ input, select {
 
 .playlist-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
+}
+
+@media (max-width: 1200px) {
+  .playlist-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1100px) {
+  .playlist-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .playlist-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .playlist-card {

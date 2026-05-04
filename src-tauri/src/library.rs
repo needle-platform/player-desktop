@@ -55,6 +55,7 @@ fn read_track(path: &Path) -> Track {
     let mut bit_depth = None;
     let mut disc_number = None;
     let mut track_number = None;
+    let mut bpm = None;
     let mut genre = None;
     let mut is_vinyl_rip = false;
     let mut year = None;
@@ -79,6 +80,7 @@ fn read_track(path: &Path) -> Track {
                 .map(|value| value.to_string());
             disc_number = tag.disk().map(|value| value as i64);
             track_number = tag.track().map(|value| value as i64);
+            bpm = read_bpm(tag);
             genre = tag.genre().map(|value| value.to_string());
             is_vinyl_rip = tag_marks_vinyl_rip(tag);
             year = tag.year().map(|value| value as i64);
@@ -109,6 +111,8 @@ fn read_track(path: &Path) -> Track {
         bit_depth,
         disc_number,
         track_number,
+        bpm,
+        bpm_overridden: false,
         genre,
         primary_genre: None,
         is_vinyl_rip,
@@ -118,6 +122,31 @@ fn read_track(path: &Path) -> Track {
         last_played_at: None,
         rating: None,
     }
+}
+
+fn read_bpm(tag: &lofty::tag::Tag) -> Option<i64> {
+    tag.get_string(&ItemKey::Bpm)
+        .or_else(|| tag.get_string(&ItemKey::IntegerBpm))
+        .and_then(parse_bpm_value)
+}
+
+fn parse_bpm_value(value: &str) -> Option<i64> {
+    let numeric: String = value
+        .trim()
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || matches!(ch, '.' | ','))
+        .collect();
+    if numeric.is_empty() {
+        return None;
+    }
+
+    numeric
+        .replace(',', ".")
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.round() as i64)
+        .filter(|value| *value > 0)
 }
 
 fn tag_marks_vinyl_rip(tag: &lofty::tag::Tag) -> bool {

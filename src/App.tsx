@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { CSSProperties, RefObject } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  adjustTrackBpm as persistTrackBpmAdjustment,
   applyVolumeLevelingForTrack,
   appendTracksToPlaylist,
   appendQueue,
@@ -56,12 +57,14 @@ import type {
   SavedPlaylistRule,
   ThemeMode,
   Track,
+  TrackBpmAdjustment,
 } from './types';
 import { useCoverArt } from './lib/cover';
 import { useArtistImage } from './lib/artistImage';
 import { useArtistInfo } from './lib/artistInfo';
 import { useAlbumInfo } from './lib/albumInfo';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
+import { formatBpm, vibeLabelForTrack } from './lib/vibes';
 import dashboardIdleBackdrop from './assets/bg.jpg';
 import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
@@ -193,6 +196,9 @@ const inferNotificationTone = (message: string): NotificationTone => {
     normalized.includes('reordered') ||
     normalized.includes('plays next') ||
     normalized.includes('pinned') ||
+    normalized.includes('halved bpm') ||
+    normalized.includes('doubled bpm') ||
+    normalized.includes('bpm correction') ||
     normalized.includes('mini player on') ||
     normalized.includes('mini player off')
   ) {
@@ -442,6 +448,18 @@ const formatQuality = (track: Track) => {
     track.sample_rate ? `${(track.sample_rate / 1000).toFixed(1)} kHz` : null,
     track.bit_depth ? `${track.bit_depth}-bit` : null,
   ].filter((v): v is string => Boolean(v));
+  return parts.join(' · ') || null;
+};
+
+const formatTrackPace = (track: Pick<Track, 'bpm'>) => {
+  const bpm = formatBpm(track.bpm);
+  const vibe = vibeLabelForTrack(track);
+  const parts = [bpm ? `${bpm} BPM` : null, vibe].filter((value): value is string => Boolean(value));
+  return parts.join(' · ') || null;
+};
+
+const formatTrackDetails = (track: Track) => {
+  const parts = [formatQuality(track), formatTrackPace(track)].filter((value): value is string => Boolean(value));
   return parts.join(' · ') || '—';
 };
 
@@ -939,6 +957,139 @@ function TrackRatingControl({
   );
 }
 
+function TrackBpmControl({
+  track,
+  disabled,
+  onAdjust,
+}: {
+  track: Track;
+  disabled?: boolean;
+  onAdjust: (track: Track, adjustment: TrackBpmAdjustment) => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    };
+
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isOpen]);
+
+  const bpmLabel = formatBpm(track.bpm);
+  const vibeLabel = vibeLabelForTrack(track);
+  const halfBpm = track.bpm != null ? Math.max(1, Math.round(track.bpm / 2)) : null;
+  const doubleBpm = track.bpm != null ? Math.max(1, track.bpm * 2) : null;
+
+  if (track.bpm == null && !track.bpm_overridden) {
+    return (
+      <div className="track-bpm-adjust is-empty" aria-hidden="true">
+        <span className="track-bpm-chip">000 BPM</span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={menuRef}
+      className={`track-bpm-adjust ${track.bpm_overridden ? 'is-overridden' : ''}`}
+      role="group"
+      aria-label={`BPM correction for ${track.title}`}
+    >
+      <button
+        className={`track-bpm-chip ${isOpen ? 'is-open' : ''}`}
+        type="button"
+        disabled={disabled || track.bpm == null}
+        title={
+          bpmLabel
+            ? vibeLabel
+              ? `${bpmLabel} BPM · ${vibeLabel}`
+              : `${bpmLabel} BPM`
+            : 'No BPM available'
+        }
+        aria-label={
+          bpmLabel
+            ? `BPM ${bpmLabel}${vibeLabel ? `, ${vibeLabel}` : ''}. Open BPM correction options for ${track.title}`
+            : `No BPM available for ${track.title}`
+        }
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        onClick={(event) => {
+          event.stopPropagation();
+          setIsOpen((open) => !open);
+        }}
+      >
+        {bpmLabel ? `${bpmLabel} BPM` : 'BPM'}
+      </button>
+
+      {isOpen && (
+        <div className="track-bpm-menu-panel" role="menu" aria-label={`BPM options for ${track.title}`}>
+          <div className="track-bpm-menu-title">
+            {bpmLabel ? `${bpmLabel} BPM` : 'BPM'}
+            {vibeLabel ? ` · ${vibeLabel}` : ''}
+          </div>
+          <button
+            className="track-bpm-menu-option"
+            type="button"
+            disabled={disabled || halfBpm == null}
+            role="menuitem"
+            onClick={(event) => {
+              event.stopPropagation();
+              onAdjust(track, 'half');
+              setIsOpen(false);
+            }}
+          >
+            {halfBpm != null ? `Halve to ${halfBpm} BPM` : 'Halve BPM'}
+          </button>
+          <button
+            className="track-bpm-menu-option"
+            type="button"
+            disabled={disabled || doubleBpm == null}
+            role="menuitem"
+            onClick={(event) => {
+              event.stopPropagation();
+              onAdjust(track, 'double');
+              setIsOpen(false);
+            }}
+          >
+            {doubleBpm != null ? `Double to ${doubleBpm} BPM` : 'Double BPM'}
+          </button>
+          <button
+            className="track-bpm-menu-option"
+            type="button"
+            disabled={disabled || !track.bpm_overridden}
+            role="menuitem"
+            onClick={(event) => {
+              event.stopPropagation();
+              onAdjust(track, 'reset');
+              setIsOpen(false);
+            }}
+          >
+            Reset to imported BPM
+          </button>
+      </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
   const [view, setView] = useState<View>('dashboard');
@@ -990,6 +1141,7 @@ function App() {
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [pendingTrackRatings, setPendingTrackRatings] = useState<string[]>([]);
+  const [pendingTrackBpms, setPendingTrackBpms] = useState<string[]>([]);
   const [selectedSmartPlaylistGenres, setSelectedSmartPlaylistGenres] = useState<string[]>([]);
   const [isMaintenanceRunning, setIsMaintenanceRunning] = useState(false);
   const [maintenanceLog, setMaintenanceLog] = useState<string[]>([]);
@@ -1149,6 +1301,25 @@ function App() {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setPendingTrackRatings((current) => current.filter((path) => path !== track.path));
+    }
+  };
+  const adjustTrackBpmValue = async (track: Track, adjustment: TrackBpmAdjustment) => {
+    setPendingTrackBpms((current) =>
+      current.includes(track.path) ? current : current.concat(track.path),
+    );
+
+    try {
+      const next = await persistTrackBpmAdjustment(track.path, adjustment);
+      setData(next);
+      setStatus(
+        adjustment === 'reset'
+          ? `Reset BPM correction · ${track.title}`
+          : `${adjustment === 'double' ? 'Doubled' : 'Halved'} BPM · ${track.title}`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingTrackBpms((current) => current.filter((path) => path !== track.path));
     }
   };
   const resizeMiniPlayerWindow = async (height: number) => {
@@ -1821,6 +1992,32 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [allTracks, featuredSeed],
   );
+  const dashboardPlaylists = useMemo(() => {
+    const byId = new Map(smartPlaylists.map((playlist) => [playlist.id, playlist]));
+    const topGenrePlaylist = smartPlaylists.find((playlist) => playlist.id.startsWith('genre:')) ?? null;
+    const ordered: AutoPlaylist[] = [];
+
+    const pushIfPresent = (playlist: AutoPlaylist | null | undefined) => {
+      if (!playlist || ordered.some((entry) => entry.id === playlist.id)) return;
+      ordered.push(playlist);
+    };
+
+    pushIfPresent(byId.get('history:most-played'));
+    pushIfPresent(byId.get('history:recent'));
+    pushIfPresent(topGenrePlaylist);
+    pushIfPresent(byId.get('library:first-spin'));
+    pushIfPresent(byId.get('vibes:wind-down'));
+    pushIfPresent(byId.get('vibes:cruise-and-groove'));
+    pushIfPresent(byId.get('vibes:lift-and-energy'));
+    pushIfPresent(byId.get('vibes:get-on-your-feet'));
+
+    for (const playlist of smartPlaylists) {
+      if (ordered.length >= 8) break;
+      pushIfPresent(playlist);
+    }
+
+    return ordered.slice(0, 8);
+  }, [smartPlaylists]);
 
   const manualPlaylists = data?.playlists ?? [];
   const selectedPlaylistData = useMemo<ResolvedPlaylist | null>(() => {
@@ -3646,41 +3843,41 @@ function App() {
           </div>
         </div>
 
-        <div className="sidebar-scroll">
-          <nav className="nav-section">
-            <div className="nav-label">Browse</div>
-            <button
-              className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
-              onClick={() => setView('dashboard')}
-            >
-              <span className="nav-icon">⌂</span>Dashboard
-            </button>
-            <button
-              className={`nav-item ${view === 'tracks' && !selectedPlaylist ? 'active' : ''}`}
-              onClick={() => {
-                setView('tracks');
-                clearBrowsingFilters();
-              }}
-            >
-              <span className="nav-icon">♪</span>Tracks
-              <span className="nav-count">{lib.track_count}</span>
-            </button>
-            <button
-              className={`nav-item ${view === 'albums' ? 'active' : ''}`}
-              onClick={() => setView('albums')}
-            >
-              <span className="nav-icon">◉</span>Albums
-              <span className="nav-count">{lib.album_count}</span>
-            </button>
-            <button
-              className={`nav-item ${view === 'artists' ? 'active' : ''}`}
-              onClick={() => setView('artists')}
-            >
-              <span className="nav-icon">☻</span>Artists
-              <span className="nav-count">{lib.artist_count}</span>
-            </button>
-          </nav>
+        <nav className="nav-section">
+          <div className="nav-label">Browse</div>
+          <button
+            className={`nav-item ${view === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setView('dashboard')}
+          >
+            <span className="nav-icon">⌂</span>Dashboard
+          </button>
+          <button
+            className={`nav-item ${view === 'tracks' && !selectedPlaylist ? 'active' : ''}`}
+            onClick={() => {
+              setView('tracks');
+              clearBrowsingFilters();
+            }}
+          >
+            <span className="nav-icon">♪</span>Tracks
+            <span className="nav-count">{lib.track_count}</span>
+          </button>
+          <button
+            className={`nav-item ${view === 'albums' ? 'active' : ''}`}
+            onClick={() => setView('albums')}
+          >
+            <span className="nav-icon">◉</span>Albums
+            <span className="nav-count">{lib.album_count}</span>
+          </button>
+          <button
+            className={`nav-item ${view === 'artists' ? 'active' : ''}`}
+            onClick={() => setView('artists')}
+          >
+            <span className="nav-icon">☻</span>Artists
+            <span className="nav-count">{lib.artist_count}</span>
+          </button>
+        </nav>
 
+        <div className="sidebar-scroll">
           <nav className="nav-section">
             <div className="nav-label">Playlists</div>
             <button className="nav-button" onClick={() => openPlaylistTarget([])}>
@@ -3730,17 +3927,17 @@ function App() {
               </button>
             ))}
           </nav>
-
-          <nav className="nav-section">
-            <div className="nav-label">App</div>
-            <button
-              className={`nav-item ${view === 'settings' ? 'active' : ''}`}
-              onClick={() => setView('settings')}
-            >
-              <span className="nav-icon">⚙</span>Settings
-            </button>
-          </nav>
         </div>
+
+        <nav className="nav-section sidebar-app-nav">
+          <div className="nav-label">App</div>
+          <button
+            className={`nav-item ${view === 'settings' ? 'active' : ''}`}
+            onClick={() => setView('settings')}
+          >
+            <span className="nav-icon">⚙</span>Settings
+          </button>
+        </nav>
       </aside>
 
       <main className="content">
@@ -3750,7 +3947,7 @@ function App() {
             albums={albums}
             recentAlbums={recentAlbums}
             artists={allArtists}
-            playlists={smartPlaylists}
+            playlists={dashboardPlaylists}
             currentTrack={currentTrack}
             isPlaying={isPlaying}
             featuredSeed={featuredSeed}
@@ -3869,6 +4066,8 @@ function App() {
             onClearSmartPlaylistGenres={() => setSelectedSmartPlaylistGenres([])}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
+            onAdjustBpm={adjustTrackBpmValue}
+            pendingBpmPaths={pendingTrackBpms}
             playlistPrimaryActionLabel={selectedPlaylistData ? selectedPlaylistPrimaryActionLabel : undefined}
             onPlayPlaylistPrimaryAction={
               selectedPlaylistData
@@ -3983,6 +4182,8 @@ function App() {
             }
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
+            onAdjustBpm={adjustTrackBpmValue}
+            pendingBpmPaths={pendingTrackBpms}
             onEditPrimaryGenre={(currentPrimaryGenre, suggestedGenres) =>
               setAlbumGenreEditor({
                 album: selectedAlbumSummary.album,
@@ -4104,6 +4305,8 @@ function App() {
             }
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
+            onAdjustBpm={adjustTrackBpmValue}
+            pendingBpmPaths={pendingTrackBpms}
           />
         )}
 
@@ -5221,6 +5424,8 @@ interface TracksViewProps {
   onClearSmartPlaylistGenres?: () => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
+  onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  pendingBpmPaths: string[];
   playlistPrimaryActionLabel?: string;
   onPlayPlaylistPrimaryAction?: () => void;
   onShufflePlaylist?: () => void;
@@ -5285,6 +5490,8 @@ function TracksView({
   onClearSmartPlaylistGenres,
   onSetRating,
   pendingRatingPaths,
+  onAdjustBpm,
+  pendingBpmPaths,
   playlistPrimaryActionLabel,
   onPlayPlaylistPrimaryAction,
   onShufflePlaylist,
@@ -5566,6 +5773,7 @@ function TracksView({
                   ? playlistSourceTotalCount - 1
                   : Math.max(totalTracks - 1, 0);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
+              const bpmIsPending = pendingBpmPaths.includes(track.path);
               return (
                 <div key={track.id} className={`track-row ${isCurrent ? 'playing' : ''}`}>
                   <Cover
@@ -5615,6 +5823,11 @@ function TracksView({
                     </span>
                   </span>
                   <span className="album-track-actions">
+                    <TrackBpmControl
+                      track={track}
+                      disabled={bpmIsPending}
+                      onAdjust={onAdjustBpm}
+                    />
                     <TrackRatingControl
                       track={track}
                       disabled={ratingIsPending}
@@ -5731,6 +5944,8 @@ interface AlbumDetailViewProps {
   onAddTrackToPlaylist: (track: Track) => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
+  onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  pendingBpmPaths: string[];
   onEditPrimaryGenre: (currentPrimaryGenre: string | null, suggestedGenres: string[]) => void;
   onRefreshMetadata: () => void;
   onPlayAlbum: () => void;
@@ -5759,6 +5974,8 @@ function AlbumDetailView({
   onAddTrackToPlaylist,
   onSetRating,
   pendingRatingPaths,
+  onAdjustBpm,
+  pendingBpmPaths,
   onEditPrimaryGenre,
   onRefreshMetadata,
   onPlayAlbum,
@@ -6046,6 +6263,7 @@ function AlbumDetailView({
                   const isCurrent = currentPath === t.path;
                   const isQueued = queuePaths.includes(t.path);
                   const ratingIsPending = pendingRatingPaths.includes(t.path);
+                  const bpmIsPending = pendingBpmPaths.includes(t.path);
                   return (
                     <div
                       key={t.id}
@@ -6060,13 +6278,18 @@ function AlbumDetailView({
                         </span>
                         <span className="album-track-title">{t.title}</span>
                         <span className="album-track-meta muted">
-                          {formatQuality(t)}
+                          {formatTrackDetails(t)}
                         </span>
                       <span className="album-track-duration">
                           {formatDuration(t.duration_seconds)}
                         </span>
                       </button>
                       <span className="album-track-actions">
+                        <TrackBpmControl
+                          track={t}
+                          disabled={bpmIsPending}
+                          onAdjust={onAdjustBpm}
+                        />
                         <TrackRatingControl
                           track={t}
                           disabled={ratingIsPending}
@@ -6146,6 +6369,8 @@ interface ArtistDetailViewProps {
   onAddTrackToPlaylist: (track: Track) => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
+  onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
+  pendingBpmPaths: string[];
 }
 
 function ArtistDetailView({
@@ -6176,6 +6401,8 @@ function ArtistDetailView({
   onAddTrackToPlaylist,
   onSetRating,
   pendingRatingPaths,
+  onAdjustBpm,
+  pendingBpmPaths,
 }: ArtistDetailViewProps) {
   const [isBioExpanded, setIsBioExpanded] = useState(false);
   const [isImageMenuOpen, setIsImageMenuOpen] = useState(false);
@@ -6486,6 +6713,7 @@ function ArtistDetailView({
               const isQueued = queuePaths.includes(track.path);
               const albumKeyValue = trackAlbumKey(track);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
+              const bpmIsPending = pendingBpmPaths.includes(track.path);
               return (
                 <div key={track.id} className={`album-track-row artist-top-track-row ${isCurrent ? 'playing' : ''}`}>
                   <Cover
@@ -6521,8 +6749,13 @@ function ArtistDetailView({
                       <span className="artist-track-album-link is-static">Standalone track</span>
                     )}
                   </span>
-                  <span className="artist-track-format">{formatQuality(track)}</span>
+                  <span className="artist-track-format">{formatTrackDetails(track)}</span>
                   <span className="album-track-actions">
+                    <TrackBpmControl
+                      track={track}
+                      disabled={bpmIsPending}
+                      onAdjust={onAdjustBpm}
+                    />
                     <TrackRatingControl
                       track={track}
                       disabled={ratingIsPending}
