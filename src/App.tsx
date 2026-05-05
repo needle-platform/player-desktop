@@ -68,6 +68,7 @@ import { useCoverArt } from './lib/cover';
 import { useArtistImage } from './lib/artistImage';
 import { useArtistInfo } from './lib/artistInfo';
 import { useAlbumInfo } from './lib/albumInfo';
+import { findSuspiciousBpmTracks, type BpmAuditItem } from './lib/bpmAudit';
 import {
   genreLabelFromKey,
   normalizeGenreKey,
@@ -402,6 +403,7 @@ const allTrackFilterValue = 'all';
 const defaultVolumePercent = 80;
 const maxTrackRating = 5;
 const miniPlayerPinnedStorageKey = 'needle-mini-player-pinned';
+const bpmAuditDismissedStorageKey = 'needle-bpm-audit-dismissed';
 const miniPlayerBaseSize = { width: 380, height: 420 };
 const miniPlayerExpandedHeightDefault = 772;
 const miniPlayerExpandedHeightMin = 720;
@@ -415,6 +417,7 @@ const formatDuration = (seconds: number | null | undefined) => {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 const formatTrackRatingLabel = (rating: number) => `${rating} star${rating === 1 ? '' : 's'}`;
+const bpmAuditDismissalKey = (track: Pick<Track, 'path' | 'bpm'>) => `${track.path}\u0000${track.bpm ?? ''}`;
 const filteredPlaylistName = (artist: string, genre: string) => {
   const parts = [artist, genre].filter(Boolean);
   return parts.length > 0 ? `${parts.join(' · ')} mix` : 'Filtered mix';
@@ -1220,6 +1223,16 @@ function App() {
     if (typeof window === 'undefined') return false;
     return window.localStorage.getItem(miniPlayerPinnedStorageKey) === 'true';
   });
+  const [dismissedBpmAuditKeys, setDismissedBpmAuditKeys] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem(bpmAuditDismissedStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
   const [isMiniQueueExpanded, setIsMiniQueueExpanded] = useState(false);
   const [miniPlayerExpandedHeight, setMiniPlayerExpandedHeight] = useState(miniPlayerExpandedHeightDefault);
   const [isBackendPlaybackLoaded, setIsBackendPlaybackLoaded] = useState(false);
@@ -1263,6 +1276,7 @@ function App() {
   );
   const currentAccentColor = accentTheme?.accent ?? defaultAccentForTheme(effectiveTheme);
   const currentTracksPageSize = normalizeTracksPageSize(data?.settings.tracks_page_size);
+  const dismissedBpmAuditKeySet = useMemo(() => new Set(dismissedBpmAuditKeys), [dismissedBpmAuditKeys]);
   const lastRecordedPath = useRef<string | null>(null);
   const suppressRecordPathRef = useRef<string | null>(null);
   const sessionHydratedRef = useRef(false);
@@ -2036,7 +2050,24 @@ function App() {
     };
   }, [isQueueOpen]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(bpmAuditDismissedStorageKey, JSON.stringify(dismissedBpmAuditKeys));
+  }, [dismissedBpmAuditKeys]);
+
   const allTracks = data?.library.tracks ?? [];
+  const rawBpmAuditItems = useMemo(() => findSuspiciousBpmTracks(allTracks), [allTracks]);
+  const bpmAuditItems = useMemo(
+    () =>
+      rawBpmAuditItems.filter((item) => !dismissedBpmAuditKeySet.has(bpmAuditDismissalKey(item.track))),
+    [dismissedBpmAuditKeySet, rawBpmAuditItems],
+  );
+  const dismissedBpmAuditCount = rawBpmAuditItems.length - bpmAuditItems.length;
+  const bpmAuditTrackPaths = useMemo(
+    () => bpmAuditItems.map((item) => item.track.path),
+    [bpmAuditItems],
+  );
+  const bpmAuditTrackPathSet = useMemo(() => new Set(bpmAuditTrackPaths), [bpmAuditTrackPaths]);
   const trackByPath = useMemo(() => new Map(allTracks.map((track) => [track.path, track])), [allTracks]);
 
   const restoreSession = async (
@@ -2525,6 +2556,8 @@ function App() {
     () => (currentPath ? trackByPath.get(currentPath) ?? null : currentQueueTrack),
     [currentPath, currentQueueTrack, trackByPath],
   );
+  const currentBpmAuditReviewPath =
+    currentTrack && bpmAuditTrackPathSet.has(currentTrack.path) ? currentTrack.path : null;
   const currentTrackFavoritePending = currentTrack ? pendingTrackFavorites.includes(currentTrack.path) : false;
   const activeTrack = useMemo(
     () => (currentPath ? trackByPath.get(currentPath) ?? currentQueueTrack ?? null : null),
@@ -3368,6 +3401,38 @@ function App() {
 
   const play = async (track: Track) => {
     await startQueue([track], `Playing ${track.title}`);
+  };
+
+  const startBpmAuditReview = async (track: Track) => {
+    const reviewTracks = bpmAuditItems.map((item) => item.track);
+    if (reviewTracks.length === 0) return;
+    await playQueue(reviewTracks, `BPM review · ${track.title}`, {
+      baseTracks: reviewTracks,
+      currentPath: track.path,
+    });
+  };
+
+  const toggleBpmAuditReviewPlayback = async (fallbackTrack?: Track | null) => {
+    if (currentBpmAuditReviewPath) {
+      await togglePlayPause();
+      return;
+    }
+    const target = fallbackTrack ?? bpmAuditItems[0]?.track ?? null;
+    if (!target) return;
+    await startBpmAuditReview(target);
+  };
+
+  const stepBpmAuditReview = async (delta: number) => {
+    if (bpmAuditItems.length === 0 || delta === 0) return;
+    const activeIndex = currentBpmAuditReviewPath
+      ? bpmAuditItems.findIndex((item) => item.track.path === currentBpmAuditReviewPath)
+      : -1;
+    const fallbackIndex = delta > 0 ? 0 : bpmAuditItems.length - 1;
+    const targetIndex = activeIndex >= 0 ? activeIndex + delta : fallbackIndex;
+    if (targetIndex < 0 || targetIndex >= bpmAuditItems.length) return;
+    const target = bpmAuditItems[targetIndex]?.track;
+    if (!target) return;
+    await startBpmAuditReview(target);
   };
 
   const playQueue = async (
@@ -4544,6 +4609,25 @@ function App() {
             loudnessAnalysisFailures={loudnessAnalysisFailures}
             onCopyLoudnessFailures={copyLoudnessAnalysisFailures}
             missingLibraryRoots={missingLibraryRoots}
+            bpmAuditItems={bpmAuditItems}
+            onAdjustBpm={adjustTrackBpmValue}
+            onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
+            pendingBpmPaths={pendingTrackBpms}
+            currentBpmAuditReviewPath={currentBpmAuditReviewPath}
+            isBpmAuditReviewPlaying={Boolean(currentBpmAuditReviewPath && isPlaying)}
+            onStartBpmAuditReview={(track) => void startBpmAuditReview(track)}
+            onToggleBpmAuditReviewPlayback={(track) => void toggleBpmAuditReviewPlayback(track)}
+            onStepBpmAuditReview={(delta) => void stepBpmAuditReview(delta)}
+            dismissedBpmAuditCount={dismissedBpmAuditCount}
+            onDismissBpmAuditItem={(track) => {
+              const key = bpmAuditDismissalKey(track);
+              setDismissedBpmAuditKeys((current) => (current.includes(key) ? current : current.concat(key)));
+              setStatus(`Marked BPM as intentional · ${track.title}`);
+            }}
+            onClearDismissedBpmAuditItems={() => {
+              setDismissedBpmAuditKeys([]);
+              setStatus('Restored dismissed BPM audit candidates');
+            }}
           />
         )}
       </main>
@@ -7743,6 +7827,18 @@ interface SettingsViewProps {
   loudnessAnalysisFailures: LoudnessAnalysisFailure[];
   onCopyLoudnessFailures: () => void;
   missingLibraryRoots: string[];
+  bpmAuditItems: BpmAuditItem[];
+  onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => Promise<void>;
+  onOpenBpmEditor: (track: Track) => void;
+  pendingBpmPaths: string[];
+  currentBpmAuditReviewPath: string | null;
+  isBpmAuditReviewPlaying: boolean;
+  onStartBpmAuditReview: (track: Track) => void;
+  onToggleBpmAuditReviewPlayback: (track: Track | null) => void;
+  onStepBpmAuditReview: (delta: number) => void;
+  dismissedBpmAuditCount: number;
+  onDismissBpmAuditItem: (track: Track) => void;
+  onClearDismissedBpmAuditItems: () => void;
 }
 
 function SettingsView({
@@ -7763,6 +7859,18 @@ function SettingsView({
   loudnessAnalysisFailures,
   onCopyLoudnessFailures,
   missingLibraryRoots,
+  bpmAuditItems,
+  onAdjustBpm,
+  onOpenBpmEditor,
+  pendingBpmPaths,
+  currentBpmAuditReviewPath,
+  isBpmAuditReviewPlaying,
+  onStartBpmAuditReview,
+  onToggleBpmAuditReviewPlayback,
+  onStepBpmAuditReview,
+  dismissedBpmAuditCount,
+  onDismissBpmAuditItem,
+  onClearDismissedBpmAuditItems,
 }: SettingsViewProps) {
   const isManualEqualizer = settings.equalizer_preset === 'manual';
   const accentColorValue = normalizeAccentColor(settings.accent_color) ?? currentAccentColor;
@@ -7773,11 +7881,65 @@ function SettingsView({
   );
   const maintenanceLogRef = useRef<HTMLDivElement | null>(null);
   const loudnessAnalysisLogRef = useRef<HTMLDivElement | null>(null);
+  const bpmAuditBulkToggleRef = useRef<HTMLInputElement | null>(null);
   const missingRootsSet = useMemo(() => new Set(missingLibraryRoots), [missingLibraryRoots]);
+  const selectableBpmAuditPaths = useMemo(
+    () =>
+      bpmAuditItems
+        .filter((item) => item.suggestedAdjustment != null)
+        .map((item) => item.track.path),
+    [bpmAuditItems],
+  );
+  const selectableBpmAuditPathSet = useMemo(
+    () => new Set(selectableBpmAuditPaths),
+    [selectableBpmAuditPaths],
+  );
+  const [selectedBpmAuditPaths, setSelectedBpmAuditPaths] = useState<string[]>([]);
+  const [isApplyingBpmAuditSelection, setIsApplyingBpmAuditSelection] = useState(false);
+  const [isApplyingBpmAuditAutoFix, setIsApplyingBpmAuditAutoFix] = useState(false);
   const loudnessProgressRatio = loudnessAnalysisProgress?.total_tracks
     ? Math.min(1, loudnessAnalysisProgress.processed_tracks / loudnessAnalysisProgress.total_tracks)
     : 0;
   const loudnessProgressPercent = Math.round(loudnessProgressRatio * 100);
+  const selectedBpmAuditPathSet = useMemo(
+    () => new Set(selectedBpmAuditPaths),
+    [selectedBpmAuditPaths],
+  );
+  const selectedSuggestedBpmAuditCount = selectedBpmAuditPaths.length;
+  const hasSelectableBpmAuditItems = selectableBpmAuditPaths.length > 0;
+  const areAllSuggestedBpmAuditItemsSelected =
+    hasSelectableBpmAuditItems && selectedSuggestedBpmAuditCount === selectableBpmAuditPaths.length;
+  const hasSomeSuggestedBpmAuditItemsSelected =
+    selectedSuggestedBpmAuditCount > 0 && !areAllSuggestedBpmAuditItemsSelected;
+  const selectedSuggestedBpmAuditItems = useMemo(
+    () =>
+      bpmAuditItems.filter(
+        (item) =>
+          selectedBpmAuditPathSet.has(item.track.path) &&
+          item.suggestedAdjustment != null &&
+          !pendingBpmPaths.includes(item.track.path),
+      ),
+    [bpmAuditItems, pendingBpmPaths, selectedBpmAuditPathSet],
+  );
+  const highConfidenceBpmAuditItems = useMemo(
+    () =>
+      bpmAuditItems.filter(
+        (item) =>
+          item.autoFixEligible &&
+          item.suggestedAdjustment != null &&
+          !pendingBpmPaths.includes(item.track.path),
+      ),
+    [bpmAuditItems, pendingBpmPaths],
+  );
+  const isApplyingAnyBpmAuditChange = isApplyingBpmAuditSelection || isApplyingBpmAuditAutoFix;
+  const currentBpmAuditReviewIndex = currentBpmAuditReviewPath
+    ? bpmAuditItems.findIndex((item) => item.track.path === currentBpmAuditReviewPath)
+    : -1;
+  const currentBpmAuditReviewItem =
+    currentBpmAuditReviewIndex >= 0 ? bpmAuditItems[currentBpmAuditReviewIndex] ?? null : null;
+  const hasPreviousBpmAuditReviewItem = currentBpmAuditReviewIndex > 0;
+  const hasNextBpmAuditReviewItem =
+    currentBpmAuditReviewIndex >= 0 && currentBpmAuditReviewIndex < bpmAuditItems.length - 1;
 
   useEffect(() => {
     setManualBandsDraft(normalizeEqualizerBands(settings.equalizer_bands));
@@ -7800,6 +7962,20 @@ function SettingsView({
 
     node.scrollTop = node.scrollHeight;
   }, [loudnessAnalysisLog]);
+
+  useEffect(() => {
+    setSelectedBpmAuditPaths((current) => {
+      const next = current.filter((path) => selectableBpmAuditPathSet.has(path));
+      return next.length === current.length ? current : next;
+    });
+  }, [selectableBpmAuditPathSet]);
+
+  useEffect(() => {
+    if (!bpmAuditBulkToggleRef.current) {
+      return;
+    }
+    bpmAuditBulkToggleRef.current.indeterminate = hasSomeSuggestedBpmAuditItemsSelected;
+  }, [hasSomeSuggestedBpmAuditItemsSelected]);
 
   const equalizerBands = isManualEqualizer ? manualBandsDraft : displayedEqualizerBands(settings);
 
@@ -7836,6 +8012,90 @@ function SettingsView({
       equalizer_preset: 'manual',
       equalizer_bands: nextBands,
     });
+  };
+
+  const toggleBpmAuditSelection = (path: string, checked: boolean) => {
+    setSelectedBpmAuditPaths((current) => {
+      if (checked) {
+        return current.includes(path) ? current : current.concat(path);
+      }
+      return current.filter((entry) => entry !== path);
+    });
+  };
+
+  const setAllSuggestedBpmAuditSelections = (checked: boolean) => {
+    setSelectedBpmAuditPaths(checked ? selectableBpmAuditPaths : []);
+  };
+
+  const applySelectedBpmAuditSuggestions = async () => {
+    if (selectedSuggestedBpmAuditItems.length === 0 || isApplyingAnyBpmAuditChange) {
+      return;
+    }
+
+    setIsApplyingBpmAuditSelection(true);
+    try {
+      for (const item of selectedSuggestedBpmAuditItems) {
+        if (!item.suggestedAdjustment) {
+          continue;
+        }
+        await onAdjustBpm(item.track, item.suggestedAdjustment);
+      }
+      setSelectedBpmAuditPaths([]);
+    } finally {
+      setIsApplyingBpmAuditSelection(false);
+    }
+  };
+
+  const applyHighConfidenceBpmAuditSuggestions = async () => {
+    if (highConfidenceBpmAuditItems.length === 0 || isApplyingAnyBpmAuditChange) {
+      return;
+    }
+
+    setIsApplyingBpmAuditAutoFix(true);
+    try {
+      for (const item of highConfidenceBpmAuditItems) {
+        if (!item.suggestedAdjustment) {
+          continue;
+        }
+        await onAdjustBpm(item.track, item.suggestedAdjustment);
+      }
+      setSelectedBpmAuditPaths((current) =>
+        current.filter((path) => !highConfidenceBpmAuditItems.some((item) => item.track.path === path)),
+      );
+    } finally {
+      setIsApplyingBpmAuditAutoFix(false);
+    }
+  };
+
+  const applyBpmAuditAdjustment = async (
+    item: BpmAuditItem,
+    adjustment: Exclude<TrackBpmAdjustment, 'reset'>,
+  ) => {
+    const shouldAdvance = item.track.path === currentBpmAuditReviewPath;
+    const nextReviewTrack =
+      shouldAdvance
+        ? bpmAuditItems[
+            bpmAuditItems.findIndex((entry) => entry.track.path === item.track.path) + 1
+          ]?.track ?? null
+        : null;
+
+    await onAdjustBpm(item.track, adjustment);
+
+    if (shouldAdvance && nextReviewTrack) {
+      onStartBpmAuditReview(nextReviewTrack);
+    }
+  };
+
+  const dismissBpmAuditItem = (item: BpmAuditItem) => {
+    const currentIndex = bpmAuditItems.findIndex((entry) => entry.track.path === item.track.path);
+    const nextReviewTrack =
+      item.track.path === currentBpmAuditReviewPath
+        ? bpmAuditItems[currentIndex + 1]?.track ?? bpmAuditItems[currentIndex - 1]?.track ?? null
+        : null;
+    onDismissBpmAuditItem(item.track);
+    if (nextReviewTrack) {
+      onStartBpmAuditReview(nextReviewTrack);
+    }
   };
 
   return (
@@ -8023,6 +8283,330 @@ function SettingsView({
                 {metadataEditModeOptions.find((option) => option.value === settings.metadata_edit_mode)?.hint}
               </p>
             </div>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-section-head">
+            <h2>BPM sanity check</h2>
+            <p>
+              Review tracks whose BPM looks suspicious for their range, genre families, or album context, then fix them
+              with one click.
+            </p>
+          </div>
+          <div className="settings-row settings-row-block">
+            <div className="settings-row-copy">
+              <label className="settings-label">Flagged tracks</label>
+              <p className="settings-hint">
+                Needle highlights likely half-time and double-time mistakes such as `95` vs `190`, plus obvious album
+                outliers.
+              </p>
+            </div>
+            {bpmAuditItems.length === 0 ? (
+              <div className="settings-bpm-audit-empty">
+                <div className="settings-library-empty">
+                  {dismissedBpmAuditCount > 0
+                    ? 'All current BPM audit candidates are marked as intentional.'
+                    : 'No suspicious BPMs stood out in the current library snapshot.'}
+                </div>
+                {dismissedBpmAuditCount > 0 && (
+                  <button className="ghost-button" type="button" onClick={onClearDismissedBpmAuditItems}>
+                    Restore {dismissedBpmAuditCount} dismissed
+                  </button>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="settings-bpm-audit-toolbar">
+                  <div className="settings-bpm-audit-toolbar-copy">
+                    <div className="settings-maintenance-meta">
+                      Showing the {bpmAuditItems.length} strongest BPM candidates to review.
+                    </div>
+                    {hasSelectableBpmAuditItems && (
+                      <label className="settings-bpm-audit-toggle">
+                        <input
+                          ref={bpmAuditBulkToggleRef}
+                          type="checkbox"
+                          checked={areAllSuggestedBpmAuditItemsSelected}
+                          onChange={(event) => setAllSuggestedBpmAuditSelections(event.currentTarget.checked)}
+                          disabled={isApplyingAnyBpmAuditChange}
+                        />
+                        <span>
+                          Select all suggested fixes
+                          {selectedSuggestedBpmAuditCount > 0
+                            ? ` · ${selectedSuggestedBpmAuditCount} selected`
+                            : ''}
+                        </span>
+                      </label>
+                    )}
+                  </div>
+                  <div className="settings-bpm-audit-toolbar-actions">
+                    {dismissedBpmAuditCount > 0 && (
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={onClearDismissedBpmAuditItems}
+                        disabled={isApplyingAnyBpmAuditChange}
+                        title="Show BPMs you previously marked as intentional again"
+                      >
+                        Restore {dismissedBpmAuditCount} dismissed
+                      </button>
+                    )}
+                    {selectedSuggestedBpmAuditCount > 0 && (
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={() => setSelectedBpmAuditPaths([])}
+                        disabled={isApplyingAnyBpmAuditChange}
+                      >
+                        Clear
+                      </button>
+                    )}
+                    {highConfidenceBpmAuditItems.length > 0 && (
+                      <button
+                        className="row-action-button settings-bpm-audit-apply-button is-auto"
+                        type="button"
+                        onClick={() => void applyHighConfidenceBpmAuditSuggestions()}
+                        disabled={isApplyingAnyBpmAuditChange}
+                        title="Best-effort album-based auto-fixes for the strongest half/double-time BPM candidates"
+                      >
+                        {isApplyingBpmAuditAutoFix
+                          ? 'Auto-fixing…'
+                          : `Auto-fix ${highConfidenceBpmAuditItems.length} high-confidence candidate${
+                              highConfidenceBpmAuditItems.length === 1 ? '' : 's'
+                            }`}
+                      </button>
+                    )}
+                    <button
+                      className="row-action-button settings-bpm-audit-apply-button is-suggested"
+                      type="button"
+                      onClick={() => void applySelectedBpmAuditSuggestions()}
+                      disabled={selectedSuggestedBpmAuditItems.length === 0 || isApplyingAnyBpmAuditChange}
+                    >
+                      {isApplyingBpmAuditSelection
+                        ? 'Applying…'
+                        : `Apply ${selectedSuggestedBpmAuditItems.length} suggestion${
+                            selectedSuggestedBpmAuditItems.length === 1 ? '' : 's'
+                          }`}
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-bpm-review-bar">
+                  <div className="settings-bpm-review-copy">
+                    <div className="settings-bpm-review-title">Review mode</div>
+                    <div className="settings-bpm-review-sub">
+                      {currentBpmAuditReviewItem
+                        ? `${currentBpmAuditReviewItem.track.title} · ${
+                            currentBpmAuditReviewItem.track.artist ?? 'Unknown artist'
+                          }`
+                        : 'Preview flagged tracks before you accept a halve or double suggestion.'}
+                    </div>
+                    {highConfidenceBpmAuditItems.length > 0 && (
+                      <div className="settings-bpm-review-note">
+                        Needle can auto-fix the strongest album-based BPM spikes, but it is still a best-effort heuristic.
+                      </div>
+                    )}
+                    {dismissedBpmAuditCount > 0 && (
+                      <div className="settings-bpm-review-note">
+                        {dismissedBpmAuditCount} track{dismissedBpmAuditCount === 1 ? '' : 's'} marked as intentional
+                        BPM {dismissedBpmAuditCount === 1 ? 'is' : 'are'} hidden from this queue.
+                      </div>
+                    )}
+                  </div>
+                  <div className="settings-bpm-review-controls">
+                    <button
+                      className="row-icon-button"
+                      type="button"
+                      onClick={() => onStepBpmAuditReview(-1)}
+                      disabled={!hasPreviousBpmAuditReviewItem}
+                      title="Previous flagged track"
+                      aria-label="Previous flagged track"
+                    >
+                      <PreviousIcon />
+                    </button>
+                    <button
+                      className="row-icon-button settings-bpm-review-toggle"
+                      type="button"
+                      onClick={() =>
+                        onToggleBpmAuditReviewPlayback(currentBpmAuditReviewItem?.track ?? bpmAuditItems[0]?.track ?? null)
+                      }
+                      disabled={bpmAuditItems.length === 0}
+                      title={
+                        currentBpmAuditReviewItem
+                          ? isBpmAuditReviewPlaying
+                            ? 'Pause BPM review'
+                            : 'Resume BPM review'
+                          : 'Start BPM review'
+                      }
+                      aria-label={
+                        currentBpmAuditReviewItem
+                          ? isBpmAuditReviewPlaying
+                            ? 'Pause BPM review'
+                            : 'Resume BPM review'
+                          : 'Start BPM review'
+                      }
+                    >
+                      {currentBpmAuditReviewItem && isBpmAuditReviewPlaying ? <PauseIcon /> : <PlayIcon />}
+                    </button>
+                    <button
+                      className="row-icon-button"
+                      type="button"
+                      onClick={() => onStepBpmAuditReview(1)}
+                      disabled={!hasNextBpmAuditReviewItem}
+                      title="Next flagged track"
+                      aria-label="Next flagged track"
+                    >
+                      <NextIcon />
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-bpm-audit-list">
+                  {bpmAuditItems.map((item) => {
+                    const bpmPending = pendingBpmPaths.includes(item.track.path);
+                    const isSelectable = item.suggestedAdjustment != null;
+                    const isSelected = selectedBpmAuditPathSet.has(item.track.path);
+                    const isReviewing = item.track.path === currentBpmAuditReviewPath;
+                    const suggestedActionLabel =
+                      item.suggestedAdjustment === 'half'
+                        ? `Apply halve${item.track.bpm ? ` to ${Math.max(1, Math.round(item.track.bpm / 2))} BPM` : ''}`
+                        : item.suggestedAdjustment === 'double'
+                          ? `Apply double${item.track.bpm ? ` to ${Math.max(1, item.track.bpm * 2)} BPM` : ''}`
+                          : null;
+                    return (
+                      <div
+                        key={item.track.path}
+                        className={`settings-bpm-audit-item ${isReviewing ? 'is-reviewing' : ''}`}
+                      >
+                        <label
+                          className={`settings-bpm-audit-select ${isSelectable ? '' : 'is-disabled'}`}
+                          title={isSelectable ? 'Select this suggested fix' : 'No automatic suggestion yet'}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(event) => toggleBpmAuditSelection(item.track.path, event.currentTarget.checked)}
+                            disabled={!isSelectable || isApplyingAnyBpmAuditChange}
+                          />
+                        </label>
+                        <div className="settings-bpm-audit-copy">
+                          <div className="settings-bpm-audit-head">
+                            <div className="settings-bpm-audit-title">{item.track.title}</div>
+                          </div>
+                          <div className="settings-bpm-audit-sub">
+                            {(item.track.artist ?? 'Unknown artist') + ' — ' + (item.track.album ?? 'Unknown album')}
+                          </div>
+                          <div className="settings-bpm-audit-meta">
+                            {formatTrackDetails(item.track)}
+                            {item.suggestedAdjustment && (
+                              <span className="settings-bpm-audit-suggestion">
+                                {item.suggestedAdjustment === 'half' ? 'Suggested: halve' : 'Suggested: double'}
+                              </span>
+                            )}
+                            {item.confidence !== 'low' && (
+                              <span
+                                className={`settings-bpm-audit-confidence is-${item.confidence}`}
+                                title={
+                                  item.confidence === 'high'
+                                    ? 'Strong album-based half/double-time candidate'
+                                    : 'Multiple audit signals point in the same direction'
+                                }
+                              >
+                                {item.confidence === 'high' ? 'High confidence' : 'Medium confidence'}
+                              </span>
+                            )}
+                          </div>
+                          <div className="settings-bpm-audit-reasons">
+                            {item.reasons.map((reason) => (
+                              <span key={`${item.track.path}-${reason.id}`} className="settings-bpm-audit-reason">
+                                {reason.label}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="settings-bpm-audit-actions">
+                          <button
+                            className={`row-icon-button ${isReviewing ? 'is-queued' : ''}`}
+                            type="button"
+                            onClick={() =>
+                              isReviewing
+                                ? onToggleBpmAuditReviewPlayback(item.track)
+                                : onStartBpmAuditReview(item.track)
+                            }
+                            disabled={isApplyingAnyBpmAuditChange}
+                            title={
+                              isReviewing
+                                ? isBpmAuditReviewPlaying
+                                  ? `Pause ${item.track.title}`
+                                  : `Resume ${item.track.title}`
+                                : `Preview ${item.track.title}`
+                            }
+                            aria-label={
+                              isReviewing
+                                ? isBpmAuditReviewPlaying
+                                  ? `Pause ${item.track.title}`
+                                  : `Resume ${item.track.title}`
+                                : `Preview ${item.track.title}`
+                            }
+                          >
+                            {isReviewing && isBpmAuditReviewPlaying ? <PauseIcon /> : <PlayIcon />}
+                          </button>
+                          {item.suggestedAdjustment ? (
+                            <button
+                              className="row-action-button settings-bpm-audit-apply-button is-suggested"
+                              type="button"
+                              onClick={() => {
+                                if (item.suggestedAdjustment === 'half' || item.suggestedAdjustment === 'double') {
+                                  void applyBpmAuditAdjustment(item, item.suggestedAdjustment);
+                                }
+                              }}
+                              disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                            >
+                              {suggestedActionLabel}
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                className="row-action-button"
+                                type="button"
+                                onClick={() => void applyBpmAuditAdjustment(item, 'half')}
+                                disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                              >
+                                Halve
+                              </button>
+                              <button
+                                className="row-action-button"
+                                type="button"
+                                onClick={() => void applyBpmAuditAdjustment(item, 'double')}
+                                disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                              >
+                                Double
+                              </button>
+                            </>
+                          )}
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            onClick={() => onOpenBpmEditor(item.track)}
+                            disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                          >
+                            Edit BPM…
+                          </button>
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            onClick={() => dismissBpmAuditItem(item)}
+                            disabled={isApplyingAnyBpmAuditChange}
+                            title="Mark this BPM as intentional so it stops appearing in the audit queue"
+                          >
+                            Mark intentional
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </div>
         </section>
 

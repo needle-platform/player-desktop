@@ -1,6 +1,6 @@
 import type { Track } from '../types';
-import { genreLabelFromKey, normalizeGenreKey, splitTrackGenreKeys } from './genres';
-import { vibeKeyForTrack, type VibeKey } from './vibes';
+import { genreLabelFromKey, splitTrackGenreKeys } from './genres';
+import { scoreTrackForVibePlaylist } from './vibes';
 
 export interface AutoPlaylist {
   id: string;
@@ -26,8 +26,13 @@ const accent = (n: number) => ACCENTS[n % ACCENTS.length];
 const effectiveGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
 const normalizedGenres = (track: Pick<Track, 'primary_genre' | 'genre'>) =>
   splitTrackGenreKeys(effectiveGenre(track));
-const normalizeHint = (value: string) => normalizeGenreKey(value) ?? value.toLocaleLowerCase();
 const hasGenreKey = (track: Pick<Track, 'primary_genre' | 'genre'>, key: string) => normalizedGenres(track).includes(key);
+const HOLIDAY_HINTS = ['christmas', 'xmas', 'holiday', 'noel', 'yuletide', 'mistletoe', 'santa'];
+const isHolidayTrack = (track: Pick<Track, 'title' | 'album' | 'primary_genre' | 'genre'>) => {
+  if (hasGenreKey(track, 'christmas') || hasGenreKey(track, 'holiday')) return true;
+  const searchable = `${track.title ?? ''} ${track.album ?? ''} ${effectiveGenre(track) ?? ''}`.toLocaleLowerCase();
+  return HOLIDAY_HINTS.some((hint) => searchable.includes(hint));
+};
 const uniqueBy = <T,>(items: readonly T[], keyOf: (item: T) => string) => {
   const seen = new Set<string>();
   return items.filter((item) => {
@@ -40,71 +45,6 @@ const uniqueBy = <T,>(items: readonly T[], keyOf: (item: T) => string) => {
 
 const REDISCOVER_AFTER_DAYS = 30;
 const dayMs = 24 * 60 * 60 * 1000;
-const CHILL_HINTS = [
-  'ambient',
-  'downtempo',
-  'chill',
-  'chillout',
-  'lounge',
-  'jazz',
-  'soul',
-  'neo soul',
-  'r&b',
-  'blues',
-  'acoustic',
-  'folk',
-  'trip-hop',
-  'trip hop',
-  'bossa',
-  'singer-songwriter',
-  'singer songwriter',
-] as const;
-const DANCE_HINTS = [
-  'dance',
-  'disco',
-  'house',
-  'techno',
-  'electronic',
-  'electro',
-  'synthpop',
-  'synth-pop',
-  'funk',
-  'pop',
-  'hip hop',
-  'hip-hop',
-  'rap',
-  'latin',
-  'reggaeton',
-  'club',
-] as const;
-const GROOVE_HINTS = [
-  'soul',
-  'neo soul',
-  'r&b',
-  'funk',
-  'jazz',
-  'lounge',
-  'pop',
-  'electronic',
-  'house',
-  'downtempo',
-] as const;
-const UPLIFT_HINTS = [
-  'pop',
-  'dance',
-  'disco',
-  'funk',
-  'house',
-  'electronic',
-  'electro',
-  'synthpop',
-  'indie pop',
-  'rock',
-] as const;
-const NORMALIZED_CHILL_HINTS = CHILL_HINTS.map(normalizeHint);
-const NORMALIZED_DANCE_HINTS = DANCE_HINTS.map(normalizeHint);
-const NORMALIZED_GROOVE_HINTS = GROOVE_HINTS.map(normalizeHint);
-const NORMALIZED_UPLIFT_HINTS = UPLIFT_HINTS.map(normalizeHint);
 
 const timestampOf = (value: string | null | undefined): number => {
   if (!value) return Number.NaN;
@@ -137,36 +77,6 @@ const sample = <T,>(arr: T[], n: number): T[] => {
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy.slice(0, n);
-};
-
-const countGenreHints = (genres: string[], hints: readonly string[]) =>
-  genres.reduce(
-    (count, genre) =>
-      count +
-      (hints.some((hint) => genre === hint || genre.includes(hint) || hint.includes(genre)) ? 1 : 0),
-    0,
-  );
-
-const scoreTrackForVibeMix = (
-  track: Track,
-  preferredVibes: readonly VibeKey[],
-  supportingVibes: readonly VibeKey[],
-  hints: readonly string[],
-) => {
-  const vibe = vibeKeyForTrack(track);
-  const genres = normalizedGenres(track);
-  const hintMatches = countGenreHints(genres, hints);
-
-  let score = 0;
-  if (vibe && preferredVibes.includes(vibe)) score += 4;
-  else if (vibe && supportingVibes.includes(vibe)) score += 2;
-
-  score += hintMatches * 2;
-
-  if ((track.rating ?? 0) >= 4) score += 1;
-  if ((track.play_count ?? 0) >= 5) score += 1;
-
-  return { score, vibe, hintMatches };
 };
 
 const decadeOf = (year: number | null | undefined): number | null => {
@@ -353,7 +263,7 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
   const playlists: AutoPlaylist[] = [];
   let accentIndex = 0;
   const now = Date.now();
-  const vibeEligibleTracks = tracks.filter((track) => !hasGenreKey(track, 'christmas'));
+  const vibeEligibleTracks = tracks.filter((track) => !isHolidayTrack(track));
 
   const ratedTracks = tracks
     .filter((track) => (track.rating ?? 0) > 0)
@@ -448,9 +358,9 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
   const windDown = vibeEligibleTracks
     .map((track) => ({
       track,
-      ...scoreTrackForVibeMix(track, ['slowdown'], [], NORMALIZED_CHILL_HINTS),
+      ...scoreTrackForVibePlaylist(track, 'wind_down'),
     }))
-    .filter(({ vibe }) => vibe === 'slowdown')
+    .filter(({ eligible }) => eligible)
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -472,9 +382,9 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
   const cruiseAndGroove = vibeEligibleTracks
     .map((track) => ({
       track,
-      ...scoreTrackForVibeMix(track, ['cruise', 'groove'], ['slowdown'], NORMALIZED_GROOVE_HINTS),
+      ...scoreTrackForVibePlaylist(track, 'cruise_and_groove'),
     }))
-    .filter(({ vibe }) => vibe === 'cruise' || vibe === 'groove')
+    .filter(({ eligible }) => eligible)
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -496,9 +406,9 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
   const liftAndEnergy = vibeEligibleTracks
     .map((track) => ({
       track,
-      ...scoreTrackForVibeMix(track, ['lift', 'energy'], ['groove'], NORMALIZED_UPLIFT_HINTS),
+      ...scoreTrackForVibePlaylist(track, 'lift_and_energy'),
     }))
-    .filter(({ vibe }) => vibe === 'lift' || vibe === 'energy')
+    .filter(({ eligible }) => eligible)
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -520,9 +430,9 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
   const getOnYourFeet = vibeEligibleTracks
     .map((track) => ({
       track,
-      ...scoreTrackForVibeMix(track, ['energy', 'chaos'], ['lift'], NORMALIZED_DANCE_HINTS),
+      ...scoreTrackForVibePlaylist(track, 'get_on_your_feet'),
     }))
-    .filter(({ vibe }) => vibe === 'energy' || vibe === 'chaos')
+    .filter(({ eligible }) => eligible)
     .sort(
       (a, b) =>
         b.score - a.score ||
