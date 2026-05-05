@@ -133,6 +133,7 @@ type AlbumGenreEditorState = {
 };
 type TrackBpmEditorState = {
   track: Track;
+  dismissFromAudit?: boolean;
 };
 type ResolvedPlaylist = {
   id: string;
@@ -404,6 +405,8 @@ const defaultVolumePercent = 80;
 const maxTrackRating = 5;
 const miniPlayerPinnedStorageKey = 'needle-mini-player-pinned';
 const bpmAuditDismissedStorageKey = 'needle-bpm-audit-dismissed';
+const bpmAuditDismissedPathStorageKey = 'needle-bpm-audit-dismissed-paths';
+const bpmAuditReviewedStorageKey = 'needle-bpm-audit-reviewed';
 const miniPlayerBaseSize = { width: 380, height: 420 };
 const miniPlayerExpandedHeightDefault = 772;
 const miniPlayerExpandedHeightMin = 720;
@@ -1233,6 +1236,26 @@ function App() {
       return [];
     }
   });
+  const [dismissedBpmAuditPaths, setDismissedBpmAuditPaths] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem(bpmAuditDismissedPathStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+  const [reviewedBpmAuditKeys, setReviewedBpmAuditKeys] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem(bpmAuditReviewedStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
   const [isMiniQueueExpanded, setIsMiniQueueExpanded] = useState(false);
   const [miniPlayerExpandedHeight, setMiniPlayerExpandedHeight] = useState(miniPlayerExpandedHeightDefault);
   const [isBackendPlaybackLoaded, setIsBackendPlaybackLoaded] = useState(false);
@@ -1277,6 +1300,8 @@ function App() {
   const currentAccentColor = accentTheme?.accent ?? defaultAccentForTheme(effectiveTheme);
   const currentTracksPageSize = normalizeTracksPageSize(data?.settings.tracks_page_size);
   const dismissedBpmAuditKeySet = useMemo(() => new Set(dismissedBpmAuditKeys), [dismissedBpmAuditKeys]);
+  const dismissedBpmAuditPathSet = useMemo(() => new Set(dismissedBpmAuditPaths), [dismissedBpmAuditPaths]);
+  const reviewedBpmAuditKeySet = useMemo(() => new Set(reviewedBpmAuditKeys), [reviewedBpmAuditKeys]);
   const lastRecordedPath = useRef<string | null>(null);
   const suppressRecordPathRef = useRef<string | null>(null);
   const sessionHydratedRef = useRef(false);
@@ -1491,7 +1516,8 @@ function App() {
       setPendingTrackBpms((current) => current.filter((path) => path !== track.path));
     }
   };
-  const saveExactTrackBpmValue = async (track: Track, bpm: number) => {
+  const saveExactTrackBpmValue = async (editorState: TrackBpmEditorState, bpm: number) => {
+    const { track, dismissFromAudit } = editorState;
     setPendingTrackBpms((current) =>
       current.includes(track.path) ? current : current.concat(track.path),
     );
@@ -1499,11 +1525,24 @@ function App() {
     try {
       setBusy('Saving BPM…');
       const next = await persistTrackBpmValue(track.path, bpm, metadataEditMode);
+      const shouldAdvance = dismissFromAudit && track.path === currentBpmAuditReviewPath;
+      const updatedTrack = next.library.tracks.find((entry) => entry.path === track.path) ?? { ...track, bpm };
+      const nextReviewTrack =
+        shouldAdvance
+          ? bpmAuditItems[bpmAuditItems.findIndex((entry) => entry.track.path === track.path) + 1]?.track ?? null
+          : null;
       setData(next);
+      if (dismissFromAudit) {
+        const reviewedKey = bpmAuditDismissalKey(updatedTrack);
+        setReviewedBpmAuditKeys((current) => (current.includes(reviewedKey) ? current : current.concat(reviewedKey)));
+      }
       setTrackBpmEditor(null);
       setStatus(
         `${metadataEditMode === 'write_to_files' ? 'Updated file BPM' : 'Saved BPM correction'} · ${track.title}`,
       );
+      if (shouldAdvance && nextReviewTrack) {
+        void startBpmAuditReview(nextReviewTrack);
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2055,12 +2094,27 @@ function App() {
     window.localStorage.setItem(bpmAuditDismissedStorageKey, JSON.stringify(dismissedBpmAuditKeys));
   }, [dismissedBpmAuditKeys]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(bpmAuditDismissedPathStorageKey, JSON.stringify(dismissedBpmAuditPaths));
+  }, [dismissedBpmAuditPaths]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(bpmAuditReviewedStorageKey, JSON.stringify(reviewedBpmAuditKeys));
+  }, [reviewedBpmAuditKeys]);
+
   const allTracks = data?.library.tracks ?? [];
   const rawBpmAuditItems = useMemo(() => findSuspiciousBpmTracks(allTracks), [allTracks]);
   const bpmAuditItems = useMemo(
     () =>
-      rawBpmAuditItems.filter((item) => !dismissedBpmAuditKeySet.has(bpmAuditDismissalKey(item.track))),
-    [dismissedBpmAuditKeySet, rawBpmAuditItems],
+      rawBpmAuditItems.filter(
+        (item) =>
+          !dismissedBpmAuditKeySet.has(bpmAuditDismissalKey(item.track)) &&
+          !dismissedBpmAuditPathSet.has(item.track.path) &&
+          !reviewedBpmAuditKeySet.has(bpmAuditDismissalKey(item.track)),
+      ),
+    [dismissedBpmAuditKeySet, dismissedBpmAuditPathSet, rawBpmAuditItems, reviewedBpmAuditKeySet],
   );
   const dismissedBpmAuditCount = rawBpmAuditItems.length - bpmAuditItems.length;
   const bpmAuditTrackPaths = useMemo(
@@ -3403,6 +3457,12 @@ function App() {
     await startQueue([track], `Playing ${track.title}`);
   };
 
+  const dismissBpmAuditTrack = (track: Pick<Track, 'path' | 'bpm' | 'title'>) => {
+    const key = bpmAuditDismissalKey(track);
+    setDismissedBpmAuditKeys((current) => (current.includes(key) ? current : current.concat(key)));
+    setDismissedBpmAuditPaths((current) => (current.includes(track.path) ? current : current.concat(track.path)));
+  };
+
   const startBpmAuditReview = async (track: Track) => {
     const reviewTracks = bpmAuditItems.map((item) => item.track);
     if (reviewTracks.length === 0) return;
@@ -4611,7 +4671,7 @@ function App() {
             missingLibraryRoots={missingLibraryRoots}
             bpmAuditItems={bpmAuditItems}
             onAdjustBpm={adjustTrackBpmValue}
-            onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
+            onOpenBpmEditor={(track) => setTrackBpmEditor({ track, dismissFromAudit: true })}
             pendingBpmPaths={pendingTrackBpms}
             currentBpmAuditReviewPath={currentBpmAuditReviewPath}
             isBpmAuditReviewPlaying={Boolean(currentBpmAuditReviewPath && isPlaying)}
@@ -4620,12 +4680,12 @@ function App() {
             onStepBpmAuditReview={(delta) => void stepBpmAuditReview(delta)}
             dismissedBpmAuditCount={dismissedBpmAuditCount}
             onDismissBpmAuditItem={(track) => {
-              const key = bpmAuditDismissalKey(track);
-              setDismissedBpmAuditKeys((current) => (current.includes(key) ? current : current.concat(key)));
+              dismissBpmAuditTrack(track);
               setStatus(`Marked BPM as intentional · ${track.title}`);
             }}
             onClearDismissedBpmAuditItems={() => {
               setDismissedBpmAuditKeys([]);
+              setDismissedBpmAuditPaths([]);
               setStatus('Restored dismissed BPM audit candidates');
             }}
           />
@@ -4675,8 +4735,9 @@ function App() {
           state={trackBpmEditor}
           metadataEditMode={metadataEditMode}
           busy={busy === 'Saving BPM…'}
+          isTrackPlaying={trackBpmEditor.track.path === currentPath && isPlaying}
           onClose={() => setTrackBpmEditor(null)}
-          onSubmit={(bpm) => void saveExactTrackBpmValue(trackBpmEditor.track, bpm)}
+          onSubmit={(bpm) => void saveExactTrackBpmValue(trackBpmEditor, bpm)}
         />
       )}
 
@@ -5508,6 +5569,7 @@ interface TrackBpmEditorModalProps {
   state: TrackBpmEditorState;
   metadataEditMode: MetadataEditMode;
   busy: boolean;
+  isTrackPlaying: boolean;
   onClose: () => void;
   onSubmit: (bpm: number) => void;
 }
@@ -5516,19 +5578,37 @@ function TrackBpmEditorModal({
   state,
   metadataEditMode,
   busy,
+  isTrackPlaying,
   onClose,
   onSubmit,
 }: TrackBpmEditorModalProps) {
   const [value, setValue] = useState(formatBpm(state.track.bpm) ?? '');
+  const [tapTimes, setTapTimes] = useState<number[]>([]);
 
   useEffect(() => {
     setValue(formatBpm(state.track.bpm) ?? '');
+    setTapTimes([]);
   }, [state]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !busy) {
         onClose();
+        return;
+      }
+
+      if (
+        event.code === 'Space' &&
+        !event.repeat &&
+        !busy &&
+        !['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes((event.target as HTMLElement | null)?.tagName ?? '')
+      ) {
+        event.preventDefault();
+        setTapTimes((current) => {
+          const now = Date.now();
+          const recent = current.length > 0 && now - current[current.length - 1]! <= 2600 ? current : [];
+          return recent.concat(now).slice(-8);
+        });
       }
     };
 
@@ -5538,6 +5618,46 @@ function TrackBpmEditorModal({
 
   const parsed = Number.parseInt(value.trim(), 10);
   const canSubmit = Number.isFinite(parsed) && parsed > 0;
+  const tappedBpm = useMemo(() => {
+    if (tapTimes.length < 2) {
+      return null;
+    }
+
+    const intervals: number[] = [];
+    for (let index = 1; index < tapTimes.length; index += 1) {
+      intervals.push(tapTimes[index]! - tapTimes[index - 1]!);
+    }
+    if (intervals.length === 0) {
+      return null;
+    }
+
+    const sorted = intervals.slice().sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    const medianInterval =
+      sorted.length % 2 === 1
+        ? sorted[middle]!
+        : ((sorted[middle - 1] ?? sorted[middle]!) + (sorted[middle] ?? sorted[middle - 1]!)) / 2;
+    if (!Number.isFinite(medianInterval) || medianInterval <= 0) {
+      return null;
+    }
+    return Math.max(1, Math.round(60000 / medianInterval));
+  }, [tapTimes]);
+  const tapCountLabel =
+    tapTimes.length === 0
+      ? 'No taps captured yet'
+      : tapTimes.length === 1
+        ? '1 tap captured'
+        : `${tapTimes.length} taps captured`;
+  const registerTap = () => {
+    if (busy) {
+      return;
+    }
+    setTapTimes((current) => {
+      const now = Date.now();
+      const recent = current.length > 0 && now - current[current.length - 1]! <= 2600 ? current : [];
+      return recent.concat(now).slice(-8);
+    });
+  };
 
   return (
     <div className="modal-scrim" onClick={() => !busy && onClose()}>
@@ -5576,6 +5696,45 @@ function TrackBpmEditorModal({
             autoFocus
           />
         </label>
+
+        <div className="bpm-tap-panel">
+          <div className="bpm-tap-panel-head">
+            <div>
+              <div className="field-label">Tap tempo</div>
+              <div className="field-help">
+                {isTrackPlaying
+                  ? 'Tap Space or the button in time with the music. Needle estimates BPM from your most recent taps.'
+                  : 'Tap Space or the button in time with the music. This works best while the track is currently playing.'}
+              </div>
+            </div>
+            <div className="bpm-tap-readout" aria-live="polite">
+              <div className="bpm-tap-readout-value">{tappedBpm != null ? `${tappedBpm} BPM` : '—'}</div>
+              <div className="bpm-tap-readout-meta">{tapCountLabel}</div>
+            </div>
+          </div>
+
+          <div className="bpm-tap-actions">
+            <button className="primary-button bpm-tap-button" type="button" onClick={registerTap} disabled={busy}>
+              Tap now
+            </button>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => tappedBpm != null && setValue(String(tappedBpm))}
+              disabled={tappedBpm == null || busy}
+            >
+              Use tapped BPM
+            </button>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => setTapTimes([])}
+              disabled={tapTimes.length === 0 || busy}
+            >
+              Reset taps
+            </button>
+          </div>
+        </div>
 
         <div className="modal-actions">
           <button className="ghost-button" onClick={onClose} disabled={busy}>

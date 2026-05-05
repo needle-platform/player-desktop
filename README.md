@@ -101,6 +101,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Tracks** with live search, sorting, and filters for artist / genre / year range, plus album / artist / playlist context
 - **Normalized genre filters** collapse casing and common formatting variants into one clean vocabulary, so `Pop`, `pop`, and similar duplicates do not fragment browsing
 - **Compact BPM details** on track rows, album pages, and artist pages, with a click-to-open editor for set / edit plus quick halve / double actions
+- **Tap-tempo BPM helper** inside the BPM editor lets you tap `Space` or click along with the current song to estimate a BPM before saving it
 - **BPM sanity check** in Settings with a review queue for suspicious tempo tags, inline halve / double fixes, playback-assisted review mode, bulk suggestion apply, and “mark intentional” dismissals for false positives
 - **Album-aware BPM confidence scoring** can identify strong half/double-time spikes against an album's median tempo and offer best-effort high-confidence auto-fixes
 - **Albums** with cover art, sorting, direct playlist actions, and album-wide genre editing
