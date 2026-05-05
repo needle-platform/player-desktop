@@ -70,6 +70,13 @@ enum CandidateAnalysisResult {
     },
 }
 
+#[derive(Debug, Default)]
+struct LoudnessCacheState {
+    cached_tracks: usize,
+    missing_cache_tracks: usize,
+    stale_version_tracks: usize,
+}
+
 pub fn analyze_library<F, G>(
     db_path: &Path,
     mut emit_log: F,
@@ -83,6 +90,7 @@ where
         .context("FFmpeg was not found. Install it with `brew install ffmpeg` and try again.")?;
     let candidates = db::list_tracks_for_loudness_analysis(db_path)?;
     let total_tracks = candidates.len();
+    let cache_state = summarize_cache_state(&candidates);
     let mut summary = LoudnessAnalysisSummary::default();
 
     emit_log(format!(
@@ -97,6 +105,41 @@ where
             "s"
         }
     ));
+    if cache_state.stale_version_tracks > 0 {
+        let cached_tracks = cache_state.cached_tracks;
+        let refreshed_tracks = cache_state.stale_version_tracks;
+        if refreshed_tracks == cached_tracks {
+            emit_log(format!(
+                "Refreshing all {} cached loudness result{} because this build uses analysis v{} and the saved results came from an older loudness-analysis pass.",
+                cached_tracks,
+                if cached_tracks == 1 { "" } else { "s" },
+                LOUDNESS_ANALYSIS_VERSION
+            ));
+        } else {
+            emit_log(format!(
+                "Refreshing {} cached loudness result{} because this build uses analysis v{} and those saved results came from an older loudness-analysis pass.",
+                refreshed_tracks,
+                if refreshed_tracks == 1 { "" } else { "s" },
+                LOUDNESS_ANALYSIS_VERSION
+            ));
+        }
+    }
+    if cache_state.missing_cache_tracks > 0 {
+        emit_log(format!(
+            "{} track{} {} no cached loudness data yet and will be analyzed for the first time.",
+            cache_state.missing_cache_tracks,
+            if cache_state.missing_cache_tracks == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if cache_state.missing_cache_tracks == 1 {
+                "has"
+            } else {
+                "have"
+            }
+        ));
+    }
     emit_progress(build_progress_event(total_tracks, 0, &summary, None, None));
 
     if total_tracks == 0 {
@@ -229,6 +272,28 @@ where
     ));
 
     Ok(summary)
+}
+
+pub fn analysis_version() -> i64 {
+    LOUDNESS_ANALYSIS_VERSION
+}
+
+fn summarize_cache_state(candidates: &[TrackLoudnessAnalysisCandidate]) -> LoudnessCacheState {
+    let mut state = LoudnessCacheState::default();
+
+    for candidate in candidates {
+        match candidate.cached_analysis_version {
+            Some(version) => {
+                state.cached_tracks += 1;
+                if version != LOUDNESS_ANALYSIS_VERSION {
+                    state.stale_version_tracks += 1;
+                }
+            }
+            None => state.missing_cache_tracks += 1,
+        }
+    }
+
+    state
 }
 
 fn analyze_track(

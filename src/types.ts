@@ -64,6 +64,11 @@ export interface BootstrapPayload {
   playback_session: PlaybackSession;
 }
 
+export interface RuntimeInfo {
+  app_version: string;
+  loudness_analysis_version: number;
+}
+
 export interface LoudnessAnalysisProgress {
   total_tracks: number;
   processed_tracks: number;

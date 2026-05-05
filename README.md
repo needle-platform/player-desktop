@@ -103,7 +103,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
 - **Vinyl-rip badge support** detects `vinyl-rip` tags from your files and marks matching albums with a small record badge on album artwork
 - **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
-- **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, loudness analysis with live progress output, structured progress counts, failed-file review/copy tools, live equalizer presets, manual 10-band EQ, and a metadata save-mode switch for `Needle only` vs `Write to files`
+- **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, loudness analysis with live progress output, structured progress counts, failed-file review/copy tools, live equalizer presets, manual 10-band EQ, an in-app backend version readout, and a metadata save-mode switch for `Needle only` vs `Write to files`
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
@@ -212,6 +212,7 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 - **BPM editing** can stay local to Needle or write back to the embedded file tags, depending on the metadata save mode you choose in Settings
 - **Optional loudness analysis** stores LUFS / peak-derived gain data locally so Needle can level mixed queues when you enable volume leveling
 - **Two-worker loudness scans** make the first analysis pass much more practical on modern Macs without overcommitting the whole machine
+- **Version-aware loudness refresh messaging** calls out when a full-library rerun is expected because Needle upgraded its loudness-analysis method
 - **Playlist-local genre focus** lets smart playlists keep their generated order while narrowing the current mix to one or more genres already represented in that playlist
 - **Library state** (`play_count = 0`) drives Needs a first spin
 - **Genre tags** and Needle-local genre edits drive one top-genre mix when your collection has a clear favorite

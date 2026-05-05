@@ -6,11 +6,14 @@ import type {
   PlaybackSession,
   PlaybackState,
   RepeatMode,
+  RuntimeInfo,
   SavedPlaylistRule,
   TrackBpmAdjustment,
 } from '../types';
 
 export const bootstrapApp = () => invoke<BootstrapPayload>('bootstrap_app');
+
+export const getRuntimeInfo = () => invoke<RuntimeInfo>('get_runtime_info');
 
 export const openExternalUrl = (url: string) => invoke<void>('open_external_url', { url });
 

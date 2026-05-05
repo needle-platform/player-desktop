@@ -140,6 +140,12 @@ pub struct BootstrapPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInfo {
+    pub app_version: String,
+    pub loudness_analysis_version: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioDevice {
     pub name: String,
     pub description: String,

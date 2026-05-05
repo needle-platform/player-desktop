@@ -12,8 +12,8 @@ use std::{fs, path::Path, process::Command, sync::Mutex, time::Instant};
 
 use models::{
     AlbumMetadataRefreshResult, AlbumMetadataRefreshStatus, AppSettings, BootstrapPayload,
-    MetadataEditMode, PlaybackSession, PlaybackState, RepeatMode, SavedPlaylistRule,
-    TrackBpmAdjustment,
+    MetadataEditMode, PlaybackSession, PlaybackState, RepeatMode, RuntimeInfo,
+    SavedPlaylistRule, TrackBpmAdjustment,
 };
 use mpv::MpvController;
 use tauri::{Emitter, Manager};
@@ -99,6 +99,14 @@ fn migrate_legacy_app_data(app_data_dir: &Path) {
 #[tauri::command]
 fn bootstrap_app(state: tauri::State<'_, AppState>) -> Result<BootstrapPayload, String> {
     db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_runtime_info(app: tauri::AppHandle) -> RuntimeInfo {
+    RuntimeInfo {
+        app_version: app.package_info().version.to_string(),
+        loudness_analysis_version: loudness::analysis_version(),
+    }
 }
 
 #[tauri::command]
@@ -1226,6 +1234,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap_app,
+            get_runtime_info,
             open_external_url,
             scan_library,
             save_settings,

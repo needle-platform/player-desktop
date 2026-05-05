@@ -13,6 +13,7 @@ import {
   createPlaylist,
   deletePlaylist,
   getPlaybackState,
+  getRuntimeInfo,
   getMissingLibraryRoots,
   insertQueueAt,
   moveQueueIndex as tauriMoveQueueIndex,
@@ -55,6 +56,7 @@ import type {
   MetadataEditMode,
   PlaybackSession,
   RepeatMode,
+  RuntimeInfo,
   SavedPlaylist,
   SavedPlaylistRule,
   ThemeMode,
@@ -1137,6 +1139,7 @@ function TrackBpmControl({
 
 function App() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
+  const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null);
   const [view, setView] = useState<View>('dashboard');
   const [featuredSeed, setFeaturedSeed] = useState(0);
   const [search, setSearch] = useState('');
@@ -1613,7 +1616,19 @@ function App() {
   useEffect(() => {
     void (async () => {
       try {
-        setData(await bootstrapApp());
+        const [bootstrapResult, runtimeInfoResult] = await Promise.allSettled([
+          bootstrapApp(),
+          getRuntimeInfo(),
+        ]);
+
+        if (bootstrapResult.status === 'rejected') {
+          throw bootstrapResult.reason;
+        }
+
+        setData(bootstrapResult.value);
+        if (runtimeInfoResult.status === 'fulfilled') {
+          setRuntimeInfo(runtimeInfoResult.value);
+        }
       } catch (error) {
         setStatus(error instanceof Error ? error.message : String(error));
       } finally {
@@ -4416,6 +4431,7 @@ function App() {
         {view === 'settings' && (
           <SettingsView
             settings={data.settings}
+            runtimeInfo={runtimeInfo}
             currentAccentColor={currentAccentColor}
             onChange={updateSettings}
             onAddFolder={importFolder}
@@ -7556,6 +7572,7 @@ function ArtistsView({
 
 interface SettingsViewProps {
   settings: AppSettings;
+  runtimeInfo: RuntimeInfo | null;
   currentAccentColor: string;
   onChange: (next: AppSettings) => void;
   onAddFolder: () => void;
@@ -7575,6 +7592,7 @@ interface SettingsViewProps {
 
 function SettingsView({
   settings,
+  runtimeInfo,
   currentAccentColor,
   onChange,
   onAddFolder,
@@ -7986,6 +8004,9 @@ function SettingsView({
               <p className="settings-hint">
                 It keeps running while you browse or play music. The first pass can take a while on larger libraries, but later runs only revisit changed files.
               </p>
+              <p className="settings-hint">
+                If Needle upgrades its loudness-analysis method, one run may intentionally refresh older cached results across the library.
+              </p>
             </div>
             <div className="settings-row-control">
               <button
@@ -8095,6 +8116,15 @@ function SettingsView({
               <label className="settings-label">Backend</label>
               <p className="settings-hint">
                 On macOS install it with <code>brew install mpv</code> if it is not already available.
+              </p>
+              <p className="settings-hint">
+                App version: <code>{runtimeInfo?.app_version ?? 'Loading…'}</code>
+              </p>
+              <p className="settings-hint">
+                Loudness analysis version:{' '}
+                <code>
+                  {runtimeInfo ? `v${runtimeInfo.loudness_analysis_version}` : 'Loading…'}
+                </code>
               </p>
             </div>
           </div>
