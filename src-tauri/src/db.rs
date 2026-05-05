@@ -64,6 +64,7 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             play_count INTEGER NOT NULL DEFAULT 0,
             last_played_at TEXT,
+            is_favorite INTEGER NOT NULL DEFAULT 0,
             rating INTEGER
         );
 
@@ -198,6 +199,10 @@ pub fn init_database(db_path: &Path) -> Result<()> {
         [],
     );
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN last_played_at TEXT", []);
+    let _ = connection.execute(
+        "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN rating INTEGER", []);
     let _ = connection.execute("ALTER TABLE artist_info ADD COLUMN gender TEXT", []);
     let _ = connection.execute(
@@ -688,6 +693,7 @@ pub fn load_album_tracks_for_match(
                t.added_at,
                t.play_count,
                t.last_played_at,
+               t.is_favorite,
                t.rating
         FROM tracks t
         LEFT JOIN track_metadata_overrides tmo ON tmo.track_path = t.path
@@ -728,7 +734,8 @@ pub fn load_album_tracks_for_match(
                 added_at: row.get(18)?,
                 play_count: row.get::<_, i64>(19)?,
                 last_played_at: row.get(20)?,
-                rating: row.get(21)?,
+                is_favorite: row.get::<_, i64>(21)? != 0,
+                rating: row.get(22)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1094,6 +1101,21 @@ pub fn set_track_rating(db_path: &Path, path: &str, rating: Option<i64>) -> Resu
          SET rating = ?2
          WHERE path = ?1",
         params![path, normalized_rating],
+    )?;
+    if updated == 0 {
+        bail!("Track not found");
+    }
+
+    Ok(())
+}
+
+pub fn set_track_favorite(db_path: &Path, path: &str, favorite: bool) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    let updated = connection.execute(
+        "UPDATE tracks
+         SET is_favorite = ?2
+         WHERE path = ?1",
+        params![path, if favorite { 1 } else { 0 }],
     )?;
     if updated == 0 {
         bail!("Track not found");
@@ -1483,6 +1505,7 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                t.added_at,
                t.play_count,
                t.last_played_at,
+               t.is_favorite,
                t.rating
         FROM tracks t
         LEFT JOIN track_metadata_overrides tmo
@@ -1524,7 +1547,8 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                 added_at: row.get(18)?,
                 play_count: row.get::<_, i64>(19)?,
                 last_played_at: row.get(20)?,
-                rating: row.get(21)?,
+                is_favorite: row.get::<_, i64>(21)? != 0,
+                rating: row.get(22)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -34,6 +34,7 @@ import {
   setAudioDevice as setPlaybackAudioDevice,
   saveAlbumGenre as persistAlbumGenre,
   saveTrackBpm as persistTrackBpmValue,
+  setTrackFavorite as persistTrackFavorite,
   setTrackRating as persistTrackRating,
   setPlaybackMuted,
   setPlaybackVolume as setPlaybackVolumeLevel,
@@ -139,6 +140,11 @@ type ResolvedPlaylist = {
   description: string;
   tracks: Track[];
   saved?: SavedPlaylist;
+};
+type DashboardPlaylistSection = {
+  id: string;
+  title: string;
+  playlists: AutoPlaylist[];
 };
 type AlbumSummary = {
   key: string;
@@ -946,6 +952,45 @@ function StarIcon({ filled }: { filled: boolean }) {
   );
 }
 
+function HeartIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M12 20.6 4.7 13.9a4.9 4.9 0 0 1 0-7 4.7 4.7 0 0 1 6.8 0L12 7.4l.5-.5a4.7 4.7 0 0 1 6.8 0 4.9 4.9 0 0 1 0 7L12 20.6Z"
+        fill={filled ? 'currentColor' : 'none'}
+      />
+    </svg>
+  );
+}
+
+function TrackFavoriteControl({
+  track,
+  disabled,
+  onToggleFavorite,
+}: {
+  track: Track;
+  disabled?: boolean;
+  onToggleFavorite: (track: Track, favorite: boolean) => void;
+}) {
+  const nextFavorite = !track.is_favorite;
+
+  return (
+    <button
+      className={`row-icon-button track-favorite ${track.is_favorite ? 'is-active' : ''}`}
+      type="button"
+      disabled={disabled}
+      title={nextFavorite ? `Mark ${track.title} as favourite` : `Remove ${track.title} from favourites`}
+      aria-label={nextFavorite ? `Mark ${track.title} as favourite` : `Remove ${track.title} from favourites`}
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggleFavorite(track, nextFavorite);
+      }}
+    >
+      <HeartIcon filled={track.is_favorite} />
+    </button>
+  );
+}
+
 function TrackRatingControl({
   track,
   disabled,
@@ -1189,6 +1234,7 @@ function App() {
   const [isDeviceMenuOpen, setIsDeviceMenuOpen] = useState(false);
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pendingTrackFavorites, setPendingTrackFavorites] = useState<string[]>([]);
   const [pendingTrackRatings, setPendingTrackRatings] = useState<string[]>([]);
   const [pendingTrackBpms, setPendingTrackBpms] = useState<string[]>([]);
   const [selectedSmartPlaylistGenres, setSelectedSmartPlaylistGenres] = useState<string[]>([]);
@@ -1306,6 +1352,48 @@ function App() {
     setTrackGenreFilter(allTrackFilterValue);
     setTrackYearFromFilter(allTrackFilterValue);
     setTrackYearToFilter(allTrackFilterValue);
+  };
+  const updateTrackFavorite = async (track: Track, favorite: boolean) => {
+    const previousFavorite = track.is_favorite;
+    setPendingTrackFavorites((current) =>
+      current.includes(track.path) ? current : current.concat(track.path),
+    );
+    setData((prev) =>
+      prev
+        ? {
+            ...prev,
+            library: {
+              ...prev.library,
+              tracks: prev.library.tracks.map((entry) =>
+                entry.path === track.path ? { ...entry, is_favorite: favorite } : entry,
+              ),
+            },
+          }
+        : prev,
+    );
+
+    try {
+      const next = await persistTrackFavorite(track.path, favorite);
+      setData(next);
+      setStatus(`${favorite ? 'Added favourite' : 'Removed favourite'} · ${track.title}`);
+    } catch (error) {
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              library: {
+                ...prev.library,
+                tracks: prev.library.tracks.map((entry) =>
+                  entry.path === track.path ? { ...entry, is_favorite: previousFavorite } : entry,
+                ),
+              },
+            }
+          : prev,
+      );
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingTrackFavorites((current) => current.filter((path) => path !== track.path));
+    }
   };
   const updateTrackRating = async (track: Track, rating: number | null) => {
     const previousRating = track.rating ?? null;
@@ -2091,31 +2179,33 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [allTracks, featuredSeed],
   );
-  const dashboardPlaylists = useMemo(() => {
+  const dashboardPlaylistSections = useMemo(() => {
     const byId = new Map(smartPlaylists.map((playlist) => [playlist.id, playlist]));
-    const topGenrePlaylist = smartPlaylists.find((playlist) => playlist.id.startsWith('genre:')) ?? null;
-    const ordered: AutoPlaylist[] = [];
-
-    const pushIfPresent = (playlist: AutoPlaylist | null | undefined) => {
-      if (!playlist || ordered.some((entry) => entry.id === playlist.id)) return;
-      ordered.push(playlist);
+    const signaturePlaylists = smartPlaylists.filter((playlist) => playlist.id.startsWith('signature:'));
+    const section = (
+      id: string,
+      title: string,
+      entries: Array<AutoPlaylist | null | undefined>,
+    ): DashboardPlaylistSection | null => {
+      const playlists = entries.filter((entry): entry is AutoPlaylist => Boolean(entry));
+      return playlists.length > 0 ? { id, title, playlists } : null;
     };
 
-    pushIfPresent(byId.get('history:most-played'));
-    pushIfPresent(byId.get('history:recent'));
-    pushIfPresent(topGenrePlaylist);
-    pushIfPresent(byId.get('library:first-spin'));
-    pushIfPresent(byId.get('vibes:wind-down'));
-    pushIfPresent(byId.get('vibes:cruise-and-groove'));
-    pushIfPresent(byId.get('vibes:lift-and-energy'));
-    pushIfPresent(byId.get('vibes:get-on-your-feet'));
-
-    for (const playlist of smartPlaylists) {
-      if (ordered.length >= 8) break;
-      pushIfPresent(playlist);
-    }
-
-    return ordered.slice(0, 8);
+    return [
+      section('library', 'From your library', [
+        byId.get('library:favorites'),
+        byId.get('ratings:top-rated'),
+        byId.get('history:most-played'),
+        byId.get('history:recent'),
+      ]),
+      section('signatures', 'Library signatures', signaturePlaylists),
+      section('vibes', 'Vibes', [
+        byId.get('vibes:wind-down'),
+        byId.get('vibes:cruise-and-groove'),
+        byId.get('vibes:lift-and-energy'),
+        byId.get('vibes:get-on-your-feet'),
+      ]),
+    ].filter((entry): entry is DashboardPlaylistSection => Boolean(entry));
   }, [smartPlaylists]);
 
   const manualPlaylists = data?.playlists ?? [];
@@ -2349,7 +2439,7 @@ function App() {
   const recentAlbums = useMemo(() => {
     const withDate = albums.filter((a) => Boolean(a.addedAt));
     if (withDate.length === 0) return [];
-    return withDate.slice().sort((a, b) => (b.addedAt ?? '').localeCompare(a.addedAt ?? '')).slice(0, 8);
+    return withDate.slice().sort((a, b) => (b.addedAt ?? '').localeCompare(a.addedAt ?? '')).slice(0, 5);
   }, [albums]);
 
   const artistSummaries = useMemo(() => {
@@ -2435,6 +2525,7 @@ function App() {
     () => (currentPath ? trackByPath.get(currentPath) ?? null : currentQueueTrack),
     [currentPath, currentQueueTrack, trackByPath],
   );
+  const currentTrackFavoritePending = currentTrack ? pendingTrackFavorites.includes(currentTrack.path) : false;
   const activeTrack = useMemo(
     () => (currentPath ? trackByPath.get(currentPath) ?? currentQueueTrack ?? null : null),
     [currentPath, currentQueueTrack, trackByPath],
@@ -4058,7 +4149,7 @@ function App() {
             albums={albums}
             recentAlbums={recentAlbums}
             artists={allArtists}
-            playlists={dashboardPlaylists}
+            playlistSections={dashboardPlaylistSections}
             currentTrack={currentTrack}
             isPlaying={isPlaying}
             featuredSeed={featuredSeed}
@@ -4175,6 +4266,8 @@ function App() {
               )
             }
             onClearSmartPlaylistGenres={() => setSelectedSmartPlaylistGenres([])}
+            onToggleFavorite={updateTrackFavorite}
+            pendingFavoritePaths={pendingTrackFavorites}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
             metadataEditMode={metadataEditMode}
@@ -4293,6 +4386,8 @@ function App() {
                 suggestedName: `${selectedAlbumSummary.album} picks`,
               })
             }
+            onToggleFavorite={updateTrackFavorite}
+            pendingFavoritePaths={pendingTrackFavorites}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
             metadataEditMode={metadataEditMode}
@@ -4419,6 +4514,8 @@ function App() {
                 suggestedName: `${selectedArtistProfile} picks`,
               })
             }
+            onToggleFavorite={updateTrackFavorite}
+            pendingFavoritePaths={pendingTrackFavorites}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
             metadataEditMode={metadataEditMode}
@@ -4545,45 +4642,71 @@ function App() {
       )}
 
       <footer className="player-bar">
-        {currentAlbum ? (
+        <div className="player-now-cluster">
+          {currentAlbum ? (
+            <button
+              className="player-now player-now-button"
+              onClick={() => {
+                if (currentAlbumKey) openAlbum(currentAlbumKey);
+              }}
+              title={`Open album · ${currentAlbum}`}
+            >
+              <Cover
+                trackPath={currentTrack?.path ?? null}
+                fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
+                size="md"
+              />
+              <div className="player-meta">
+                <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
+                <div className="player-sub">
+                  {currentTrack
+                    ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
+                    : 'Pick a track from your library'}
+                </div>
+              </div>
+            </button>
+          ) : (
+            <div className="player-now">
+              <Cover
+                trackPath={currentTrack?.path ?? null}
+                fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
+                size="md"
+              />
+              <div className="player-meta">
+                <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
+                <div className="player-sub">
+                  {currentTrack
+                    ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
+                    : 'Pick a track from your library'}
+                </div>
+              </div>
+            </div>
+          )}
           <button
-            className="player-now player-now-button"
+            className={`ctrl ctrl-favorite ${currentTrack?.is_favorite ? 'is-active' : ''}`}
             onClick={() => {
-              if (currentAlbumKey) openAlbum(currentAlbumKey);
+              if (!currentTrack) return;
+              void updateTrackFavorite(currentTrack, !currentTrack.is_favorite);
             }}
-            title={`Open album · ${currentAlbum}`}
+            disabled={!currentTrack || currentTrackFavoritePending}
+            title={
+              currentTrack
+                ? currentTrack.is_favorite
+                  ? `Remove ${currentTrack.title} from favourites`
+                  : `Mark ${currentTrack.title} as favourite`
+                : 'Nothing playing'
+            }
+            aria-label={
+              currentTrack
+                ? currentTrack.is_favorite
+                  ? `Remove ${currentTrack.title} from favourites`
+                  : `Mark ${currentTrack.title} as favourite`
+                : 'Nothing playing'
+            }
           >
-            <Cover
-              trackPath={currentTrack?.path ?? null}
-              fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
-              size="md"
-            />
-            <div className="player-meta">
-              <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
-              <div className="player-sub">
-                {currentTrack
-                  ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
-                  : 'Pick a track from your library'}
-              </div>
-            </div>
+            <HeartIcon filled={Boolean(currentTrack?.is_favorite)} />
           </button>
-        ) : (
-          <div className="player-now">
-            <Cover
-              trackPath={currentTrack?.path ?? null}
-              fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
-              size="md"
-            />
-            <div className="player-meta">
-              <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
-              <div className="player-sub">
-                {currentTrack
-                  ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
-                  : 'Pick a track from your library'}
-              </div>
-            </div>
-          </div>
-        )}
+        </div>
 
         <div className="player-progress-wrap">
           <div className="player-progress">
@@ -5784,6 +5907,8 @@ interface TracksViewProps {
   selectedSmartPlaylistGenres?: string[];
   onToggleSmartPlaylistGenre?: (genre: string) => void;
   onClearSmartPlaylistGenres?: () => void;
+  onToggleFavorite: (track: Track, favorite: boolean) => void;
+  pendingFavoritePaths: string[];
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
   metadataEditMode: MetadataEditMode;
@@ -5852,6 +5977,8 @@ function TracksView({
   selectedSmartPlaylistGenres = [],
   onToggleSmartPlaylistGenre,
   onClearSmartPlaylistGenres,
+  onToggleFavorite,
+  pendingFavoritePaths,
   onSetRating,
   pendingRatingPaths,
   metadataEditMode,
@@ -6138,6 +6265,7 @@ function TracksView({
                 typeof playlistSourceTotalCount === 'number'
                   ? playlistSourceTotalCount - 1
                   : Math.max(totalTracks - 1, 0);
+              const favoriteIsPending = pendingFavoritePaths.includes(track.path);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
               const bpmIsPending = pendingBpmPaths.includes(track.path);
               return (
@@ -6160,6 +6288,7 @@ function TracksView({
                           (track.play_count ?? 0) > 0
                             ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
                             : 'Unplayed so far',
+                          track.is_favorite ? 'Favourite' : null,
                           track.rating ? `Rated ${formatTrackRatingLabel(track.rating)}` : null,
                         ]
                           .filter(Boolean)
@@ -6195,6 +6324,11 @@ function TracksView({
                       disabled={bpmIsPending}
                       onAdjust={onAdjustBpm}
                       onOpenEditor={onOpenBpmEditor}
+                    />
+                    <TrackFavoriteControl
+                      track={track}
+                      disabled={favoriteIsPending}
+                      onToggleFavorite={onToggleFavorite}
                     />
                     <TrackRatingControl
                       track={track}
@@ -6310,6 +6444,8 @@ interface AlbumDetailViewProps {
   onAddAlbumToQueue: () => void;
   onAddAlbumToPlaylist: () => void;
   onAddTrackToPlaylist: (track: Track) => void;
+  onToggleFavorite: (track: Track, favorite: boolean) => void;
+  pendingFavoritePaths: string[];
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
   metadataEditMode: MetadataEditMode;
@@ -6342,6 +6478,8 @@ function AlbumDetailView({
   onAddAlbumToQueue,
   onAddAlbumToPlaylist,
   onAddTrackToPlaylist,
+  onToggleFavorite,
+  pendingFavoritePaths,
   onSetRating,
   pendingRatingPaths,
   metadataEditMode,
@@ -6634,6 +6772,7 @@ function AlbumDetailView({
                 {tracks.map((t) => {
                   const isCurrent = currentPath === t.path;
                   const isQueued = queuePaths.includes(t.path);
+                  const favoriteIsPending = pendingFavoritePaths.includes(t.path);
                   const ratingIsPending = pendingRatingPaths.includes(t.path);
                   const bpmIsPending = pendingBpmPaths.includes(t.path);
                   const techDetails = formatTrackTechDetails(t);
@@ -6676,6 +6815,11 @@ function AlbumDetailView({
                           disabled={bpmIsPending}
                           onAdjust={onAdjustBpm}
                           onOpenEditor={onOpenBpmEditor}
+                        />
+                        <TrackFavoriteControl
+                          track={t}
+                          disabled={favoriteIsPending}
+                          onToggleFavorite={onToggleFavorite}
                         />
                         <TrackRatingControl
                           track={t}
@@ -6754,6 +6898,8 @@ interface ArtistDetailViewProps {
   onPlayTopTracksNext: () => void;
   onAddTopTracksToQueue: () => void;
   onAddTrackToPlaylist: (track: Track) => void;
+  onToggleFavorite: (track: Track, favorite: boolean) => void;
+  pendingFavoritePaths: string[];
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
   metadataEditMode: MetadataEditMode;
@@ -6788,6 +6934,8 @@ function ArtistDetailView({
   onPlayTopTracksNext,
   onAddTopTracksToQueue,
   onAddTrackToPlaylist,
+  onToggleFavorite,
+  pendingFavoritePaths,
   onSetRating,
   pendingRatingPaths,
   metadataEditMode,
@@ -7103,6 +7251,7 @@ function ArtistDetailView({
               const isCurrent = currentPath === track.path;
               const isQueued = queuePaths.includes(track.path);
               const albumKeyValue = trackAlbumKey(track);
+              const favoriteIsPending = pendingFavoritePaths.includes(track.path);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
               const bpmIsPending = pendingBpmPaths.includes(track.path);
               return (
@@ -7123,6 +7272,7 @@ function ArtistDetailView({
                           (track.play_count ?? 0) > 0
                             ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
                             : 'Unplayed so far',
+                          track.is_favorite ? 'Favourite' : null,
                           track.rating ? `Rated ${formatTrackRatingLabel(track.rating)}` : null,
                         ]
                           .filter(Boolean)
@@ -7148,6 +7298,11 @@ function ArtistDetailView({
                       disabled={bpmIsPending}
                       onAdjust={onAdjustBpm}
                       onOpenEditor={onOpenBpmEditor}
+                    />
+                    <TrackFavoriteControl
+                      track={track}
+                      disabled={favoriteIsPending}
+                      onToggleFavorite={onToggleFavorite}
                     />
                     <TrackRatingControl
                       track={track}
@@ -8139,7 +8294,7 @@ interface DashboardViewProps {
   albums: AlbumSummary[];
   recentAlbums: AlbumSummary[];
   artists: Array<{ artist: string; count: number }>;
-  playlists: AutoPlaylist[];
+  playlistSections: DashboardPlaylistSection[];
   currentTrack: Track | null;
   isPlaying: boolean;
   featuredSeed: number;
@@ -8166,7 +8321,7 @@ function DashboardView({
   albums,
   recentAlbums,
   artists,
-  playlists,
+  playlistSections,
   currentTrack,
   isPlaying,
   featuredSeed,
@@ -8190,7 +8345,7 @@ function DashboardView({
   const currentArtwork = useCoverArt(currentTrack?.path);
   const dashboardBackdrop = currentArtwork ?? dashboardIdleBackdrop;
   const featured = useMemo(
-    () => sampleN(albums, 6),
+    () => sampleN(albums, 5),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [albums, featuredSeed],
   );
@@ -8207,8 +8362,48 @@ function DashboardView({
   );
   const heroBackdropStyle = { backgroundImage: `url(${dashboardBackdrop})` };
   const recordLabelStyle = currentArtwork ? ({ backgroundImage: `url(${currentArtwork})` } as CSSProperties) : undefined;
+  const fromYourLibrarySection = playlistSections.find((section) => section.id === 'library') ?? null;
+  const signaturesSection = playlistSections.find((section) => section.id === 'signatures') ?? null;
+  const vibesSection = playlistSections.find((section) => section.id === 'vibes') ?? null;
 
   const isEmpty = tracks.length === 0;
+
+  const renderPlaylistSection = (section: DashboardPlaylistSection) => (
+    <section key={section.id} className="dashboard-section">
+      <div className="section-head">
+        <h2 className="section-title">{section.title}</h2>
+      </div>
+      <div
+        className="playlist-grid"
+        style={
+          {
+            ['--playlist-grid-columns' as string]: String(Math.min(Math.max(section.playlists.length, 1), 4)),
+          } as CSSProperties
+        }
+      >
+        {section.playlists.map((pl) => (
+          <div key={pl.id} className="playlist-card" style={{ background: pl.accent }}>
+            <button
+              className="playlist-open"
+              onClick={() => onOpenPlaylist(pl)}
+              title={`Open ${pl.name}`}
+            >
+              <div className="playlist-name">{pl.name}</div>
+              <div className="playlist-desc">{pl.description}</div>
+              <div className="playlist-meta">{pl.tracks.length} tracks</div>
+            </button>
+            <button
+              className="playlist-play"
+              onClick={() => onPlayPlaylist(pl)}
+              title="Shuffle play"
+            >
+              ▶
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
 
   if (isEmpty) {
     return (
@@ -8343,40 +8538,7 @@ function DashboardView({
         </section>
       )}
 
-      {playlists.length > 0 && (
-        <section className="dashboard-section">
-          <div className="section-head">
-            <h2 className="section-title">From your library</h2>
-            <div className="section-actions">
-              <button className="ghost-button" onClick={onShuffleFeatured}>
-                ↻ Refresh
-              </button>
-            </div>
-          </div>
-          <div className="playlist-grid">
-            {playlists.map((pl) => (
-              <div key={pl.id} className="playlist-card" style={{ background: pl.accent }}>
-                <button
-                  className="playlist-open"
-                  onClick={() => onOpenPlaylist(pl)}
-                  title={`Open ${pl.name}`}
-                >
-                  <div className="playlist-name">{pl.name}</div>
-                  <div className="playlist-desc">{pl.description}</div>
-                  <div className="playlist-meta">{pl.tracks.length} tracks</div>
-                </button>
-                <button
-                  className="playlist-play"
-                  onClick={() => onPlayPlaylist(pl)}
-                  title="Shuffle play"
-                >
-                  ▶
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
+      {fromYourLibrarySection && renderPlaylistSection(fromYourLibrarySection)}
 
       {featured.length > 0 && (
         <section className="dashboard-section">
@@ -8438,6 +8600,8 @@ function DashboardView({
         </section>
       )}
 
+      {signaturesSection && renderPlaylistSection(signaturesSection)}
+
       {topArtists.length > 0 && (
         <section className="dashboard-section">
           <div className="section-head">
@@ -8469,6 +8633,8 @@ function DashboardView({
           </div>
         </section>
       )}
+
+      {vibesSection && renderPlaylistSection(vibesSection)}
 
       <section className="dashboard-section">
         <div className="section-head">

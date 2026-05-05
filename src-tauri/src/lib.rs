@@ -579,6 +579,16 @@ fn set_track_rating(
 }
 
 #[tauri::command]
+fn set_track_favorite(
+    path: String,
+    favorite: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    db::set_track_favorite(&state.db_path, &path, favorite).map_err(|error| error.to_string())?;
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn save_track_bpm(
     path: String,
     bpm: i64,
@@ -1263,6 +1273,7 @@ pub fn run() {
             set_album_primary_genre,
             save_album_genre,
             set_track_rating,
+            set_track_favorite,
             save_track_bpm,
             adjust_track_bpm,
             set_playback_volume,

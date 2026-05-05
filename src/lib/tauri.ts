@@ -127,6 +127,9 @@ export const saveAlbumGenre = (
 export const setTrackRating = (path: string, rating: number | null) =>
   invoke<BootstrapPayload>('set_track_rating', { path, rating });
 
+export const setTrackFavorite = (path: string, favorite: boolean) =>
+  invoke<BootstrapPayload>('set_track_favorite', { path, favorite });
+
 export const saveTrackBpm = (path: string, bpm: number, mode: MetadataEditMode) =>
   invoke<BootstrapPayload>('save_track_bpm', { path, bpm, mode });
 

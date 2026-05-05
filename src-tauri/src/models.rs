@@ -64,6 +64,8 @@ pub struct Track {
     pub added_at: Option<String>,
     pub play_count: i64,
     pub last_played_at: Option<String>,
+    #[serde(default)]
+    pub is_favorite: bool,
     pub rating: Option<i64>,
 }
 

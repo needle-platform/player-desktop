@@ -24,13 +24,13 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Idle dashboard backdrop** from bundled artwork when nothing is playing, so the hero stays readable instead of falling back to empty white space
 - **Quick actions**: Shuffle play · Add folder
 - **Recently added albums** sorted by newest tracks with relative timestamps (Today / 3d ago / 2w ago…)
-- **From your library** recommendations grounded in your own listening history and collection metadata:
+- **From your library** row grounded in your own listening history and collection metadata:
+  - **Favourites** from the heart-marked tracks you explicitly saved
   - **Top rated** from the stars you assign yourself
-  - **Most played** & **Recently played** (from real play history)
-  - **Needs a first spin** for unplayed tracks still waiting in the library
-  - **Rediscover** for tracks you played before but have not visited in a while
-  - **From your top genre** for one focused genre mix instead of a wall of auto-generated buckets
+  - **Most played** & **Recently played** from real play history
 - **Featured albums** & **Top artists** rows
+- **Library signatures** row that turns your strongest decade + genre pockets into smart mixes such as `2000s Pop` or `1990s Rock`
+  - signature tiles reflect the full matching library pocket while their 50-track playlists stay album-balanced so one record cannot dominate the mix
 - **Vibe row** with four BPM-informed smart mixes:
   - **Wind down** for slower songs that help the room exhale
   - **Cruise & groove** for easy motion and warm rhythm
@@ -52,6 +52,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Artwork-first mini player** with full-bleed cover art, drag-to-move behavior, pinned always-on-top mode, and an expandable / resizable Up Next queue
 - **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
+- **Per-track favourites** saved locally with a heart toggle, separate from star ratings
 - **Per-track user star ratings** saved locally and reusable across the app
 - **Opt-in volume leveling** based on local FFmpeg loudness analysis, with gentler per-track gain applied through mpv while leaving your main listening volume untouched
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
@@ -75,7 +76,9 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Filtered playlist creation** from library metadata such as artist and genre
 - **Playlist management**: rename, delete, reorder tracks, remove tracks
 - **Smart playlists** surfaced as first-class library views generated from your collection and listening history
+- **Favourites smart playlist** automatically keeps a heart-marked mix in sync with your library
 - **Ratings-driven smart playlist** automatically keeps a `Top rated` mix in sync with your own stars
+- **Library-signature smart playlists** derive decade + genre mixes from the depth and diversity of your own collection, then round-robin albums so shuffle play stays varied
 - **Smart-playlist genre focus pills** let you narrow a generated mix to the genres currently present in that playlist, including multi-select combinations like pop + r&b
 - **Embedded-BPM vibe playlists** quietly map tempo into mood buckets instead of turning the library into a wall of raw numbers
 
@@ -207,6 +210,8 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 
 - **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
 - **User ratings** (`rating`) drive a `Top rated` smart playlist built from the stars you assign
+- **Favourite flags** (`is_favorite`) drive a `Favourites` smart playlist built from the tracks you explicitly heart
+- **Genre tags + year metadata** drive `Library signatures`, pairing strong decade + genre pockets from your own collection into album-balanced mixes
 - **Embedded BPM tags** drive compact tempo details plus vibe buckets such as Slowdown, Cruise, Groove, Lift, Energy, and Chaos
 - **Vibe playlists use those BPM buckets directly**, so tracks without BPM stay out of tempo-led mixes instead of being guessed into one
 - **BPM editing** can stay local to Needle or write back to the embedded file tags, depending on the metadata save mode you choose in Settings
@@ -215,7 +220,6 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 - **Version-aware loudness refresh messaging** calls out when a full-library rerun is expected because Needle upgraded its loudness-analysis method
 - **Playlist-local genre focus** lets smart playlists keep their generated order while narrowing the current mix to one or more genres already represented in that playlist
 - **Library state** (`play_count = 0`) drives Needs a first spin
-- **Genre tags** and Needle-local genre edits drive one top-genre mix when your collection has a clear favorite
 - **Vinyl-rip tags** (for example `vinyl-rip`) can mark your own transfers visually without rewriting how Needle handles the rest of your metadata
 - **Artist enrichment** (`gender` when MusicBrainz provides it) gives future artist-radio style mixes another optional signal without blocking playback when metadata is incomplete
 - **`added_at`** (preserved across rescans) drives the Recently added albums row

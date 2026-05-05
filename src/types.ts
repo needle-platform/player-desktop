@@ -34,6 +34,7 @@ export interface Track {
   added_at: string | null;
   play_count: number;
   last_played_at: string | null;
+  is_favorite: boolean;
   rating: number | null;
 }
 
