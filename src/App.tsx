@@ -1055,6 +1055,9 @@ function TrackBpmControl({
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const chipRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [menuDirection, setMenuDirection] = useState<'down' | 'up'>('down');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -1080,6 +1083,36 @@ function TrackBpmControl({
     };
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) {
+      setMenuDirection('down');
+      return;
+    }
+
+    const updateDirection = () => {
+      const chipRect = chipRef.current?.getBoundingClientRect();
+      if (!chipRect) {
+        return;
+      }
+
+      const panelHeight = panelRef.current?.offsetHeight ?? 220;
+      const spaceBelow = window.innerHeight - chipRect.bottom;
+      const spaceAbove = chipRect.top;
+      setMenuDirection(spaceBelow >= panelHeight + 16 || spaceBelow >= spaceAbove ? 'down' : 'up');
+    };
+
+    updateDirection();
+    const rafId = window.requestAnimationFrame(updateDirection);
+    window.addEventListener('resize', updateDirection);
+    window.addEventListener('scroll', updateDirection, true);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', updateDirection);
+      window.removeEventListener('scroll', updateDirection, true);
+    };
+  }, [isOpen]);
+
   const bpmLabel = formatBpm(track.bpm);
   const vibeLabel = vibeLabelForTrack(track);
   const halfBpm = track.bpm != null ? Math.max(1, Math.round(track.bpm / 2)) : null;
@@ -1096,6 +1129,7 @@ function TrackBpmControl({
       aria-label={`BPM correction for ${track.title}`}
     >
       <button
+        ref={chipRef}
         className={`track-bpm-chip ${isOpen ? 'is-open' : ''}`}
         type="button"
         disabled={disabled}
@@ -1122,7 +1156,12 @@ function TrackBpmControl({
       </button>
 
       {isOpen && (
-        <div className="track-bpm-menu-panel" role="menu" aria-label={`BPM options for ${track.title}`}>
+        <div
+          ref={panelRef}
+          className={`track-bpm-menu-panel ${menuDirection === 'up' ? 'is-upward' : ''}`}
+          role="menu"
+          aria-label={`BPM options for ${track.title}`}
+        >
           <div className="track-bpm-menu-title">
             {bpmLabel ? `${bpmLabel} BPM` : 'BPM'}
             {vibeLabel ? ` · ${vibeLabel}` : ''}

@@ -1765,6 +1765,10 @@ input, select {
   -webkit-backdrop-filter: blur(18px);
   z-index: 12;
 }
+.track-bpm-menu-panel.is-upward {
+  top: auto;
+  bottom: calc(100% + 10px);
+}
 .track-bpm-menu-title {
   padding: 8px 10px 10px;
   font-size: 11px;
@@ -4691,7 +4695,7 @@ input, select {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .album-track-row {
