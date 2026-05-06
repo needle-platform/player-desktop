@@ -102,7 +102,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Normalized genre filters** collapse casing and common formatting variants into one clean vocabulary, so `Pop`, `pop`, and similar duplicates do not fragment browsing
 - **Compact BPM details** on track rows, album pages, and artist pages, with a click-to-open editor for set / edit plus quick halve / double actions
 - **Tap-tempo BPM helper** inside the BPM editor lets you tap `Space` or click along with the current song to estimate a BPM before saving it
-- **BPM sanity check** in Settings with a review queue for suspicious tempo tags, inline halve / double fixes, playback-assisted review mode, bulk suggestion apply, and “mark intentional” dismissals for false positives
+- **BPM sanity check** in Settings under Maintenance with a review queue for suspicious tempo tags and missing BPMs, inline halve / double fixes, playback-assisted review mode, bulk suggestion apply, and “mark intentional” dismissals for false positives
 - **Album-aware BPM confidence scoring** can identify strong half/double-time spikes against an album's median tempo and offer best-effort high-confidence auto-fixes
 - **Albums** with cover art, sorting, direct playlist actions, and album-wide genre editing
 - **Large library browsers** lazily load offscreen covers / portraits and stage media work near the viewport instead of trying to resolve every image at once
@@ -218,7 +218,7 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 - **Embedded BPM tags** drive compact tempo details plus vibe buckets such as Slowdown, Cruise, Groove, Lift, Energy, and Chaos
 - **Vibe playlists use those BPM buckets directly**, so tracks without BPM stay out of tempo-led mixes instead of being guessed into one
 - **BPM editing** can stay local to Needle or write back to the embedded file tags, depending on the metadata save mode you choose in Settings
-- **BPM sanity review** compares genre-family expectations with album-local BPM medians so obvious half/double-time spikes can be reviewed, bulk-applied, auto-fixed when confidence is strong enough, or dismissed as intentional
+- **BPM sanity review** compares genre-family expectations with album-local BPM medians so obvious half/double-time spikes can be reviewed, bulk-applied, auto-fixed when confidence is strong enough, while tracks with no BPM tag are pulled into the same maintenance flow for manual review
 - **Optional loudness analysis** stores LUFS / peak-derived gain data locally so Needle can level mixed queues when you enable volume leveling
 - **Two-worker loudness scans** make the first analysis pass much more practical on modern Macs without overcommitting the whole machine
 - **Version-aware loudness refresh messaging** calls out when a full-library rerun is expected because Needle upgraded its loudness-analysis method

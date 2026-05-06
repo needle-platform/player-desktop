@@ -8486,330 +8486,6 @@ function SettingsView({
 
         <section className="settings-section">
           <div className="settings-section-head">
-            <h2>BPM sanity check</h2>
-            <p>
-              Review tracks whose BPM looks suspicious for their range, genre families, or album context, then fix them
-              with one click.
-            </p>
-          </div>
-          <div className="settings-row settings-row-block">
-            <div className="settings-row-copy">
-              <label className="settings-label">Flagged tracks</label>
-              <p className="settings-hint">
-                Needle highlights likely half-time and double-time mistakes such as `95` vs `190`, plus obvious album
-                outliers.
-              </p>
-            </div>
-            {bpmAuditItems.length === 0 ? (
-              <div className="settings-bpm-audit-empty">
-                <div className="settings-library-empty">
-                  {dismissedBpmAuditCount > 0
-                    ? 'All current BPM audit candidates are marked as intentional.'
-                    : 'No suspicious BPMs stood out in the current library snapshot.'}
-                </div>
-                {dismissedBpmAuditCount > 0 && (
-                  <button className="ghost-button" type="button" onClick={onClearDismissedBpmAuditItems}>
-                    Restore {dismissedBpmAuditCount} dismissed
-                  </button>
-                )}
-              </div>
-            ) : (
-              <>
-                <div className="settings-bpm-audit-toolbar">
-                  <div className="settings-bpm-audit-toolbar-copy">
-                    <div className="settings-maintenance-meta">
-                      Showing the {bpmAuditItems.length} strongest BPM candidates to review.
-                    </div>
-                    {hasSelectableBpmAuditItems && (
-                      <label className="settings-bpm-audit-toggle">
-                        <input
-                          ref={bpmAuditBulkToggleRef}
-                          type="checkbox"
-                          checked={areAllSuggestedBpmAuditItemsSelected}
-                          onChange={(event) => setAllSuggestedBpmAuditSelections(event.currentTarget.checked)}
-                          disabled={isApplyingAnyBpmAuditChange}
-                        />
-                        <span>
-                          Select all suggested fixes
-                          {selectedSuggestedBpmAuditCount > 0
-                            ? ` · ${selectedSuggestedBpmAuditCount} selected`
-                            : ''}
-                        </span>
-                      </label>
-                    )}
-                  </div>
-                  <div className="settings-bpm-audit-toolbar-actions">
-                    {dismissedBpmAuditCount > 0 && (
-                      <button
-                        className="ghost-button"
-                        type="button"
-                        onClick={onClearDismissedBpmAuditItems}
-                        disabled={isApplyingAnyBpmAuditChange}
-                        title="Show BPMs you previously marked as intentional again"
-                      >
-                        Restore {dismissedBpmAuditCount} dismissed
-                      </button>
-                    )}
-                    {selectedSuggestedBpmAuditCount > 0 && (
-                      <button
-                        className="ghost-button"
-                        type="button"
-                        onClick={() => setSelectedBpmAuditPaths([])}
-                        disabled={isApplyingAnyBpmAuditChange}
-                      >
-                        Clear
-                      </button>
-                    )}
-                    {highConfidenceBpmAuditItems.length > 0 && (
-                      <button
-                        className="row-action-button settings-bpm-audit-apply-button is-auto"
-                        type="button"
-                        onClick={() => void applyHighConfidenceBpmAuditSuggestions()}
-                        disabled={isApplyingAnyBpmAuditChange}
-                        title="Best-effort album-based auto-fixes for the strongest half/double-time BPM candidates"
-                      >
-                        {isApplyingBpmAuditAutoFix
-                          ? 'Auto-fixing…'
-                          : `Auto-fix ${highConfidenceBpmAuditItems.length} high-confidence candidate${
-                              highConfidenceBpmAuditItems.length === 1 ? '' : 's'
-                            }`}
-                      </button>
-                    )}
-                    <button
-                      className="row-action-button settings-bpm-audit-apply-button is-suggested"
-                      type="button"
-                      onClick={() => void applySelectedBpmAuditSuggestions()}
-                      disabled={selectedSuggestedBpmAuditItems.length === 0 || isApplyingAnyBpmAuditChange}
-                    >
-                      {isApplyingBpmAuditSelection
-                        ? 'Applying…'
-                        : `Apply ${selectedSuggestedBpmAuditItems.length} suggestion${
-                            selectedSuggestedBpmAuditItems.length === 1 ? '' : 's'
-                          }`}
-                    </button>
-                  </div>
-                </div>
-                <div className="settings-bpm-review-bar">
-                  <div className="settings-bpm-review-copy">
-                    <div className="settings-bpm-review-title">Review mode</div>
-                    <div className="settings-bpm-review-sub">
-                      {currentBpmAuditReviewItem
-                        ? `${currentBpmAuditReviewItem.track.title} · ${
-                            currentBpmAuditReviewItem.track.artist ?? 'Unknown artist'
-                          }`
-                        : 'Preview flagged tracks before you accept a halve or double suggestion.'}
-                    </div>
-                    {highConfidenceBpmAuditItems.length > 0 && (
-                      <div className="settings-bpm-review-note">
-                        Needle can auto-fix the strongest album-based BPM spikes, but it is still a best-effort heuristic.
-                      </div>
-                    )}
-                    {dismissedBpmAuditCount > 0 && (
-                      <div className="settings-bpm-review-note">
-                        {dismissedBpmAuditCount} track{dismissedBpmAuditCount === 1 ? '' : 's'} marked as intentional
-                        BPM {dismissedBpmAuditCount === 1 ? 'is' : 'are'} hidden from this queue.
-                      </div>
-                    )}
-                  </div>
-                  <div className="settings-bpm-review-controls">
-                    <button
-                      className="row-icon-button"
-                      type="button"
-                      onClick={() => onStepBpmAuditReview(-1)}
-                      disabled={!hasPreviousBpmAuditReviewItem}
-                      title="Previous flagged track"
-                      aria-label="Previous flagged track"
-                    >
-                      <PreviousIcon />
-                    </button>
-                    <button
-                      className="row-icon-button settings-bpm-review-toggle"
-                      type="button"
-                      onClick={() =>
-                        onToggleBpmAuditReviewPlayback(currentBpmAuditReviewItem?.track ?? bpmAuditItems[0]?.track ?? null)
-                      }
-                      disabled={bpmAuditItems.length === 0}
-                      title={
-                        currentBpmAuditReviewItem
-                          ? isBpmAuditReviewPlaying
-                            ? 'Pause BPM review'
-                            : 'Resume BPM review'
-                          : 'Start BPM review'
-                      }
-                      aria-label={
-                        currentBpmAuditReviewItem
-                          ? isBpmAuditReviewPlaying
-                            ? 'Pause BPM review'
-                            : 'Resume BPM review'
-                          : 'Start BPM review'
-                      }
-                    >
-                      {currentBpmAuditReviewItem && isBpmAuditReviewPlaying ? <PauseIcon /> : <PlayIcon />}
-                    </button>
-                    <button
-                      className="row-icon-button"
-                      type="button"
-                      onClick={() => onStepBpmAuditReview(1)}
-                      disabled={!hasNextBpmAuditReviewItem}
-                      title="Next flagged track"
-                      aria-label="Next flagged track"
-                    >
-                      <NextIcon />
-                    </button>
-                  </div>
-                </div>
-                <div className="settings-bpm-audit-list">
-                  {bpmAuditItems.map((item) => {
-                    const bpmPending = pendingBpmPaths.includes(item.track.path);
-                    const isSelectable = item.suggestedAdjustment != null;
-                    const isSelected = selectedBpmAuditPathSet.has(item.track.path);
-                    const isReviewing = item.track.path === currentBpmAuditReviewPath;
-                    const suggestedActionLabel =
-                      item.suggestedAdjustment === 'half'
-                        ? `Apply halve${item.track.bpm ? ` to ${Math.max(1, Math.round(item.track.bpm / 2))} BPM` : ''}`
-                        : item.suggestedAdjustment === 'double'
-                          ? `Apply double${item.track.bpm ? ` to ${Math.max(1, item.track.bpm * 2)} BPM` : ''}`
-                          : null;
-                    return (
-                      <div
-                        key={item.track.path}
-                        className={`settings-bpm-audit-item ${isReviewing ? 'is-reviewing' : ''}`}
-                      >
-                        <label
-                          className={`settings-bpm-audit-select ${isSelectable ? '' : 'is-disabled'}`}
-                          title={isSelectable ? 'Select this suggested fix' : 'No automatic suggestion yet'}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={(event) => toggleBpmAuditSelection(item.track.path, event.currentTarget.checked)}
-                            disabled={!isSelectable || isApplyingAnyBpmAuditChange}
-                          />
-                        </label>
-                        <div className="settings-bpm-audit-copy">
-                          <div className="settings-bpm-audit-head">
-                            <div className="settings-bpm-audit-title">{item.track.title}</div>
-                          </div>
-                          <div className="settings-bpm-audit-sub">
-                            {(item.track.artist ?? 'Unknown artist') + ' — ' + (item.track.album ?? 'Unknown album')}
-                          </div>
-                          <div className="settings-bpm-audit-meta">
-                            {formatTrackDetails(item.track)}
-                            {item.suggestedAdjustment && (
-                              <span className="settings-bpm-audit-suggestion">
-                                {item.suggestedAdjustment === 'half' ? 'Suggested: halve' : 'Suggested: double'}
-                              </span>
-                            )}
-                            {item.confidence !== 'low' && (
-                              <span
-                                className={`settings-bpm-audit-confidence is-${item.confidence}`}
-                                title={
-                                  item.confidence === 'high'
-                                    ? 'Strong album-based half/double-time candidate'
-                                    : 'Multiple audit signals point in the same direction'
-                                }
-                              >
-                                {item.confidence === 'high' ? 'High confidence' : 'Medium confidence'}
-                              </span>
-                            )}
-                          </div>
-                          <div className="settings-bpm-audit-reasons">
-                            {item.reasons.map((reason) => (
-                              <span key={`${item.track.path}-${reason.id}`} className="settings-bpm-audit-reason">
-                                {reason.label}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                        <div className="settings-bpm-audit-actions">
-                          <button
-                            className={`row-icon-button ${isReviewing ? 'is-queued' : ''}`}
-                            type="button"
-                            onClick={() =>
-                              isReviewing
-                                ? onToggleBpmAuditReviewPlayback(item.track)
-                                : onStartBpmAuditReview(item.track)
-                            }
-                            disabled={isApplyingAnyBpmAuditChange}
-                            title={
-                              isReviewing
-                                ? isBpmAuditReviewPlaying
-                                  ? `Pause ${item.track.title}`
-                                  : `Resume ${item.track.title}`
-                                : `Preview ${item.track.title}`
-                            }
-                            aria-label={
-                              isReviewing
-                                ? isBpmAuditReviewPlaying
-                                  ? `Pause ${item.track.title}`
-                                  : `Resume ${item.track.title}`
-                                : `Preview ${item.track.title}`
-                            }
-                          >
-                            {isReviewing && isBpmAuditReviewPlaying ? <PauseIcon /> : <PlayIcon />}
-                          </button>
-                          {item.suggestedAdjustment ? (
-                            <button
-                              className="row-action-button settings-bpm-audit-apply-button is-suggested"
-                              type="button"
-                              onClick={() => {
-                                if (item.suggestedAdjustment === 'half' || item.suggestedAdjustment === 'double') {
-                                  void applyBpmAuditAdjustment(item, item.suggestedAdjustment);
-                                }
-                              }}
-                              disabled={bpmPending || isApplyingAnyBpmAuditChange}
-                            >
-                              {suggestedActionLabel}
-                            </button>
-                          ) : (
-                            <>
-                              <button
-                                className="row-action-button"
-                                type="button"
-                                onClick={() => void applyBpmAuditAdjustment(item, 'half')}
-                                disabled={bpmPending || isApplyingAnyBpmAuditChange}
-                              >
-                                Halve
-                              </button>
-                              <button
-                                className="row-action-button"
-                                type="button"
-                                onClick={() => void applyBpmAuditAdjustment(item, 'double')}
-                                disabled={bpmPending || isApplyingAnyBpmAuditChange}
-                              >
-                                Double
-                              </button>
-                            </>
-                          )}
-                          <button
-                            className="ghost-button"
-                            type="button"
-                            onClick={() => onOpenBpmEditor(item.track)}
-                            disabled={bpmPending || isApplyingAnyBpmAuditChange}
-                          >
-                            Edit BPM…
-                          </button>
-                          <button
-                            className="ghost-button"
-                            type="button"
-                            onClick={() => dismissBpmAuditItem(item)}
-                            disabled={isApplyingAnyBpmAuditChange}
-                            title="Mark this BPM as intentional so it stops appearing in the audit queue"
-                          >
-                            Mark intentional
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-          </div>
-        </section>
-
-        <section className="settings-section">
-          <div className="settings-section-head">
             <h2>Library</h2>
             <p>Keep your library database in sync without touching the underlying audio files.</p>
           </div>
@@ -8900,6 +8576,336 @@ function SettingsView({
                 </div>
               )}
             </div>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-section-head">
+            <h2>BPM sanity check</h2>
+            <p>
+              Review tracks whose BPM looks suspicious for their range, genre families, album context, or is missing
+              entirely, then fix them in place.
+            </p>
+          </div>
+          <div className="settings-row settings-row-block">
+            <div className="settings-row-copy">
+              <label className="settings-label">Flagged tracks</label>
+              <p className="settings-hint">
+                Needle highlights likely half-time and double-time mistakes such as `95` vs `190`, obvious album
+                outliers, and tracks with no BPM tag yet.
+              </p>
+            </div>
+            {bpmAuditItems.length === 0 ? (
+              <div className="settings-bpm-audit-empty">
+                <div className="settings-library-empty">
+                  {dismissedBpmAuditCount > 0
+                    ? 'All current BPM audit candidates are marked as intentional.'
+                    : 'No suspicious or missing BPMs stood out in the current library snapshot.'}
+                </div>
+                {dismissedBpmAuditCount > 0 && (
+                  <button className="ghost-button" type="button" onClick={onClearDismissedBpmAuditItems}>
+                    Restore {dismissedBpmAuditCount} dismissed
+                  </button>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="settings-bpm-audit-toolbar">
+                  <div className="settings-bpm-audit-toolbar-copy">
+                    <div className="settings-maintenance-meta">
+                      Showing {bpmAuditItems.length} BPM candidates and missing-tag tracks to review.
+                    </div>
+                    {hasSelectableBpmAuditItems && (
+                      <label className="settings-bpm-audit-toggle">
+                        <input
+                          ref={bpmAuditBulkToggleRef}
+                          type="checkbox"
+                          checked={areAllSuggestedBpmAuditItemsSelected}
+                          onChange={(event) => setAllSuggestedBpmAuditSelections(event.currentTarget.checked)}
+                          disabled={isApplyingAnyBpmAuditChange}
+                        />
+                        <span>
+                          Select all suggested fixes
+                          {selectedSuggestedBpmAuditCount > 0
+                            ? ` · ${selectedSuggestedBpmAuditCount} selected`
+                            : ''}
+                        </span>
+                      </label>
+                    )}
+                  </div>
+                  <div className="settings-bpm-audit-toolbar-actions">
+                    {dismissedBpmAuditCount > 0 && (
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={onClearDismissedBpmAuditItems}
+                        disabled={isApplyingAnyBpmAuditChange}
+                        title="Show BPMs you previously marked as intentional again"
+                      >
+                        Restore {dismissedBpmAuditCount} dismissed
+                      </button>
+                    )}
+                    {selectedSuggestedBpmAuditCount > 0 && (
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={() => setSelectedBpmAuditPaths([])}
+                        disabled={isApplyingAnyBpmAuditChange}
+                      >
+                        Clear
+                      </button>
+                    )}
+                    {highConfidenceBpmAuditItems.length > 0 && (
+                      <button
+                        className="row-action-button settings-bpm-audit-apply-button is-auto"
+                        type="button"
+                        onClick={() => void applyHighConfidenceBpmAuditSuggestions()}
+                        disabled={isApplyingAnyBpmAuditChange}
+                        title="Best-effort album-based auto-fixes for the strongest half/double-time BPM candidates"
+                      >
+                        {isApplyingBpmAuditAutoFix
+                          ? 'Auto-fixing…'
+                          : `Auto-fix ${highConfidenceBpmAuditItems.length} high-confidence candidate${
+                              highConfidenceBpmAuditItems.length === 1 ? '' : 's'
+                            }`}
+                      </button>
+                    )}
+                    <button
+                      className="row-action-button settings-bpm-audit-apply-button is-suggested"
+                      type="button"
+                      onClick={() => void applySelectedBpmAuditSuggestions()}
+                      disabled={selectedSuggestedBpmAuditItems.length === 0 || isApplyingAnyBpmAuditChange}
+                    >
+                      {isApplyingBpmAuditSelection
+                        ? 'Applying…'
+                        : `Apply ${selectedSuggestedBpmAuditItems.length} suggestion${
+                            selectedSuggestedBpmAuditItems.length === 1 ? '' : 's'
+                          }`}
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-bpm-review-bar">
+                  <div className="settings-bpm-review-copy">
+                    <div className="settings-bpm-review-title">Review mode</div>
+                    <div className="settings-bpm-review-sub">
+                      {currentBpmAuditReviewItem
+                        ? `${currentBpmAuditReviewItem.track.title} · ${
+                            currentBpmAuditReviewItem.track.artist ?? 'Unknown artist'
+                          }`
+                        : 'Preview flagged tracks or missing-BPM tracks before you update them.'}
+                    </div>
+                    {highConfidenceBpmAuditItems.length > 0 && (
+                      <div className="settings-bpm-review-note">
+                        Needle can auto-fix the strongest album-based BPM spikes, but it is still a best-effort heuristic.
+                      </div>
+                    )}
+                    {dismissedBpmAuditCount > 0 && (
+                      <div className="settings-bpm-review-note">
+                        {dismissedBpmAuditCount} track{dismissedBpmAuditCount === 1 ? '' : 's'} marked as intentional
+                        BPM {dismissedBpmAuditCount === 1 ? 'is' : 'are'} hidden from this queue.
+                      </div>
+                    )}
+                  </div>
+                  <div className="settings-bpm-review-controls">
+                    <button
+                      className="row-icon-button"
+                      type="button"
+                      onClick={() => onStepBpmAuditReview(-1)}
+                      disabled={!hasPreviousBpmAuditReviewItem}
+                      title="Previous flagged track"
+                      aria-label="Previous flagged track"
+                    >
+                      <PreviousIcon />
+                    </button>
+                    <button
+                      className="row-icon-button settings-bpm-review-toggle"
+                      type="button"
+                      onClick={() =>
+                        onToggleBpmAuditReviewPlayback(currentBpmAuditReviewItem?.track ?? bpmAuditItems[0]?.track ?? null)
+                      }
+                      disabled={bpmAuditItems.length === 0}
+                      title={
+                        currentBpmAuditReviewItem
+                          ? isBpmAuditReviewPlaying
+                            ? 'Pause BPM review'
+                            : 'Resume BPM review'
+                          : 'Start BPM review'
+                      }
+                      aria-label={
+                        currentBpmAuditReviewItem
+                          ? isBpmAuditReviewPlaying
+                            ? 'Pause BPM review'
+                            : 'Resume BPM review'
+                          : 'Start BPM review'
+                      }
+                    >
+                      {currentBpmAuditReviewItem && isBpmAuditReviewPlaying ? <PauseIcon /> : <PlayIcon />}
+                    </button>
+                    <button
+                      className="row-icon-button"
+                      type="button"
+                      onClick={() => onStepBpmAuditReview(1)}
+                      disabled={!hasNextBpmAuditReviewItem}
+                      title="Next flagged track"
+                      aria-label="Next flagged track"
+                    >
+                      <NextIcon />
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-bpm-audit-list">
+                  {bpmAuditItems.map((item) => {
+                    const bpmPending = pendingBpmPaths.includes(item.track.path);
+                    const isSelectable = item.suggestedAdjustment != null;
+                    const isSelected = selectedBpmAuditPathSet.has(item.track.path);
+                    const isReviewing = item.track.path === currentBpmAuditReviewPath;
+                    const isMissingBpm = item.track.bpm == null || item.track.bpm <= 0;
+                    const suggestedActionLabel =
+                      item.suggestedAdjustment === 'half'
+                        ? `Apply halve${item.track.bpm ? ` to ${Math.max(1, Math.round(item.track.bpm / 2))} BPM` : ''}`
+                        : item.suggestedAdjustment === 'double'
+                          ? `Apply double${item.track.bpm ? ` to ${Math.max(1, item.track.bpm * 2)} BPM` : ''}`
+                          : null;
+                    return (
+                      <div
+                        key={item.track.path}
+                        className={`settings-bpm-audit-item ${isReviewing ? 'is-reviewing' : ''}`}
+                      >
+                        <label
+                          className={`settings-bpm-audit-select ${isSelectable ? '' : 'is-disabled'}`}
+                          title={isSelectable ? 'Select this suggested fix' : 'No automatic suggestion yet'}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(event) => toggleBpmAuditSelection(item.track.path, event.currentTarget.checked)}
+                            disabled={!isSelectable || isApplyingAnyBpmAuditChange}
+                          />
+                        </label>
+                        <div className="settings-bpm-audit-copy">
+                          <div className="settings-bpm-audit-head">
+                            <div className="settings-bpm-audit-title">{item.track.title}</div>
+                          </div>
+                          <div className="settings-bpm-audit-sub">
+                            {(item.track.artist ?? 'Unknown artist') + ' — ' + (item.track.album ?? 'Unknown album')}
+                          </div>
+                          <div className="settings-bpm-audit-meta">
+                            {formatTrackDetails(item.track)}
+                            {isMissingBpm && (
+                              <span className="settings-bpm-audit-suggestion">
+                                Missing BPM
+                              </span>
+                            )}
+                            {item.suggestedAdjustment && (
+                              <span className="settings-bpm-audit-suggestion">
+                                {item.suggestedAdjustment === 'half' ? 'Suggested: halve' : 'Suggested: double'}
+                              </span>
+                            )}
+                            {item.confidence !== 'low' && (
+                              <span
+                                className={`settings-bpm-audit-confidence is-${item.confidence}`}
+                                title={
+                                  item.confidence === 'high'
+                                    ? 'Strong album-based half/double-time candidate'
+                                    : 'Multiple audit signals point in the same direction'
+                                }
+                              >
+                                {item.confidence === 'high' ? 'High confidence' : 'Medium confidence'}
+                              </span>
+                            )}
+                          </div>
+                          <div className="settings-bpm-audit-reasons">
+                            {item.reasons.map((reason) => (
+                              <span key={`${item.track.path}-${reason.id}`} className="settings-bpm-audit-reason">
+                                {reason.label}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="settings-bpm-audit-actions">
+                          <button
+                            className={`row-icon-button ${isReviewing ? 'is-queued' : ''}`}
+                            type="button"
+                            onClick={() =>
+                              isReviewing
+                                ? onToggleBpmAuditReviewPlayback(item.track)
+                                : onStartBpmAuditReview(item.track)
+                            }
+                            disabled={isApplyingAnyBpmAuditChange}
+                            title={
+                              isReviewing
+                                ? isBpmAuditReviewPlaying
+                                  ? `Pause ${item.track.title}`
+                                  : `Resume ${item.track.title}`
+                                : `Preview ${item.track.title}`
+                            }
+                            aria-label={
+                              isReviewing
+                                ? isBpmAuditReviewPlaying
+                                  ? `Pause ${item.track.title}`
+                                  : `Resume ${item.track.title}`
+                                : `Preview ${item.track.title}`
+                            }
+                          >
+                            {isReviewing && isBpmAuditReviewPlaying ? <PauseIcon /> : <PlayIcon />}
+                          </button>
+                          {item.suggestedAdjustment ? (
+                            <button
+                              className="row-action-button settings-bpm-audit-apply-button is-suggested"
+                              type="button"
+                              onClick={() => {
+                                if (item.suggestedAdjustment === 'half' || item.suggestedAdjustment === 'double') {
+                                  void applyBpmAuditAdjustment(item, item.suggestedAdjustment);
+                                }
+                              }}
+                              disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                            >
+                              {suggestedActionLabel}
+                            </button>
+                          ) : !isMissingBpm ? (
+                            <>
+                              <button
+                                className="row-action-button"
+                                type="button"
+                                onClick={() => void applyBpmAuditAdjustment(item, 'half')}
+                                disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                              >
+                                Halve
+                              </button>
+                              <button
+                                className="row-action-button"
+                                type="button"
+                                onClick={() => void applyBpmAuditAdjustment(item, 'double')}
+                                disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                              >
+                                Double
+                              </button>
+                            </>
+                          ) : null}
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            onClick={() => onOpenBpmEditor(item.track)}
+                            disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                          >
+                            {isMissingBpm ? 'Set BPM…' : 'Edit BPM…'}
+                          </button>
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            onClick={() => dismissBpmAuditItem(item)}
+                            disabled={isApplyingAnyBpmAuditChange}
+                            title="Mark this BPM as intentional so it stops appearing in the audit queue"
+                          >
+                            Mark intentional
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </div>
         </section>
 

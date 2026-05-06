@@ -97,8 +97,25 @@ export const findSuspiciousBpmTracks = (tracks: Track[], limit = 40): BpmAuditIt
   const items: BpmAuditItem[] = [];
 
   for (const track of tracks) {
+    const albumMedianBpm = albumMedians.get(albumKeyForTrack(track)) ?? null;
     const bpm = track.bpm;
-    if (bpm == null || bpm <= 0) continue;
+    if (bpm == null || bpm <= 0) {
+      items.push({
+        track,
+        score: albumMedianBpm != null ? 3 : 2,
+        reasons: [
+          {
+            id: 'missing-bpm',
+            label: albumMedianBpm != null ? `No BPM tag found (album median ${albumMedianBpm})` : 'No BPM tag found',
+          },
+        ],
+        suggestedAdjustment: null,
+        albumMedianBpm,
+        confidence: 'low',
+        autoFixEligible: false,
+      });
+      continue;
+    }
 
     const reasons: BpmAuditReason[] = [];
     let score = 0;
@@ -139,8 +156,6 @@ export const findSuspiciousBpmTracks = (tracks: Track[], limit = 40): BpmAuditIt
       });
       score += 3;
     }
-
-    const albumMedianBpm = albumMedians.get(albumKeyForTrack(track)) ?? null;
     if (albumMedianBpm != null) {
       if (bpm >= albumMedianBpm * 1.75 && bpm - albumMedianBpm >= 35) {
         const halfCandidateDistance = Math.abs(Math.round(bpm / 2) - albumMedianBpm);
