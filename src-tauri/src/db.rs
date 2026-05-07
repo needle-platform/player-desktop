@@ -7,8 +7,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::artist::ArtistGender;
 use crate::models::{
     default_equalizer_bands, default_tracks_page_size, AppSettings, BootstrapPayload,
-    EqualizerPreset, LibraryData, MetadataEditMode, PlaybackSession, SavedPlaylist,
-    SavedPlaylistRule, ThemeMode, Track, TrackBpmAdjustment, TrackMetadataOverride,
+    EqualizerPreset, ImportedAlbumInfo, ImportedAlbumPrimaryGenre, ImportedArtistImage,
+    ImportedArtistInfo, ImportedDesktopPlaylist, ImportedTrackAppState, ImportedTrackLoudness,
+    ImportedTrackMetadataOverride, LibraryData, LibrarySource, MetadataEditMode,
+    PlaybackSession, SavedPlaylist, SavedPlaylistRule, ThemeMode, Track, TrackBpmAdjustment,
+    TrackMetadataOverride,
 };
 
 fn normalize_hex_color(value: &str) -> Option<String> {
@@ -182,6 +185,10 @@ pub fn init_database(db_path: &Path) -> Result<()> {
         "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
         params!["metadata_edit_mode", "needle_only"],
     )?;
+    connection.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+        params!["library_source", "local_folders"],
+    )?;
 
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN genre TEXT", []);
     let _ = connection.execute(
@@ -313,6 +320,24 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
         )
         .unwrap_or_else(|_| "needle_only".to_string());
 
+    let library_source = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'library_source'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "local_folders".to_string());
+
+    let needle_backend_url = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'needle_backend_url'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
     let last_maintenance_at = connection
         .query_row(
             "SELECT value FROM settings WHERE key = 'last_maintenance_at'",
@@ -358,6 +383,11 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
             "write_to_files" => MetadataEditMode::WriteToFiles,
             _ => MetadataEditMode::NeedleOnly,
         },
+        library_source: match library_source.as_str() {
+            "needle_backend" => LibrarySource::NeedleBackend,
+            _ => LibrarySource::LocalFolders,
+        },
+        needle_backend_url,
         tracks_page_size,
         last_maintenance_at,
         last_loudness_analysis_at,
@@ -396,6 +426,33 @@ pub fn save_settings(db_path: &Path, settings: &AppSettings) -> Result<AppSettin
             equalizer_to_str(&settings.equalizer_preset)
         ],
     )?;
+
+    connection.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![
+            "library_source",
+            match settings.library_source {
+                LibrarySource::NeedleBackend => "needle_backend",
+                LibrarySource::LocalFolders => "local_folders",
+            }
+        ],
+    )?;
+
+    if let Some(backend_url) = settings
+        .needle_backend_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params!["needle_backend_url", backend_url],
+        )?;
+    } else {
+        connection.execute("DELETE FROM settings WHERE key = 'needle_backend_url'", [])?;
+    }
 
     connection.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -1240,6 +1297,209 @@ pub fn save_playback_session(db_path: &Path, session: &PlaybackSession) -> Resul
         params!["playback_session", serde_json::to_string(session)?],
     )?;
     load_playback_session(db_path)
+}
+
+pub fn current_timestamp(db_path: &Path) -> Result<String> {
+    let connection = Connection::open(db_path)?;
+    connection
+        .query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(Into::into)
+}
+
+pub fn export_playlists_for_backend(db_path: &Path) -> Result<Vec<ImportedDesktopPlaylist>> {
+    let playlists = load_playlists(db_path)?;
+    let mut exported = Vec::with_capacity(playlists.len());
+
+    for playlist in playlists {
+        exported.push(ImportedDesktopPlaylist {
+            id: format!("desktop-playlist-{}", playlist.id),
+            name: playlist.name,
+            created_at: playlist.created_at,
+            updated_at: playlist.updated_at,
+            track_paths: playlist.track_paths,
+            rule_json: playlist
+                .rule
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        });
+    }
+
+    Ok(exported)
+}
+
+pub fn list_artist_images_for_backend(db_path: &Path) -> Result<Vec<ImportedArtistImage>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "SELECT name, url, fetched_at FROM artist_images ORDER BY lower(name), name",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedArtistImage {
+            name: row.get(0)?,
+            url: row.get(1)?,
+            fetched_at: row.get(2)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn list_artist_info_for_backend(db_path: &Path) -> Result<Vec<ImportedArtistInfo>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "SELECT name, description, source_url, gender, fetched_at
+         FROM artist_info
+         ORDER BY lower(name), name",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedArtistInfo {
+            name: row.get(0)?,
+            description: row.get(1)?,
+            source_url: row.get(2)?,
+            gender: row.get(3)?,
+            fetched_at: row.get(4)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn list_album_info_for_backend(db_path: &Path) -> Result<Vec<ImportedAlbumInfo>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "SELECT key, description, source_url, fetched_at
+         FROM album_info
+         ORDER BY key",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedAlbumInfo {
+            key: row.get(0)?,
+            description: row.get(1)?,
+            source_url: row.get(2)?,
+            fetched_at: row.get(3)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn list_album_primary_genres_for_backend(
+    db_path: &Path,
+) -> Result<Vec<ImportedAlbumPrimaryGenre>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "SELECT album, album_artist, primary_genre, updated_at
+         FROM album_primary_genres
+         ORDER BY lower(album), lower(album_artist), album, album_artist",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedAlbumPrimaryGenre {
+            album: row.get(0)?,
+            album_artist: row.get(1)?,
+            primary_genre: row.get(2)?,
+            updated_at: row.get(3)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn list_track_metadata_overrides_for_backend(
+    db_path: &Path,
+) -> Result<Vec<ImportedTrackMetadataOverride>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "
+        SELECT track_path, title, artist, album, album_artist, disc_number, track_number,
+               bpm, genre, year, recording_mbid, release_track_mbid, release_mbid,
+               release_group_mbid, confidence, source, updated_at
+        FROM track_metadata_overrides
+        ORDER BY track_path
+        ",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedTrackMetadataOverride {
+            track_path: row.get(0)?,
+            title: row.get(1)?,
+            artist: row.get(2)?,
+            album: row.get(3)?,
+            album_artist: row.get(4)?,
+            disc_number: row.get(5)?,
+            track_number: row.get(6)?,
+            bpm: row.get(7)?,
+            genre: row.get(8)?,
+            year: row.get(9)?,
+            recording_mbid: row.get(10)?,
+            release_track_mbid: row.get(11)?,
+            release_mbid: row.get(12)?,
+            release_group_mbid: row.get(13)?,
+            confidence: row.get(14)?,
+            source: row.get(15)?,
+            updated_at: row.get(16)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn list_track_loudness_for_backend(db_path: &Path) -> Result<Vec<ImportedTrackLoudness>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "
+        SELECT track_path, integrated_lufs, true_peak_db, target_gain_db,
+               file_size, file_modified_at, analysis_version, analyzed_at
+        FROM track_loudness
+        ORDER BY track_path
+        ",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedTrackLoudness {
+            track_path: row.get(0)?,
+            integrated_lufs: row.get(1)?,
+            true_peak_db: row.get(2)?,
+            target_gain_db: row.get(3)?,
+            file_size: row.get(4)?,
+            file_modified_at: row.get(5)?,
+            analysis_version: row.get(6)?,
+            analyzed_at: row.get(7)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn list_track_app_state_for_backend(db_path: &Path) -> Result<Vec<ImportedTrackAppState>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "
+        SELECT path, is_favorite, rating, play_count, last_played_at, added_at
+        FROM tracks
+        ORDER BY path
+        ",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedTrackAppState {
+            track_path: row.get(0)?,
+            favorite: row.get::<_, i64>(1)? != 0,
+            rating: row.get(2)?,
+            play_count: row.get(3)?,
+            last_played_at: row.get(4)?,
+            date_added: row.get(5)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
 pub fn load_playlists(db_path: &Path) -> Result<Vec<SavedPlaylist>> {

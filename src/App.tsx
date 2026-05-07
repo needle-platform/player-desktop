@@ -11,6 +11,7 @@ import {
   appendQueue,
   bootstrapApp,
   createPlaylist,
+  getNeedleBackendStatus,
   deletePlaylist,
   getPlaybackState,
   getRuntimeInfo,
@@ -31,6 +32,7 @@ import {
   refreshAlbumMetadataFromMusicBrainz,
   resumePlayback,
   runMaintenance,
+  migrateDesktopStateToNeedleBackend,
   setAudioDevice as setPlaybackAudioDevice,
   saveAlbumGenre as persistAlbumGenre,
   saveTrackBpm as persistTrackBpmValue,
@@ -52,9 +54,12 @@ import type {
   AppSettings,
   BootstrapPayload,
   EqualizerPreset,
+  LibrarySource,
   LoudnessAnalysisFailure,
   LoudnessAnalysisProgress,
   MetadataEditMode,
+  NeedleBackendMigrationReport,
+  NeedleBackendStatus,
   PlaybackSession,
   RepeatMode,
   RuntimeInfo,
@@ -372,6 +377,22 @@ const metadataEditModeOptions: Array<{
     value: 'write_to_files',
     label: 'Write to files',
     hint: 'Update the embedded genre and BPM tags so other apps see the same edits too.',
+  },
+];
+const librarySourceOptions: Array<{
+  value: LibrarySource;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: 'local_folders',
+    label: 'Local folders',
+    hint: 'Use Needle’s local SQLite library and direct folder scanning on this machine.',
+  },
+  {
+    value: 'needle_backend',
+    label: 'Needle backend',
+    hint: 'Prepare the desktop app to read shared library state from your Needle backend.',
   },
 ];
 const trackSortOptions: Array<{ value: TrackSortOption; label: string }> = [
@@ -1320,6 +1341,15 @@ function App() {
   const [loudnessAnalysisProgress, setLoudnessAnalysisProgress] = useState<LoudnessAnalysisProgress | null>(null);
   const [loudnessAnalysisFailures, setLoudnessAnalysisFailures] = useState<LoudnessAnalysisFailure[]>([]);
   const [missingLibraryRoots, setMissingLibraryRoots] = useState<string[]>([]);
+  const [needleBackendStatus, setNeedleBackendStatus] = useState<NeedleBackendStatus | null>(null);
+  const [needleBackendMigrationReport, setNeedleBackendMigrationReport] =
+    useState<NeedleBackendMigrationReport | null>(null);
+  const [needleBackendFeedback, setNeedleBackendFeedback] = useState<{
+    tone: 'info' | 'success' | 'warning' | 'error';
+    message: string;
+  } | null>(null);
+  const [isNeedleBackendStatusLoading, setIsNeedleBackendStatusLoading] = useState(false);
+  const [isNeedleBackendMigrationRunning, setIsNeedleBackendMigrationRunning] = useState(false);
   const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [notification, setNotification] = useState<{
@@ -1841,6 +1871,12 @@ function App() {
       cancelled = true;
     };
   }, [data?.settings.library_roots]);
+
+  useEffect(() => {
+    setNeedleBackendStatus(null);
+    setNeedleBackendMigrationReport(null);
+    setNeedleBackendFeedback(null);
+  }, [data?.settings.needle_backend_url]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2924,6 +2960,74 @@ function App() {
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const checkNeedleBackend = async () => {
+    if (!data) return;
+
+    try {
+      setIsNeedleBackendStatusLoading(true);
+      setNeedleBackendFeedback({
+        tone: 'info',
+        message: 'Checking Needle backend…',
+      });
+      const backendStatus = await getNeedleBackendStatus(data.settings.needle_backend_url);
+      setNeedleBackendStatus(backendStatus);
+      setNeedleBackendFeedback({
+        tone: backendStatus.enabled ? 'success' : 'warning',
+        message: backendStatus.enabled
+          ? `Connected to Needle backend at ${backendStatus.url}`
+          : 'Backend responded, but local Needle library mode is not enabled there yet.',
+      });
+      setStatus(
+        backendStatus.enabled
+          ? `Needle backend reachable · ${backendStatus.track_count ?? 0} tracks`
+          : 'Needle backend reachable, but local library mode is not enabled there yet',
+      );
+    } catch (error) {
+      setNeedleBackendStatus(null);
+      const message = error instanceof Error ? error.message : String(error);
+      setNeedleBackendFeedback({
+        tone: 'error',
+        message,
+      });
+      setStatus(message);
+    } finally {
+      setIsNeedleBackendStatusLoading(false);
+    }
+  };
+
+  const migrateNeedleBackend = async () => {
+    if (!data) return;
+
+    try {
+      setIsNeedleBackendMigrationRunning(true);
+      setBusy('Migrating to Needle backend…');
+      setNeedleBackendFeedback({
+        tone: 'info',
+        message: 'Migrating local Needle state to the backend…',
+      });
+      const report = await migrateDesktopStateToNeedleBackend(data.settings.needle_backend_url);
+      setNeedleBackendStatus(report.backend_status);
+      setNeedleBackendMigrationReport(report);
+      setNeedleBackendFeedback({
+        tone: 'success',
+        message: 'Local Needle state migrated to the backend.',
+      });
+      setStatus(
+        `Migrated desktop state · ${report.import_summary.playlists_imported} playlists, ${report.import_summary.track_app_state_imported} track-state rows, ${report.import_summary.track_loudness_imported} loudness rows`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setNeedleBackendFeedback({
+        tone: 'error',
+        message,
+      });
+      setStatus(message);
+    } finally {
+      setIsNeedleBackendMigrationRunning(false);
+      setBusy(null);
     }
   };
 
@@ -4708,6 +4812,13 @@ function App() {
             loudnessAnalysisFailures={loudnessAnalysisFailures}
             onCopyLoudnessFailures={copyLoudnessAnalysisFailures}
             missingLibraryRoots={missingLibraryRoots}
+            backendStatus={needleBackendStatus}
+            backendMigrationReport={needleBackendMigrationReport}
+            backendStatusBusy={isNeedleBackendStatusLoading}
+            backendMigrationBusy={isNeedleBackendMigrationRunning}
+            onCheckBackend={checkNeedleBackend}
+            onMigrateBackend={migrateNeedleBackend}
+            backendFeedback={needleBackendFeedback}
             bpmAuditItems={bpmAuditItems}
             onAdjustBpm={adjustTrackBpmValue}
             onOpenBpmEditor={(track) => setTrackBpmEditor({ track, dismissFromAudit: true })}
@@ -8025,6 +8136,16 @@ interface SettingsViewProps {
   loudnessAnalysisFailures: LoudnessAnalysisFailure[];
   onCopyLoudnessFailures: () => void;
   missingLibraryRoots: string[];
+  backendStatus: NeedleBackendStatus | null;
+  backendMigrationReport: NeedleBackendMigrationReport | null;
+  backendStatusBusy: boolean;
+  backendMigrationBusy: boolean;
+  onCheckBackend: () => void;
+  onMigrateBackend: () => void;
+  backendFeedback: {
+    tone: 'info' | 'success' | 'warning' | 'error';
+    message: string;
+  } | null;
   bpmAuditItems: BpmAuditItem[];
   onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => Promise<void>;
   onOpenBpmEditor: (track: Track) => void;
@@ -8057,6 +8178,13 @@ function SettingsView({
   loudnessAnalysisFailures,
   onCopyLoudnessFailures,
   missingLibraryRoots,
+  backendStatus,
+  backendMigrationReport,
+  backendStatusBusy,
+  backendMigrationBusy,
+  onCheckBackend,
+  onMigrateBackend,
+  backendFeedback,
   bpmAuditItems,
   onAdjustBpm,
   onOpenBpmEditor,
@@ -8072,6 +8200,10 @@ function SettingsView({
 }: SettingsViewProps) {
   const isManualEqualizer = settings.equalizer_preset === 'manual';
   const accentColorValue = normalizeAccentColor(settings.accent_color) ?? currentAccentColor;
+  const backendUrlValue = settings.needle_backend_url ?? '';
+  const canCheckBackend = backendUrlValue.trim().length > 0 && !backendStatusBusy;
+  const canMigrateBackend =
+    backendUrlValue.trim().length > 0 && backendStatus?.enabled === true && !backendMigrationBusy && !backendStatusBusy;
   const lastMaintenanceLabel = formatMaintenanceTimestamp(settings.last_maintenance_at);
   const lastLoudnessAnalysisLabel = formatMaintenanceTimestamp(settings.last_loudness_analysis_at);
   const [manualBandsDraft, setManualBandsDraft] = useState(() =>
@@ -8489,6 +8621,217 @@ function SettingsView({
             <h2>Library</h2>
             <p>Keep your library database in sync without touching the underlying audio files.</p>
           </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <label className="settings-label">Library source</label>
+              <p className="settings-hint">
+                Choose whether this desktop app should stay local-first or prepare for a shared Needle backend library.
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <div className="seg">
+                {librarySourceOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    className={`seg-btn ${settings.library_source === option.value ? 'on' : ''}`}
+                    onClick={() =>
+                      onChange({
+                        ...settings,
+                        library_source: option.value,
+                      })
+                    }
+                    title={option.hint}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <p className="settings-inline-note">
+                {librarySourceOptions.find((option) => option.value === settings.library_source)?.hint}
+              </p>
+            </div>
+          </div>
+          {settings.library_source === 'needle_backend' && (
+            <div className="settings-row settings-row-block">
+              <div className="settings-row-copy">
+                <label className="settings-label">Needle backend</label>
+                <p className="settings-hint">
+                  Add the backend URL here, check that the backend is reachable, and migrate your existing desktop library state into it.
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <div className="settings-backend-url-control">
+                  <input
+                    className="settings-backend-input"
+                    type="url"
+                    value={backendUrlValue}
+                    placeholder="Enter backend URL"
+                    onChange={(event) =>
+                      onChange({
+                        ...settings,
+                        needle_backend_url: event.currentTarget.value.trim() || null,
+                      })
+                    }
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                  />
+                  <div className="settings-backend-actions">
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={onCheckBackend}
+                      disabled={!canCheckBackend}
+                    >
+                      {backendStatusBusy ? 'Checking…' : 'Check backend'}
+                    </button>
+                    <button
+                      className="primary"
+                      type="button"
+                      onClick={onMigrateBackend}
+                      disabled={!canMigrateBackend}
+                    >
+                      {backendMigrationBusy ? 'Migrating…' : 'Migrate local state'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className="settings-backend-note">
+                {backendUrlValue.trim().length === 0
+                  ? 'Enter the backend URL to enable the connection check. Example: http://localhost:2104'
+                  : backendStatus?.enabled
+                    ? 'Backend verified. You can migrate your local Needle state now.'
+                    : 'Check the backend first. Migration unlocks after Needle confirms the backend is ready.'}
+              </div>
+              <div className="settings-backend-note">
+                This pass migrates playlists, track favourites and history, metadata caches, loudness-analysis data, and the shared playback session into the backend.
+              </div>
+              {backendFeedback && (
+                <div className={`settings-backend-feedback is-${backendFeedback.tone}`} role="status">
+                  {backendFeedback.message}
+                </div>
+              )}
+              {backendStatus?.enabled !== true && backendUrlValue.trim().length > 0 && (
+                <div className="settings-backend-note">
+                  Migrate local state stays disabled until the backend responds successfully from Check backend.
+                </div>
+              )}
+              {backendStatus && (
+                <div className="settings-backend-status" role="status">
+                  <div className="settings-backend-status-head">
+                    <strong>{backendStatus.enabled ? 'Backend ready' : 'Backend reachable'}</strong>
+                    <span>{backendStatus.url}</span>
+                  </div>
+                  <div className="settings-backend-stats">
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Mode</span>
+                      <strong>{backendStatus.mode ?? 'Unknown'}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Roots</span>
+                      <strong>{backendStatus.roots_configured}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Tracks</span>
+                      <strong>{backendStatus.track_count ?? '—'}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Albums</span>
+                      <strong>{backendStatus.album_count ?? '—'}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Artists</span>
+                      <strong>{backendStatus.artist_count ?? '—'}</strong>
+                    </div>
+                  </div>
+                  {backendStatus.configured_roots.length > 0 && (
+                    <div className="settings-backend-roots">
+                      {backendStatus.configured_roots.map((root) => (
+                        <code key={root}>{root}</code>
+                      ))}
+                    </div>
+                  )}
+                  {backendStatus.last_scan_status && (
+                    <div className="settings-backend-note">Last backend scan: {backendStatus.last_scan_status}</div>
+                  )}
+                </div>
+              )}
+              {backendMigrationReport && (
+                <div className="settings-backend-migration-summary" role="status">
+                  <div className="settings-backend-status-head">
+                    <strong>Latest migration</strong>
+                    <span>{backendMigrationReport.import_summary.source_database_path ?? 'Desktop library.sqlite'}</span>
+                  </div>
+                  <div className="settings-backend-stats">
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Playlists</span>
+                      <strong>{backendMigrationReport.import_summary.playlists_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Playlist misses</span>
+                      <strong>{backendMigrationReport.import_summary.playlist_tracks_missing}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Track state</span>
+                      <strong>{backendMigrationReport.import_summary.track_app_state_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Track-state misses</span>
+                      <strong>{backendMigrationReport.import_summary.track_app_state_missing}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Overrides</span>
+                      <strong>{backendMigrationReport.import_summary.track_metadata_overrides_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Loudness rows</span>
+                      <strong>{backendMigrationReport.import_summary.track_loudness_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Artist images</span>
+                      <strong>{backendMigrationReport.import_summary.artist_images_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Artist info</span>
+                      <strong>{backendMigrationReport.import_summary.artist_infos_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Album info</span>
+                      <strong>{backendMigrationReport.import_summary.album_infos_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Playback session</span>
+                      <strong>{backendMigrationReport.import_summary.playback_session_imported ? 'Imported' : 'Skipped'}</strong>
+                    </div>
+                  </div>
+                  {backendMigrationReport.root_mappings.length > 0 && (
+                    <div className="settings-backend-mappings">
+                      {backendMigrationReport.root_mappings.map((mapping) => (
+                        <div key={`${mapping.source_prefix}->${mapping.target_prefix}`} className="settings-backend-mapping">
+                          <div className="settings-backend-mapping-path">
+                            <span className="settings-backend-mapping-label">Desktop root</span>
+                            <code>{mapping.source_prefix}</code>
+                          </div>
+                          <span className="settings-backend-mapping-arrow" aria-hidden="true">→</span>
+                          <div className="settings-backend-mapping-path">
+                            <span className="settings-backend-mapping-label">Backend root</span>
+                            <code>{mapping.target_prefix}</code>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {backendMigrationReport.unmapped_roots.length > 0 && (
+                    <div className="settings-backend-note">
+                      Unmapped local roots will need manual attention:
+                      {' '}
+                      {backendMigrationReport.unmapped_roots.join(', ')}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <div className="settings-row settings-row-block">
             <div className="settings-row-copy">
               <label className="settings-label">Folders</label>
@@ -9056,18 +9399,9 @@ function SettingsView({
           </div>
           <div className="settings-row">
             <div className="settings-row-copy">
-              <label className="settings-label">Backend</label>
+              <label className="settings-label">mpv</label>
               <p className="settings-hint">
                 On macOS install it with <code>brew install mpv</code> if it is not already available.
-              </p>
-              <p className="settings-hint">
-                App version: <code>{runtimeInfo?.app_version ?? 'Loading…'}</code>
-              </p>
-              <p className="settings-hint">
-                Loudness analysis version:{' '}
-                <code>
-                  {runtimeInfo ? `v${runtimeInfo.loudness_analysis_version}` : 'Loading…'}
-                </code>
               </p>
             </div>
           </div>

@@ -2,6 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   AppSettings,
   BootstrapPayload,
+  NeedleBackendMigrationReport,
+  NeedleBackendStatus,
   MetadataEditMode,
   PlaybackSession,
   PlaybackState,
@@ -16,6 +18,16 @@ export const bootstrapApp = () => invoke<BootstrapPayload>('bootstrap_app');
 export const getRuntimeInfo = () => invoke<RuntimeInfo>('get_runtime_info');
 
 export const openExternalUrl = (url: string) => invoke<void>('open_external_url', { url });
+
+export const getNeedleBackendStatus = (backendUrl?: string | null) =>
+  invoke<NeedleBackendStatus>('get_needle_backend_status', {
+    backendUrl: backendUrl ?? null,
+  });
+
+export const migrateDesktopStateToNeedleBackend = (backendUrl?: string | null) =>
+  invoke<NeedleBackendMigrationReport>('migrate_desktop_state_to_needle_backend', {
+    backendUrl: backendUrl ?? null,
+  });
 
 export const scanLibrary = (folder: string) =>
   invoke<BootstrapPayload>('scan_library', { folder });

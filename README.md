@@ -110,6 +110,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Vinyl-rip badge support** detects `vinyl-rip` tags from your files and marks matching albums with a small record badge on album artwork
 - **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
 - **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, loudness analysis with live progress output, structured progress counts, failed-file review/copy tools, live equalizer presets, manual 10-band EQ, an in-app backend version readout, and a metadata save-mode switch for `Needle only` vs `Write to files`
+- **Needle backend setup and migration prep** in Settings: choose `Local folders` or `Needle backend`, verify backend health, configure the backend URL, and migrate playlists, favourites/history, metadata caches, loudness-analysis data, and shared playback session state into the backend
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
@@ -206,6 +207,16 @@ npm run tauri build
 On first launch after the rename from `Resonance`, Needle copies the existing database and SQLite sidecar files forward from the legacy app-data directory under `com.davidrelich.musicplayer`.
 
 Maintenance and remove-folder actions only touch the database — your audio files are never modified or deleted.
+
+## Backend transition status
+
+Needle now includes the first desktop-side backend transition tools:
+
+- backend URL and health checks in Settings
+- desktop-to-backend migration for playlists, favourites/history, artist and album cache data, metadata overrides, loudness-analysis rows, and shared playback session state
+
+The desktop app does **not** yet fully boot its library/runtime from the Needle backend.  
+For now, the backend tooling is there to prepare and validate the migration path while native local-folder playback remains the active day-to-day mode.
 
 ## Auto-playlists & metadata
 
