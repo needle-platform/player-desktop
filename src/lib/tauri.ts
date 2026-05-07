@@ -5,6 +5,7 @@ import type {
   NeedleBackendMigrationReport,
   NeedleBackendStatus,
   MetadataEditMode,
+  OfflineDownloadEntry,
   PlaybackSession,
   PlaybackState,
   RepeatMode,
@@ -28,6 +29,15 @@ export const migrateDesktopStateToNeedleBackend = (backendUrl?: string | null) =
   invoke<NeedleBackendMigrationReport>('migrate_desktop_state_to_needle_backend', {
     backendUrl: backendUrl ?? null,
   });
+
+export const listOfflineDownloads = () =>
+  invoke<OfflineDownloadEntry[]>('list_offline_downloads');
+
+export const downloadOfflineTracks = (trackPaths: string[]) =>
+  invoke<OfflineDownloadEntry[]>('download_offline_tracks', { trackPaths });
+
+export const removeOfflineTracks = (trackPaths: string[]) =>
+  invoke<OfflineDownloadEntry[]>('remove_offline_tracks', { trackPaths });
 
 export const scanLibrary = (folder: string) =>
   invoke<BootstrapPayload>('scan_library', { folder });
@@ -104,22 +114,22 @@ export const createPlaylist = (
   rule?: SavedPlaylistRule | null,
 ) => invoke<BootstrapPayload>('create_playlist', { name, trackPaths, rule: rule ?? null });
 
-export const renamePlaylist = (playlistId: number, name: string) =>
+export const renamePlaylist = (playlistId: string, name: string) =>
   invoke<BootstrapPayload>('rename_playlist', { playlistId, name });
 
-export const deletePlaylist = (playlistId: number) =>
+export const deletePlaylist = (playlistId: string) =>
   invoke<BootstrapPayload>('delete_playlist', { playlistId });
 
-export const appendTracksToPlaylist = (playlistId: number, trackPaths: string[]) =>
+export const appendTracksToPlaylist = (playlistId: string, trackPaths: string[]) =>
   invoke<BootstrapPayload>('append_tracks_to_playlist', { playlistId, trackPaths });
 
-export const replacePlaylistTracks = (playlistId: number, trackPaths: string[]) =>
+export const replacePlaylistTracks = (playlistId: string, trackPaths: string[]) =>
   invoke<BootstrapPayload>('replace_playlist_tracks', { playlistId, trackPaths });
 
-export const removePlaylistTrack = (playlistId: number, index: number) =>
+export const removePlaylistTrack = (playlistId: string, index: number) =>
   invoke<BootstrapPayload>('remove_playlist_track', { playlistId, index });
 
-export const movePlaylistTrack = (playlistId: number, fromIndex: number, toIndex: number) =>
+export const movePlaylistTrack = (playlistId: string, fromIndex: number, toIndex: number) =>
   invoke<BootstrapPayload>('move_playlist_track', { playlistId, fromIndex, toIndex });
 
 export const setAlbumPrimaryGenre = (

@@ -163,7 +163,7 @@ impl MpvController {
         let paths: Vec<String> = session
             .queue_paths
             .iter()
-            .filter(|path| Path::new(path).exists())
+            .filter(|path| is_playable_source(path))
             .cloned()
             .collect();
 
@@ -571,6 +571,10 @@ impl MpvController {
 
         Ok(())
     }
+}
+
+fn is_playable_source(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://") || Path::new(value).exists()
 }
 
 impl Drop for MpvController {

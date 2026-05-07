@@ -49,7 +49,7 @@ pub enum LibrarySource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
-    pub id: i64,
+    pub id: String,
     pub path: String,
     pub title: String,
     pub artist: Option<String>,
@@ -196,8 +196,42 @@ fn default_paused() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfflineDownloadEntry {
+    pub track_path: String,
+    pub local_path: String,
+    pub content_type: Option<String>,
+    pub file_size: Option<u64>,
+    pub downloaded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OfflineDownloadOperation {
+    Download,
+    Remove,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OfflineDownloadProgressStatus {
+    Running,
+    Completed,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfflineDownloadProgress {
+    pub operation: OfflineDownloadOperation,
+    pub status: OfflineDownloadProgressStatus,
+    pub total_tracks: usize,
+    pub completed_tracks: usize,
+    pub current_track_path: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPlaylist {
-    pub id: i64,
+    pub id: String,
     pub name: String,
     pub track_paths: Vec<String>,
     #[serde(default)]

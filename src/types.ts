@@ -14,7 +14,7 @@ export type MetadataEditMode = 'needle_only' | 'write_to_files';
 export type LibrarySource = 'local_folders' | 'needle_backend';
 
 export interface Track {
-  id: number;
+  id: string;
   path: string;
   title: string;
   artist: string | null;
@@ -111,6 +111,26 @@ export interface PlaybackSession {
   shuffle_enabled: boolean;
 }
 
+export interface OfflineDownloadEntry {
+  track_path: string;
+  local_path: string;
+  content_type: string | null;
+  file_size: number | null;
+  downloaded_at: string;
+}
+
+export type OfflineDownloadOperation = 'download' | 'remove';
+export type OfflineDownloadProgressStatus = 'running' | 'completed' | 'error';
+
+export interface OfflineDownloadProgress {
+  operation: OfflineDownloadOperation;
+  status: OfflineDownloadProgressStatus;
+  total_tracks: number;
+  completed_tracks: number;
+  current_track_path: string | null;
+  error_message: string | null;
+}
+
 export interface SavedPlaylistRule {
   kind: 'filtered_library';
   search: string | null;
@@ -121,7 +141,7 @@ export interface SavedPlaylistRule {
 }
 
 export interface SavedPlaylist {
-  id: number;
+  id: string;
   name: string;
   track_paths: string[];
   rule: SavedPlaylistRule | null;

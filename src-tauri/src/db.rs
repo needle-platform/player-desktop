@@ -10,9 +10,16 @@ use crate::models::{
     EqualizerPreset, ImportedAlbumInfo, ImportedAlbumPrimaryGenre, ImportedArtistImage,
     ImportedArtistInfo, ImportedDesktopPlaylist, ImportedTrackAppState, ImportedTrackLoudness,
     ImportedTrackMetadataOverride, LibraryData, LibrarySource, MetadataEditMode,
-    PlaybackSession, SavedPlaylist, SavedPlaylistRule, ThemeMode, Track, TrackBpmAdjustment,
-    TrackMetadataOverride,
+    OfflineDownloadEntry, PlaybackSession, SavedPlaylist, SavedPlaylistRule, ThemeMode, Track,
+    TrackBpmAdjustment, TrackMetadataOverride,
 };
+
+fn parse_local_playlist_id(value: &str) -> Result<i64> {
+    value
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| anyhow!("Playlist is not available in local-library mode"))
+}
 
 fn normalize_hex_color(value: &str) -> Option<String> {
     let trimmed = value.trim();
@@ -158,6 +165,14 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             file_modified_at INTEGER NOT NULL,
             analysis_version INTEGER NOT NULL DEFAULT 1,
             analyzed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS offline_downloads (
+            track_path TEXT PRIMARY KEY,
+            local_path TEXT NOT NULL,
+            content_type TEXT,
+            file_size INTEGER,
+            downloaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         ",
     )?;
@@ -770,7 +785,7 @@ pub fn load_album_tracks_for_match(
     let tracks = statement
         .query_map(params![normalized_album, normalized_album_artist], |row| {
             Ok(Track {
-                id: row.get(0)?,
+                id: row.get::<_, i64>(0)?.to_string(),
                 path: row.get(1)?,
                 title: row.get(2)?,
                 artist: row.get(3)?,
@@ -1299,6 +1314,93 @@ pub fn save_playback_session(db_path: &Path, session: &PlaybackSession) -> Resul
     load_playback_session(db_path)
 }
 
+pub fn list_offline_downloads(db_path: &Path) -> Result<Vec<OfflineDownloadEntry>> {
+    let connection = Connection::open(db_path)?;
+    let mut statement = connection.prepare(
+        "
+        SELECT track_path, local_path, content_type, file_size, downloaded_at
+        FROM offline_downloads
+        ORDER BY downloaded_at DESC, track_path ASC
+        ",
+    )?;
+
+    let downloads = statement
+        .query_map([], |row| {
+            Ok(OfflineDownloadEntry {
+                track_path: row.get::<_, String>(0)?,
+                local_path: row.get::<_, String>(1)?,
+                content_type: row.get::<_, Option<String>>(2)?,
+                file_size: row.get::<_, Option<i64>>(3)?.map(|value| value.max(0) as u64),
+                downloaded_at: row.get::<_, String>(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)?;
+
+    Ok(downloads)
+}
+
+pub fn get_offline_download(db_path: &Path, track_path: &str) -> Result<Option<OfflineDownloadEntry>> {
+    let connection = Connection::open(db_path)?;
+    connection
+        .query_row(
+            "
+            SELECT track_path, local_path, content_type, file_size, downloaded_at
+            FROM offline_downloads
+            WHERE track_path = ?1
+            ",
+            params![track_path],
+            |row| {
+                Ok(OfflineDownloadEntry {
+                    track_path: row.get::<_, String>(0)?,
+                    local_path: row.get::<_, String>(1)?,
+                    content_type: row.get::<_, Option<String>>(2)?,
+                    file_size: row.get::<_, Option<i64>>(3)?.map(|value| value.max(0) as u64),
+                    downloaded_at: row.get::<_, String>(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+pub fn upsert_offline_download(db_path: &Path, entry: &OfflineDownloadEntry) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "
+        INSERT INTO offline_downloads (
+            track_path,
+            local_path,
+            content_type,
+            file_size,
+            downloaded_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(track_path) DO UPDATE SET
+            local_path = excluded.local_path,
+            content_type = excluded.content_type,
+            file_size = excluded.file_size,
+            downloaded_at = excluded.downloaded_at
+        ",
+        params![
+            entry.track_path,
+            entry.local_path,
+            entry.content_type,
+            entry.file_size.map(|value| value as i64),
+            entry.downloaded_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn remove_offline_download(db_path: &Path, track_path: &str) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "DELETE FROM offline_downloads WHERE track_path = ?1",
+        params![track_path],
+    )?;
+    Ok(())
+}
+
 pub fn current_timestamp(db_path: &Path) -> Result<String> {
     let connection = Connection::open(db_path)?;
     connection
@@ -1551,7 +1653,7 @@ pub fn load_playlists(db_path: &Path) -> Result<Vec<SavedPlaylist>> {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         playlists.push(SavedPlaylist {
-            id,
+            id: id.to_string(),
             name,
             track_paths,
             rule,
@@ -1594,11 +1696,12 @@ pub fn create_playlist(
     load_playlists(db_path)
 }
 
-pub fn rename_playlist(db_path: &Path, playlist_id: i64, name: &str) -> Result<Vec<SavedPlaylist>> {
+pub fn rename_playlist(db_path: &Path, playlist_id: &str, name: &str) -> Result<Vec<SavedPlaylist>> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         bail!("Playlist name cannot be empty");
     }
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
 
     let connection = Connection::open(db_path)?;
     let updated = connection.execute(
@@ -1611,7 +1714,8 @@ pub fn rename_playlist(db_path: &Path, playlist_id: i64, name: &str) -> Result<V
     load_playlists(db_path)
 }
 
-pub fn delete_playlist(db_path: &Path, playlist_id: i64) -> Result<Vec<SavedPlaylist>> {
+pub fn delete_playlist(db_path: &Path, playlist_id: &str) -> Result<Vec<SavedPlaylist>> {
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     transaction.execute(
@@ -1633,9 +1737,10 @@ pub fn delete_playlist(db_path: &Path, playlist_id: i64) -> Result<Vec<SavedPlay
 
 pub fn append_tracks_to_playlist(
     db_path: &Path,
-    playlist_id: i64,
+    playlist_id: &str,
     track_paths: &[String],
 ) -> Result<Vec<SavedPlaylist>> {
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
@@ -1652,9 +1757,10 @@ pub fn append_tracks_to_playlist(
 
 pub fn replace_playlist_tracks(
     db_path: &Path,
-    playlist_id: i64,
+    playlist_id: &str,
     track_paths: &[String],
 ) -> Result<Vec<SavedPlaylist>> {
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
@@ -1665,9 +1771,10 @@ pub fn replace_playlist_tracks(
 
 pub fn remove_playlist_track(
     db_path: &Path,
-    playlist_id: i64,
+    playlist_id: &str,
     index: usize,
 ) -> Result<Vec<SavedPlaylist>> {
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
@@ -1683,10 +1790,11 @@ pub fn remove_playlist_track(
 
 pub fn move_playlist_track(
     db_path: &Path,
-    playlist_id: i64,
+    playlist_id: &str,
     from_index: usize,
     to_index: usize,
 ) -> Result<Vec<SavedPlaylist>> {
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
@@ -1786,7 +1894,7 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
     let tracks = statement
         .query_map([], |row| {
             Ok(Track {
-                id: row.get(0)?,
+                id: row.get::<_, i64>(0)?.to_string(),
                 path: row.get(1)?,
                 title: row.get(2)?,
                 artist: row.get(3)?,

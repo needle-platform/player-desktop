@@ -11,6 +11,7 @@ import {
   appendQueue,
   bootstrapApp,
   createPlaylist,
+  downloadOfflineTracks,
   getNeedleBackendStatus,
   deletePlaylist,
   getPlaybackState,
@@ -33,6 +34,7 @@ import {
   resumePlayback,
   runMaintenance,
   migrateDesktopStateToNeedleBackend,
+  listOfflineDownloads,
   setAudioDevice as setPlaybackAudioDevice,
   saveAlbumGenre as persistAlbumGenre,
   saveTrackBpm as persistTrackBpmValue,
@@ -43,6 +45,7 @@ import {
   setRepeatMode as tauriSetRepeatMode,
   saveSettings,
   savePlaybackSession,
+  removeOfflineTracks,
   runLoudnessAnalysis,
   scanLibrary,
   seekPlayback,
@@ -60,6 +63,8 @@ import type {
   MetadataEditMode,
   NeedleBackendMigrationReport,
   NeedleBackendStatus,
+  OfflineDownloadEntry,
+  OfflineDownloadProgress,
   PlaybackSession,
   RepeatMode,
   RuntimeInfo,
@@ -89,7 +94,7 @@ import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
 import vinylRipBadgeIcon from './assets/vinyl-rip-badge.svg';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'artist' | 'settings';
-type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: number };
+type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: string };
 type TrackSortOption = 'title' | 'artist' | 'album' | 'recent' | 'plays' | 'rating' | 'duration';
 type AlbumSortOption = 'album' | 'artist' | 'recent' | 'tracks';
 type ArtistSortOption = 'artist' | 'tracks' | 'recent';
@@ -179,6 +184,7 @@ type WindowRestoreState = {
   resizable: boolean;
 };
 type NotificationTone = 'info' | 'success' | 'warning' | 'error';
+type SettingsTab = 'appearance' | 'playback' | 'library';
 
 const inferNotificationTone = (message: string): NotificationTone => {
   const normalized = message.trim().toLowerCase();
@@ -250,6 +256,46 @@ const notificationToneIcon = (tone: NotificationTone): string => {
   return 'i';
 };
 
+const normalizeNeedleBackendPlaybackPath = (
+  value: string | null,
+  settings: AppSettings | null | undefined,
+  offlinePathMap?: Map<string, string>,
+) => {
+  if (!value) {
+    return null;
+  }
+
+  if (value.startsWith('needle-track:')) {
+    return value;
+  }
+
+  if (settings?.library_source !== 'needle_backend') {
+    return value;
+  }
+
+  const offlineTrackPath = offlinePathMap?.get(value);
+  if (offlineTrackPath) {
+    return offlineTrackPath;
+  }
+
+  const backendUrl = settings.needle_backend_url?.trim().replace(/\/+$/, '');
+  if (!backendUrl) {
+    return value;
+  }
+
+  const streamPrefix = `${backendUrl}/api/stream/`;
+  if (!value.startsWith(streamPrefix)) {
+    return value;
+  }
+
+  const encodedId = value.slice(streamPrefix.length).split(/[?#]/, 1)[0];
+  if (!encodedId) {
+    return value;
+  }
+
+  return `needle-track:${decodeURIComponent(encodedId)}`;
+};
+
 const isPlaybackStatusMessage = (message: string): boolean => {
   const normalized = message.trim().toLowerCase();
   if (!normalized) {
@@ -295,6 +341,23 @@ const formatMaintenanceTimestamp = (value: string | null | undefined): string | 
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(date);
+};
+
+const formatFileSize = (value: number | null | undefined): string => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return '—';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const decimals = size >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${size.toFixed(decimals)} ${units[unitIndex]}`;
 };
 
 const greeting = (): string => {
@@ -990,6 +1053,16 @@ function HeartIcon({ filled }: { filled: boolean }) {
   );
 }
 
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 4v10" />
+      <path d="m8 10 4 4 4-4" />
+      <path d="M5 19h14" />
+    </svg>
+  );
+}
+
 function TrackFavoriteControl({
   track,
   disabled,
@@ -1058,6 +1131,43 @@ function TrackRatingControl({
         );
       })}
     </div>
+  );
+}
+
+function TrackOfflineControl({
+  track,
+  downloaded,
+  disabled,
+  onToggleOffline,
+}: {
+  track: Track;
+  downloaded: boolean;
+  disabled?: boolean;
+  onToggleOffline: (track: Track, shouldDownload: boolean) => void;
+}) {
+  const nextDownloadState = !downloaded;
+  return (
+    <button
+      className={`row-icon-button track-offline ${downloaded ? 'is-active' : ''}`}
+      type="button"
+      disabled={disabled}
+      title={
+        nextDownloadState
+          ? `Download ${track.title} for offline playback`
+          : `Remove offline copy of ${track.title}`
+      }
+      aria-label={
+        nextDownloadState
+          ? `Download ${track.title} for offline playback`
+          : `Remove offline copy of ${track.title}`
+      }
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggleOffline(track, nextDownloadState);
+      }}
+    >
+      <DownloadIcon />
+    </button>
   );
 }
 
@@ -1344,6 +1454,9 @@ function App() {
   const [needleBackendStatus, setNeedleBackendStatus] = useState<NeedleBackendStatus | null>(null);
   const [needleBackendMigrationReport, setNeedleBackendMigrationReport] =
     useState<NeedleBackendMigrationReport | null>(null);
+  const [offlineDownloads, setOfflineDownloads] = useState<OfflineDownloadEntry[]>([]);
+  const [offlineDownloadProgress, setOfflineDownloadProgress] = useState<OfflineDownloadProgress | null>(null);
+  const [pendingOfflinePaths, setPendingOfflinePaths] = useState<string[]>([]);
   const [needleBackendFeedback, setNeedleBackendFeedback] = useState<{
     tone: 'info' | 'success' | 'warning' | 'error';
     message: string;
@@ -1362,9 +1475,18 @@ function App() {
   const effectiveTheme: 'light' | 'dark' = isMiniPlayer ? 'dark' : resolvedTheme;
   const customAccentColor = useMemo(() => normalizeAccentColor(data?.settings.accent_color ?? null), [data?.settings.accent_color]);
   const metadataEditMode: MetadataEditMode = data?.settings.metadata_edit_mode ?? 'needle_only';
+  const isNeedleBackendMode = data?.settings.library_source === 'needle_backend';
   const accentTheme = useMemo(
     () => (customAccentColor ? deriveAccentTheme(customAccentColor, effectiveTheme) : null),
     [customAccentColor, effectiveTheme],
+  );
+  const offlineDownloadByTrackPath = useMemo(
+    () => new Map(offlineDownloads.map((entry) => [entry.track_path, entry])),
+    [offlineDownloads],
+  );
+  const offlineDownloadByLocalPath = useMemo(
+    () => new Map(offlineDownloads.map((entry) => [entry.local_path, entry.track_path])),
+    [offlineDownloads],
   );
   const currentAccentColor = accentTheme?.accent ?? defaultAccentForTheme(effectiveTheme);
   const currentTracksPageSize = normalizeTracksPageSize(data?.settings.tracks_page_size);
@@ -1549,6 +1671,42 @@ function App() {
       setPendingTrackRatings((current) => current.filter((path) => path !== track.path));
     }
   };
+  const setOfflineCopiesByPaths = async (trackPaths: string[], shouldDownload: boolean, label: string) => {
+    const normalizedPaths = uniqueSorted(trackPaths.filter(Boolean));
+    if (normalizedPaths.length === 0) {
+      return;
+    }
+
+    setPendingOfflinePaths((current) => uniqueSorted(current.concat(normalizedPaths)));
+
+    try {
+      const next = shouldDownload
+        ? await downloadOfflineTracks(normalizedPaths)
+        : await removeOfflineTracks(normalizedPaths);
+      setOfflineDownloads(next);
+      setStatus(
+        shouldDownload
+          ? `Downloaded for offline playback · ${label}`
+          : normalizedPaths.length === 1
+            ? `Removed offline copy · ${label}`
+            : `Removed offline copies · ${label}`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingOfflinePaths((current) => current.filter((path) => !normalizedPaths.includes(path)));
+    }
+  };
+  const toggleTrackOffline = async (track: Track, shouldDownload: boolean) => {
+    await setOfflineCopiesByPaths([track.path], shouldDownload, track.title);
+  };
+  const toggleTracksOffline = async (tracks: Track[], shouldDownload: boolean, label: string) => {
+    const trackPaths = uniqueSorted(tracks.map((track) => track.path).filter(Boolean));
+    if (trackPaths.length === 0) {
+      return;
+    }
+    await setOfflineCopiesByPaths(trackPaths, shouldDownload, label);
+  };
   const adjustTrackBpmValue = async (track: Track, adjustment: TrackBpmAdjustment) => {
     setPendingTrackBpms((current) =>
       current.includes(track.path) ? current : current.concat(track.path),
@@ -1726,13 +1884,16 @@ function App() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
+    const appSettings = data?.settings ?? null;
+    const offlinePathMap = offlineDownloadByLocalPath;
     void (async () => {
       const dispose = await listen<{ name: string; data: unknown }>(
         'mpv-property',
         (event) => {
           const { name, data } = event.payload;
           if (name === 'path') {
-            const path = typeof data === 'string' ? data : null;
+            const rawPath = typeof data === 'string' ? data : null;
+            const path = normalizeNeedleBackendPlaybackPath(rawPath, appSettings, offlinePathMap);
             backendPathRef.current = path;
             backendIdleRef.current = path == null;
             setCurrentPath(path);
@@ -1821,14 +1982,15 @@ function App() {
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [queuePaths]);
+  }, [data, offlineDownloadByLocalPath, queuePaths]);
 
   useEffect(() => {
     void (async () => {
       try {
-        const [bootstrapResult, runtimeInfoResult] = await Promise.allSettled([
+        const [bootstrapResult, runtimeInfoResult, offlineDownloadsResult] = await Promise.allSettled([
           bootstrapApp(),
           getRuntimeInfo(),
+          listOfflineDownloads(),
         ]);
 
         if (bootstrapResult.status === 'rejected') {
@@ -1838,6 +2000,9 @@ function App() {
         setData(bootstrapResult.value);
         if (runtimeInfoResult.status === 'fulfilled') {
           setRuntimeInfo(runtimeInfoResult.value);
+        }
+        if (offlineDownloadsResult.status === 'fulfilled') {
+          setOfflineDownloads(offlineDownloadsResult.value);
         }
       } catch (error) {
         setStatus(error instanceof Error ? error.message : String(error));
@@ -1889,6 +2054,31 @@ function App() {
         }
 
         setMaintenanceLog((current) => [...current.slice(-79), formatMaintenanceLogLine(message)]);
+      });
+      if (cancelled) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const dispose = await listen<OfflineDownloadProgress>('offline-download-progress', (event) => {
+        const payload = event.payload;
+        if (!payload || typeof payload !== 'object') {
+          return;
+        }
+
+        setOfflineDownloadProgress(payload);
       });
       if (cancelled) {
         dispose();
@@ -2198,6 +2388,42 @@ function App() {
   );
   const bpmAuditTrackPathSet = useMemo(() => new Set(bpmAuditTrackPaths), [bpmAuditTrackPaths]);
   const trackByPath = useMemo(() => new Map(allTracks.map((track) => [track.path, track])), [allTracks]);
+  const offlineDownloadCurrentLabel = useMemo(() => {
+    const currentPath = offlineDownloadProgress?.current_track_path;
+    if (!currentPath) {
+      return null;
+    }
+    return trackByPath.get(currentPath)?.title ?? currentPath.split('/').pop() ?? currentPath;
+  }, [offlineDownloadProgress?.current_track_path, trackByPath]);
+  const offlineTrackDetails = useMemo(
+    () =>
+      Object.fromEntries(
+        offlineDownloads.map((entry) => {
+          const track = trackByPath.get(entry.track_path);
+          return [
+            entry.track_path,
+            {
+              title: track?.title ?? entry.track_path.split('/').pop() ?? entry.track_path,
+              subtitle: track?.artist
+                ? `${track.artist}${track.album ? ` — ${track.album}` : ''}`
+                : entry.track_path,
+            },
+          ];
+        }),
+      ),
+    [offlineDownloads, trackByPath],
+  );
+  const removeOfflineDownloadByPath = async (trackPath: string) => {
+    const label = trackByPath.get(trackPath)?.title ?? 'Selected track';
+    await setOfflineCopiesByPaths([trackPath], false, label);
+  };
+  const clearOfflineDownloads = async () => {
+    const trackPaths = offlineDownloads.map((entry) => entry.track_path);
+    if (trackPaths.length === 0) {
+      return;
+    }
+    await setOfflineCopiesByPaths(trackPaths, false, 'offline cache');
+  };
 
   const restoreSession = async (
     session: PlaybackSession,
@@ -2868,16 +3094,59 @@ function App() {
 
   const updateSettings = async (next: AppSettings) => {
     if (!data) return;
+    const previousSettings = data.settings;
     const normalizedSettings = {
       ...next,
       accent_color: normalizeAccentColor(next.accent_color),
       tracks_page_size: normalizeTracksPageSize(next.tracks_page_size),
     };
+    const librarySourceChanged = previousSettings.library_source !== normalizedSettings.library_source;
     setData({ ...data, settings: normalizedSettings });
     try {
       await saveSettings(normalizedSettings);
+      if (librarySourceChanged) {
+        const backendUrl = normalizedSettings.needle_backend_url?.trim() ?? '';
+        if (normalizedSettings.library_source === 'needle_backend' && backendUrl.length === 0) {
+          setStatus('Needle backend selected · enter the backend URL to connect this app');
+          return;
+        }
+        setBusy(
+          normalizedSettings.library_source === 'needle_backend'
+            ? 'Connecting to Needle backend…'
+            : 'Loading local library…',
+        );
+        const [nextBootstrap, nextOfflineDownloads] = await Promise.all([
+          bootstrapApp(),
+          listOfflineDownloads(),
+        ]);
+        setData(nextBootstrap);
+        setOfflineDownloads(nextOfflineDownloads);
+        setStatus(
+          normalizedSettings.library_source === 'needle_backend'
+            ? `Connected to Needle backend · ${nextBootstrap.library.track_count} tracks`
+            : `Switched to local library · ${nextBootstrap.library.track_count} tracks`,
+        );
+      }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (librarySourceChanged && normalizedSettings.library_source !== 'needle_backend') {
+        setData({ ...data, settings: previousSettings });
+      }
+      if (
+        librarySourceChanged &&
+        normalizedSettings.library_source === 'needle_backend' &&
+        normalizedSettings.needle_backend_url?.trim()
+      ) {
+        setNeedleBackendFeedback({
+          tone: 'error',
+          message: errorMessage,
+        });
+      }
+      setStatus(errorMessage);
+    } finally {
+      if (librarySourceChanged) {
+        setBusy(null);
+      }
     }
   };
 
@@ -2980,9 +3249,20 @@ function App() {
           ? `Connected to Needle backend at ${backendStatus.url}`
           : 'Backend responded, but local Needle library mode is not enabled there yet.',
       });
+      if (data.settings.library_source === 'needle_backend' && backendStatus.enabled) {
+        setBusy('Loading Needle backend library…');
+        const [nextBootstrap, nextOfflineDownloads] = await Promise.all([
+          bootstrapApp(),
+          listOfflineDownloads(),
+        ]);
+        setData(nextBootstrap);
+        setOfflineDownloads(nextOfflineDownloads);
+      }
       setStatus(
         backendStatus.enabled
-          ? `Needle backend reachable · ${backendStatus.track_count ?? 0} tracks`
+          ? data.settings.library_source === 'needle_backend'
+            ? `Loaded Needle backend library · ${backendStatus.track_count ?? 0} tracks`
+            : `Needle backend reachable · ${backendStatus.track_count ?? 0} tracks`
           : 'Needle backend reachable, but local library mode is not enabled there yet',
       );
     } catch (error) {
@@ -2995,6 +3275,7 @@ function App() {
       setStatus(message);
     } finally {
       setIsNeedleBackendStatusLoading(false);
+      setBusy(null);
     }
   };
 
@@ -3090,7 +3371,7 @@ function App() {
       setData(next);
       const created = next.playlists
         .filter((playlist) => playlist.name === name)
-        .sort((a, b) => b.id - a.id)[0];
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id.localeCompare(a.id))[0];
       if (created) {
         setSelectedPlaylist({ kind: 'manual', id: created.id });
         setView('tracks');
@@ -3390,7 +3671,7 @@ function App() {
     }
   };
 
-  const moveManualPlaylistTrack = async (playlistId: number, fromIndex: number, toIndex: number) => {
+  const moveManualPlaylistTrack = async (playlistId: string, fromIndex: number, toIndex: number) => {
     try {
       const next = await movePlaylistTrack(playlistId, fromIndex, toIndex);
       setData(next);
@@ -3400,7 +3681,7 @@ function App() {
     }
   };
 
-  const removeManualPlaylistTrack = async (playlistId: number, index: number) => {
+  const removeManualPlaylistTrack = async (playlistId: string, index: number) => {
     try {
       const next = await removePlaylistTrack(playlistId, index);
       setData(next);
@@ -4536,6 +4817,10 @@ function App() {
             onClearSmartPlaylistGenres={() => setSelectedSmartPlaylistGenres([])}
             onToggleFavorite={updateTrackFavorite}
             pendingFavoritePaths={pendingTrackFavorites}
+            showOfflineControls={isNeedleBackendMode}
+            isOfflineAvailable={(track) => offlineDownloadByTrackPath.has(track.path)}
+            pendingOfflinePaths={pendingOfflinePaths}
+            onToggleOffline={(track, shouldDownload) => void toggleTrackOffline(track, shouldDownload)}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
             metadataEditMode={metadataEditMode}
@@ -4653,6 +4938,18 @@ function App() {
                 label: track.title,
                 suggestedName: `${selectedAlbumSummary.album} picks`,
               })
+            }
+            showOfflineActions={isNeedleBackendMode}
+            areAllTracksOffline={tracksForAlbum(selectedAlbum).every((track) => offlineDownloadByTrackPath.has(track.path))}
+            hasAnyOfflineTracks={tracksForAlbum(selectedAlbum).some((track) => offlineDownloadByTrackPath.has(track.path))}
+            isOfflineAvailable={(track) => offlineDownloadByTrackPath.has(track.path)}
+            pendingOfflinePaths={pendingOfflinePaths}
+            onToggleOfflineTrack={(track, shouldDownload) => void toggleTrackOffline(track, shouldDownload)}
+            onDownloadAlbumOffline={() =>
+              void toggleTracksOffline(tracksForAlbum(selectedAlbum), true, selectedAlbumSummary.album)
+            }
+            onRemoveAlbumOffline={() =>
+              void toggleTracksOffline(tracksForAlbum(selectedAlbum), false, selectedAlbumSummary.album)
             }
             onToggleFavorite={updateTrackFavorite}
             pendingFavoritePaths={pendingTrackFavorites}
@@ -4818,6 +5115,12 @@ function App() {
             backendMigrationBusy={isNeedleBackendMigrationRunning}
             onCheckBackend={checkNeedleBackend}
             onMigrateBackend={migrateNeedleBackend}
+            offlineDownloads={offlineDownloads}
+            offlineDownloadProgress={offlineDownloadProgress}
+            offlineDownloadCurrentLabel={offlineDownloadCurrentLabel}
+            offlineTrackDetails={offlineTrackDetails}
+            onRemoveOfflineTrack={removeOfflineDownloadByPath}
+            onClearOfflineDownloads={clearOfflineDownloads}
             backendFeedback={needleBackendFeedback}
             bpmAuditItems={bpmAuditItems}
             onAdjustBpm={adjustTrackBpmValue}
@@ -6302,6 +6605,10 @@ interface TracksViewProps {
   onClearSmartPlaylistGenres?: () => void;
   onToggleFavorite: (track: Track, favorite: boolean) => void;
   pendingFavoritePaths: string[];
+  showOfflineControls?: boolean;
+  isOfflineAvailable?: (track: Track) => boolean;
+  pendingOfflinePaths: string[];
+  onToggleOffline?: (track: Track, shouldDownload: boolean) => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
   metadataEditMode: MetadataEditMode;
@@ -6372,6 +6679,10 @@ function TracksView({
   onClearSmartPlaylistGenres,
   onToggleFavorite,
   pendingFavoritePaths,
+  showOfflineControls = false,
+  isOfflineAvailable,
+  pendingOfflinePaths,
+  onToggleOffline,
   onSetRating,
   pendingRatingPaths,
   metadataEditMode,
@@ -6658,6 +6969,8 @@ function TracksView({
                 typeof playlistSourceTotalCount === 'number'
                   ? playlistSourceTotalCount - 1
                   : Math.max(totalTracks - 1, 0);
+              const offlineAvailable = isOfflineAvailable?.(track) ?? false;
+              const offlineIsPending = pendingOfflinePaths.includes(track.path);
               const favoriteIsPending = pendingFavoritePaths.includes(track.path);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
               const bpmIsPending = pendingBpmPaths.includes(track.path);
@@ -6723,6 +7036,14 @@ function TracksView({
                       disabled={favoriteIsPending}
                       onToggleFavorite={onToggleFavorite}
                     />
+                    {showOfflineControls && onToggleOffline && (
+                      <TrackOfflineControl
+                        track={track}
+                        downloaded={offlineAvailable}
+                        disabled={offlineIsPending}
+                        onToggleOffline={onToggleOffline}
+                      />
+                    )}
                     <TrackRatingControl
                       track={track}
                       disabled={ratingIsPending}
@@ -6837,6 +7158,14 @@ interface AlbumDetailViewProps {
   onAddAlbumToQueue: () => void;
   onAddAlbumToPlaylist: () => void;
   onAddTrackToPlaylist: (track: Track) => void;
+  showOfflineActions?: boolean;
+  areAllTracksOffline?: boolean;
+  hasAnyOfflineTracks?: boolean;
+  isOfflineAvailable: (track: Track) => boolean;
+  pendingOfflinePaths: string[];
+  onToggleOfflineTrack: (track: Track, shouldDownload: boolean) => void;
+  onDownloadAlbumOffline: () => void;
+  onRemoveAlbumOffline: () => void;
   onToggleFavorite: (track: Track, favorite: boolean) => void;
   pendingFavoritePaths: string[];
   onSetRating: (track: Track, rating: number | null) => void;
@@ -6871,6 +7200,14 @@ function AlbumDetailView({
   onAddAlbumToQueue,
   onAddAlbumToPlaylist,
   onAddTrackToPlaylist,
+  showOfflineActions = false,
+  areAllTracksOffline = false,
+  hasAnyOfflineTracks = false,
+  isOfflineAvailable,
+  pendingOfflinePaths,
+  onToggleOfflineTrack,
+  onDownloadAlbumOffline,
+  onRemoveAlbumOffline,
   onToggleFavorite,
   pendingFavoritePaths,
   onSetRating,
@@ -7111,12 +7448,25 @@ function AlbumDetailView({
             <button className="ghost-button" onClick={onAddAlbumToQueue}>
               + Add to queue
             </button>
-            <button className="ghost-button" onClick={onAddAlbumToPlaylist}>
+                  <button className="ghost-button" onClick={onAddAlbumToPlaylist}>
               + Add to playlist
             </button>
             <button className="ghost-button" onClick={onShuffleAlbum}>
               ⤮ Shuffle
             </button>
+            {showOfflineActions && (
+              <button
+                className="ghost-button"
+                onClick={areAllTracksOffline ? onRemoveAlbumOffline : onDownloadAlbumOffline}
+                disabled={pendingOfflinePaths.some((path) => albumTracks.some((track) => track.path === path))}
+              >
+                {areAllTracksOffline
+                  ? 'Remove offline copy'
+                  : hasAnyOfflineTracks
+                    ? 'Finish offline download'
+                    : '↓ Download offline'}
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -7165,7 +7515,9 @@ function AlbumDetailView({
                 {tracks.map((t) => {
                   const isCurrent = currentPath === t.path;
                   const isQueued = queuePaths.includes(t.path);
+                  const offlineAvailable = isOfflineAvailable(t);
                   const favoriteIsPending = pendingFavoritePaths.includes(t.path);
+                  const offlineIsPending = pendingOfflinePaths.includes(t.path);
                   const ratingIsPending = pendingRatingPaths.includes(t.path);
                   const bpmIsPending = pendingBpmPaths.includes(t.path);
                   const techDetails = formatTrackTechDetails(t);
@@ -7214,6 +7566,14 @@ function AlbumDetailView({
                           disabled={favoriteIsPending}
                           onToggleFavorite={onToggleFavorite}
                         />
+                        {showOfflineActions && (
+                          <TrackOfflineControl
+                            track={t}
+                            downloaded={Boolean(offlineAvailable)}
+                            disabled={offlineIsPending}
+                            onToggleOffline={onToggleOfflineTrack}
+                          />
+                        )}
                         <TrackRatingControl
                           track={t}
                           disabled={ratingIsPending}
@@ -8142,6 +8502,12 @@ interface SettingsViewProps {
   backendMigrationBusy: boolean;
   onCheckBackend: () => void;
   onMigrateBackend: () => void;
+  offlineDownloads: OfflineDownloadEntry[];
+  offlineDownloadProgress: OfflineDownloadProgress | null;
+  offlineDownloadCurrentLabel: string | null;
+  offlineTrackDetails: Record<string, { title: string; subtitle: string }>;
+  onRemoveOfflineTrack: (trackPath: string) => Promise<void>;
+  onClearOfflineDownloads: () => Promise<void>;
   backendFeedback: {
     tone: 'info' | 'success' | 'warning' | 'error';
     message: string;
@@ -8184,6 +8550,12 @@ function SettingsView({
   backendMigrationBusy,
   onCheckBackend,
   onMigrateBackend,
+  offlineDownloads,
+  offlineDownloadProgress,
+  offlineDownloadCurrentLabel,
+  offlineTrackDetails,
+  onRemoveOfflineTrack,
+  onClearOfflineDownloads,
   backendFeedback,
   bpmAuditItems,
   onAdjustBpm,
@@ -8204,6 +8576,15 @@ function SettingsView({
   const canCheckBackend = backendUrlValue.trim().length > 0 && !backendStatusBusy;
   const canMigrateBackend =
     backendUrlValue.trim().length > 0 && backendStatus?.enabled === true && !backendMigrationBusy && !backendStatusBusy;
+  const [activeTab, setActiveTab] = useState<SettingsTab>('library');
+  const shouldShowOfflineCachePanel =
+    settings.library_source === 'needle_backend' || offlineDownloads.length > 0 || offlineDownloadProgress != null;
+  const totalOfflineBytes = offlineDownloads.reduce((sum, entry) => sum + (entry.file_size ?? 0), 0);
+  const offlineDownloadProgressRatio = offlineDownloadProgress?.total_tracks
+    ? Math.min(1, offlineDownloadProgress.completed_tracks / offlineDownloadProgress.total_tracks)
+    : 0;
+  const offlineDownloadProgressPercent = Math.round(offlineDownloadProgressRatio * 100);
+  const offlineOperationBusy = offlineDownloadProgress?.status === 'running';
   const lastMaintenanceLabel = formatMaintenanceTimestamp(settings.last_maintenance_at);
   const lastLoudnessAnalysisLabel = formatMaintenanceTimestamp(settings.last_loudness_analysis_at);
   const [manualBandsDraft, setManualBandsDraft] = useState(() =>
@@ -8270,6 +8651,23 @@ function SettingsView({
   const hasPreviousBpmAuditReviewItem = currentBpmAuditReviewIndex > 0;
   const hasNextBpmAuditReviewItem =
     currentBpmAuditReviewIndex >= 0 && currentBpmAuditReviewIndex < bpmAuditItems.length - 1;
+  const settingsTabs: Array<{ id: SettingsTab; label: string; description: string }> = [
+    {
+      id: 'library',
+      label: 'Library',
+      description: 'Backend mode, offline cache, metadata, and maintenance',
+    },
+    {
+      id: 'playback',
+      label: 'Playback',
+      description: 'Equalizer, loudness analysis, and listening controls',
+    },
+    {
+      id: 'appearance',
+      label: 'Appearance',
+      description: 'Theme and accent color',
+    },
+  ];
 
   useEffect(() => {
     setManualBandsDraft(normalizeEqualizerBands(settings.equalizer_bands));
@@ -8438,6 +8836,23 @@ function SettingsView({
       </header>
 
       <div className="settings">
+        <div className="settings-tabs" role="tablist" aria-label="Settings categories">
+          {settingsTabs.map((tab) => (
+            <button
+              key={tab.id}
+              className={`settings-tab ${activeTab === tab.id ? 'is-active' : ''}`}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              <span className="settings-tab-label">{tab.label}</span>
+              <span className="settings-tab-copy">{tab.description}</span>
+            </button>
+          ))}
+        </div>
+
+        {activeTab === 'appearance' && (
         <section className="settings-section">
           <div className="settings-section-head">
             <h2>Appearance</h2>
@@ -8496,7 +8911,10 @@ function SettingsView({
             </div>
           </div>
         </section>
+        )}
 
+        {activeTab === 'playback' && (
+        <>
         <section className="settings-section">
           <div className="settings-section-head">
             <h2>Equalizer</h2>
@@ -8578,7 +8996,11 @@ function SettingsView({
             </div>
           </div>
         </section>
+        </>
+        )}
 
+        {activeTab === 'library' && (
+        <>
         <section className="settings-section">
           <div className="settings-section-head">
             <h2>Metadata edits</h2>
@@ -8830,6 +9252,122 @@ function SettingsView({
                   )}
                 </div>
               )}
+            </div>
+          )}
+          {shouldShowOfflineCachePanel && (
+            <div className="settings-row settings-row-block">
+              <div className="settings-row-copy">
+                <label className="settings-label">Offline cache</label>
+                <p className="settings-hint">
+                  Keep selected backend tracks on this computer for offline playback. Needle will prefer these local copies whenever they exist.
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <div className="settings-backend-status settings-offline-cache" role="status">
+                  <div className="settings-backend-status-head">
+                    <strong>{offlineDownloads.length > 0 ? 'Downloads ready' : 'No offline downloads yet'}</strong>
+                    <span>{settings.library_source === 'needle_backend' ? 'Backend-mode media cache' : 'Cached from Needle backend'}</span>
+                  </div>
+                  <div className="settings-backend-stats">
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Cached tracks</span>
+                      <strong>{offlineDownloads.length.toLocaleString()}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Storage used</span>
+                      <strong>{formatFileSize(totalOfflineBytes)}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Latest offline copy</span>
+                      <strong>
+                        {formatMaintenanceTimestamp(offlineDownloads[0]?.downloaded_at) ?? '—'}
+                      </strong>
+                    </div>
+                  </div>
+                  {offlineDownloadProgress && (
+                    <div className="settings-offline-progress">
+                      <div className="settings-offline-progress-head">
+                        <strong>
+                          {offlineDownloadProgress.operation === 'download' ? 'Offline download' : 'Offline cleanup'}
+                          {' '}
+                          {offlineDownloadProgress.status === 'running'
+                            ? 'in progress'
+                            : offlineDownloadProgress.status === 'completed'
+                              ? 'complete'
+                              : 'interrupted'}
+                        </strong>
+                        <span>
+                          {offlineDownloadProgress.completed_tracks.toLocaleString()} /{' '}
+                          {offlineDownloadProgress.total_tracks.toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="settings-offline-progress-bar" aria-hidden="true">
+                        <div
+                          className="settings-offline-progress-bar-fill"
+                          style={{ width: `${offlineDownloadProgressPercent}%` }}
+                        />
+                      </div>
+                      <div className="settings-offline-progress-note">
+                        {offlineDownloadProgress.status === 'error' && offlineDownloadProgress.error_message
+                          ? offlineDownloadProgress.error_message
+                          : offlineDownloadCurrentLabel
+                            ? `${offlineDownloadProgress.operation === 'download' ? 'Current track' : 'Current removal'}: ${offlineDownloadCurrentLabel}`
+                            : offlineDownloadProgress.status === 'completed'
+                              ? 'The latest offline batch finished successfully.'
+                              : 'Needle is processing your offline media selection in the background.'}
+                      </div>
+                    </div>
+                  )}
+                  <div className="settings-backend-actions">
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={() => void onClearOfflineDownloads()}
+                      disabled={offlineDownloads.length === 0 || offlineOperationBusy}
+                    >
+                      Remove all offline copies
+                    </button>
+                  </div>
+                  {offlineDownloads.length > 0 ? (
+                    <>
+                      <div className="settings-offline-list">
+                        {offlineDownloads.slice(0, 12).map((entry) => {
+                          const cachedTrack = offlineTrackDetails[entry.track_path];
+                          return (
+                            <div key={entry.track_path} className="settings-offline-item">
+                              <div className="settings-offline-item-copy">
+                                <strong>{cachedTrack?.title ?? entry.track_path.split('/').pop() ?? entry.track_path}</strong>
+                                <span>{cachedTrack?.subtitle ?? entry.track_path}</span>
+                              </div>
+                              <div className="settings-offline-item-meta">
+                                <span>{formatFileSize(entry.file_size)}</span>
+                                <span>{formatMaintenanceTimestamp(entry.downloaded_at) ?? 'Saved locally'}</span>
+                              </div>
+                              <button
+                                className="ghost-button"
+                                type="button"
+                                onClick={() => void onRemoveOfflineTrack(entry.track_path)}
+                                disabled={offlineOperationBusy}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {offlineDownloads.length > 12 && (
+                        <div className="settings-backend-note">
+                          Showing the latest 12 offline copies. Needle is currently caching {offlineDownloads.length.toLocaleString()} tracks on this computer.
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="settings-backend-note">
+                      Download a track or album while using Needle backend mode and it will appear here for quick cleanup.
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )}
           <div className="settings-row settings-row-block">
@@ -9251,7 +9789,10 @@ function SettingsView({
             )}
           </div>
         </section>
+        </>
+        )}
 
+        {activeTab === 'playback' && (
         <section className="settings-section">
           <div className="settings-section-head">
             <h2>Playback</h2>
@@ -9406,6 +9947,7 @@ function SettingsView({
             </div>
           </div>
         </section>
+        )}
       </div>
     </div>
   );

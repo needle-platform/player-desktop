@@ -210,13 +210,28 @@ Maintenance and remove-folder actions only touch the database — your audio fil
 
 ## Backend transition status
 
-Needle now includes the first desktop-side backend transition tools:
+Needle now supports a real desktop `Needle backend` mode in addition to `Local folders`.
 
-- backend URL and health checks in Settings
+What works today:
+
+- backend URL setup and health checks in Settings
 - desktop-to-backend migration for playlists, favourites/history, artist and album cache data, metadata overrides, loudness-analysis rows, and shared playback session state
+- backend-backed library bootstrap in the Tauri app
+- backend-backed playback while still keeping native `mpv` playback on desktop
+- selective offline downloads for backend-mode tracks and albums, with a local cache that playback prefers automatically
+- backend-aware Settings UI with tabbed organization for `Library`, `Playback`, and `Appearance`
 
-The desktop app does **not** yet fully boot its library/runtime from the Needle backend.  
-For now, the backend tooling is there to prepare and validate the migration path while native local-folder playback remains the active day-to-day mode.
+What this means in practice:
+
+- `Local folders` remains the rich local-first mode
+- `Needle backend` now loads the shared library, playlists, favourites, loudness data, and migrated cache data from the backend
+- native desktop listening features such as `mpv`, EQ, mini player, and deeper curation still stay on the desktop side
+
+Still intentionally incomplete:
+
+- backend-mode confidence checks still deserve more real-world use before treating the local desktop DB as fully optional
+- download progress is currently batch-oriented rather than true byte-stream progress
+- broader tag-contract alignment between desktop and backend is still being formalized
 
 ## Auto-playlists & metadata
 
