@@ -489,7 +489,7 @@ pub async fn get_backend_album_info(
 pub fn backend_stream_url(settings: &AppSettings, track_path: &str) -> Result<String> {
     let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
-    Ok(format!("{url}/api/stream/{track_id}?maxBitRate=320"))
+    Ok(format!("{url}/api/stream/{track_id}?format=raw"))
 }
 
 pub async fn download_backend_track(
@@ -500,7 +500,7 @@ pub async fn download_backend_track(
     let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
     let client = http_client()?;
-    let response = backend_request(client.get(format!("{url}/api/stream/{track_id}")), settings)?
+    let response = backend_request(client.get(format!("{url}/api/stream/{track_id}?format=raw")), settings)?
         .send()
         .await
         .with_context(|| format!("Unable to download track data from {url}"))?;

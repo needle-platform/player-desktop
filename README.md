@@ -227,7 +227,7 @@ What this means in practice:
 - `Local folders` remains the rich local-first mode
 - the first Needle backend account is created from the web player on first launch, then reused by desktop clients
 - `Needle backend` now loads the shared library, playlists, favourites, loudness data, and migrated cache data from the backend
-- protected backend APIs use the saved Needle credentials, while native `mpv` playback still pulls direct media and artwork from the backend without a per-track login handshake
+- protected backend APIs use the saved Needle credentials, while native `mpv` playback still pulls direct original media and artwork from the backend without a per-track login handshake
 - native desktop listening features such as `mpv`, EQ, mini player, and deeper curation still stay on the desktop side
 
 Still intentionally incomplete:
