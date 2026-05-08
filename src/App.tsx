@@ -8267,7 +8267,7 @@ interface ArtistAvatarProps {
   size: 'sm' | 'lg' | 'hero';
   urlOverride?: string | null;
   fallbackTrackPath?: string | null;
-  imageMode?: 'default' | 'cache_only';
+  imageMode?: 'default' | 'cache_only' | 'deferred';
   lazyLoad?: boolean;
 }
 
@@ -8282,10 +8282,12 @@ function ArtistAvatar({
   const { ref, isNearViewport } = useNearViewport(lazyLoad);
   const { url } = useArtistImage(urlOverride === undefined ? name : null, {
     cacheOnly: imageMode === 'cache_only',
+    defer: imageMode === 'deferred',
     enabled: isNearViewport,
   });
   const fallbackArtworkUrl = useCoverArt(fallbackTrackPath ?? null, {
-    cacheOnly: imageMode === 'cache_only',
+    cacheOnly: false,
+    defer: imageMode !== 'default',
     enabled: isNearViewport,
   });
   const resolvedUrl = urlOverride ?? url;
@@ -8453,7 +8455,7 @@ function ArtistsView({
                 name={artist.artist}
                 size="lg"
                 fallbackTrackPath={artist.samplePath}
-                imageMode="cache_only"
+                imageMode="deferred"
                 lazyLoad
               />
               <div className="artist-tile-name">{artist.artist}</div>
@@ -8469,7 +8471,7 @@ function ArtistsView({
                 name={artist.artist}
                 size="sm"
                 fallbackTrackPath={artist.samplePath}
-                imageMode="cache_only"
+                imageMode="deferred"
                 lazyLoad
               />
               <div className="list-main">
@@ -10006,7 +10008,7 @@ interface DashboardViewProps {
   tracks: Track[];
   albums: AlbumSummary[];
   recentAlbums: AlbumSummary[];
-  artists: Array<{ artist: string; count: number }>;
+  artists: ArtistSummary[];
   playlistSections: DashboardPlaylistSection[];
   currentTrack: Track | null;
   isPlaying: boolean;
@@ -10330,7 +10332,13 @@ function DashboardView({
                   className="artist-tile"
                   onClick={() => onOpenArtist(a.artist)}
                 >
-                  <ArtistAvatar name={a.artist} size="lg" imageMode="cache_only" lazyLoad />
+                  <ArtistAvatar
+                    name={a.artist}
+                    size="lg"
+                    imageMode="deferred"
+                    fallbackTrackPath={a.samplePath}
+                    lazyLoad
+                  />
                   <div className="artist-tile-name">{a.artist}</div>
                   <div className="artist-tile-meta">{a.count} tracks</div>
                 </button>

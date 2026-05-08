@@ -219,6 +219,8 @@ What works today:
 - backend-backed library bootstrap in the Tauri app
 - authenticated backend API access for bootstrap, playlists, metadata/state sync, and maintenance calls
 - backend-backed playback while still keeping native `mpv` playback on desktop
+- backend-mode album genre editing, including `Needle only` saves and backend file write-back when the server allows it
+- backend-mode MusicBrainz album metadata refresh, using the existing desktop matcher against backend library tracks
 - selective offline downloads for backend-mode tracks and albums, with a local cache that playback prefers automatically
 - backend-aware Settings UI with tabbed organization for `Library`, `Playback`, and `Appearance`
 
@@ -228,6 +230,7 @@ What this means in practice:
 - the first Needle backend account is created from the web player on first launch, then reused by desktop clients
 - `Needle backend` now loads the shared library, playlists, favourites, loudness data, and migrated cache data from the backend
 - protected backend APIs use the saved Needle credentials, while native `mpv` playback still pulls direct original media and artwork from the backend without a per-track login handshake
+- backend mode now keeps desktop-only quality-of-life behavior such as dashboard artist-art fallbacks and shared MusicBrainz cleanup workflows closer to local-mode expectations
 - native desktop listening features such as `mpv`, EQ, mini player, and deeper curation still stay on the desktop side
 
 Still intentionally incomplete:

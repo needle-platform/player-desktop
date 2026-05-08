@@ -926,7 +926,14 @@ fn set_album_primary_genre(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Album-level genre editing is not available in Needle backend mode yet".to_string());
+        return tauri::async_runtime::block_on(backend::save_backend_album_genre(
+            &settings,
+            &album,
+            album_artist.as_deref(),
+            primary_genre.as_deref(),
+            MetadataEditMode::NeedleOnly,
+        ))
+        .map_err(|error| error.to_string());
     }
     db::set_album_primary_genre(
         &state.db_path,
@@ -949,7 +956,14 @@ fn save_album_genre(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Metadata editing is not available in Needle backend mode yet".to_string());
+        return tauri::async_runtime::block_on(backend::save_backend_album_genre(
+            &settings,
+            &album,
+            album_artist.as_deref(),
+            genre.as_deref(),
+            mode,
+        ))
+        .map_err(|error| error.to_string());
     }
     if track_paths.is_empty() {
         return Err("No tracks were provided for this album edit".to_string());
@@ -1619,10 +1633,6 @@ async fn refresh_album_metadata_from_musicbrainz(
     state: tauri::State<'_, AppState>,
 ) -> Result<AlbumMetadataRefreshResult, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
-    if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("MusicBrainz metadata refresh is not available in Needle backend mode yet".to_string());
-    }
-
     let album_trim = album.trim().to_string();
     if album_trim.is_empty() {
         return Err("Album name is required".to_string());
@@ -1632,9 +1642,14 @@ async fn refresh_album_metadata_from_musicbrainz(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    let tracks =
+    let tracks = if matches!(settings.library_source, LibrarySource::NeedleBackend) {
+        backend::load_backend_album_tracks(&settings, &album_trim, album_artist_trim.as_deref())
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
         db::load_album_tracks_for_match(&state.db_path, &album_trim, album_artist_trim.as_deref())
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?
+    };
     if tracks.is_empty() {
         return Err("No tracks found for this album".to_string());
     }
@@ -1648,8 +1663,13 @@ async fn refresh_album_metadata_from_musicbrainz(
     {
         Ok(result) => result,
         Err(error) => {
-            let bootstrap =
-                db::load_bootstrap(&state.db_path).map_err(|db_error| db_error.to_string())?;
+            let bootstrap = if matches!(settings.library_source, LibrarySource::NeedleBackend) {
+                backend::load_backend_bootstrap(settings.clone())
+                    .await
+                    .map_err(|db_error| db_error.to_string())?
+            } else {
+                db::load_bootstrap(&state.db_path).map_err(|db_error| db_error.to_string())?
+            };
             return Ok(AlbumMetadataRefreshResult {
                 status: AlbumMetadataRefreshStatus::Error,
                 album: album_trim,
@@ -1666,11 +1686,35 @@ async fn refresh_album_metadata_from_musicbrainz(
     };
 
     if matches!(result.status, AlbumMetadataRefreshStatus::Matched) {
+        if matches!(settings.library_source, LibrarySource::NeedleBackend) {
+            let bootstrap = backend::apply_backend_metadata_refresh(&settings, &result.overrides)
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(AlbumMetadataRefreshResult {
+                status: result.status,
+                album: album_trim,
+                album_artist: album_artist_trim,
+                updated_track_count: result.overrides.len(),
+                confidence: result.confidence,
+                release_title: result.release_title,
+                release_artist: result.release_artist,
+                source_url: result.source_url,
+                message: result.message,
+                bootstrap,
+            });
+        }
+
         db::replace_track_metadata_overrides(&state.db_path, &result.overrides)
             .map_err(|error| error.to_string())?;
     }
 
-    let bootstrap = db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())?;
+    let bootstrap = if matches!(settings.library_source, LibrarySource::NeedleBackend) {
+        backend::load_backend_bootstrap(settings.clone())
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
+        db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())?
+    };
     Ok(AlbumMetadataRefreshResult {
         status: result.status,
         album: album_trim,
@@ -1704,7 +1748,7 @@ fn album_info_lookup_keys(album: &str, artist: Option<&str>) -> Vec<String> {
 }
 
 #[tauri::command]
-fn get_cover_art(
+async fn get_cover_art(
     track_path: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<cover::CoverArt>, String> {
@@ -1712,11 +1756,9 @@ fn get_cover_art(
     if matches!(settings.library_source, LibrarySource::NeedleBackend)
         && backend::is_backend_track_path(&track_path)
     {
-        return tauri::async_runtime::block_on(backend::get_backend_cover_art(
-            &settings,
-            &track_path,
-        ))
-        .map_err(|error| error.to_string());
+        return backend::get_backend_cover_art(&settings, &track_path)
+            .await
+            .map_err(|error| error.to_string());
     }
 
     let path = Path::new(&track_path);

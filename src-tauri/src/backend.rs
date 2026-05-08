@@ -9,8 +9,9 @@ use crate::{
     album, artist, cover, db,
     models::{
         AppSettings, BootstrapPayload, DesktopStateImportPayload, ImportedDesktopPlaybackSession,
-        LibraryData, NeedleBackendImportSummary, NeedleBackendMigrationReport,
+        LibraryData, MetadataEditMode, NeedleBackendImportSummary, NeedleBackendMigrationReport,
         NeedleBackendStatus, OfflineDownloadEntry, PlaybackSession, RootPathMapping, SavedPlaylist,
+        Track, TrackMetadataOverride,
     },
 };
 
@@ -106,13 +107,40 @@ struct RawSubsonicAlbum {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawAlbumDetailPayload {
+    album: RawSubsonicAlbumDetail,
     info: Option<RawAlbumInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawSubsonicAlbumDetail {
+    song: Vec<RawSubsonicTrack>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawAlbumInfo {
     notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawSubsonicTrack {
+    id: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    duration: Option<f64>,
+    disc_number: Option<i64>,
+    track: Option<i64>,
+    bpm: Option<i64>,
+    bpm_overridden: Option<bool>,
+    genre: Option<String>,
+    primary_genre: Option<String>,
+    is_vinyl_rip: Option<bool>,
+    year: Option<i64>,
+    suffix: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +166,40 @@ struct RawRatingPayload<'a> {
 #[derive(Debug, Serialize)]
 struct RawScrobblePayload<'a> {
     id: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RawAlbumGenrePayload<'a> {
+    id: &'a str,
+    genre: Option<&'a str>,
+    mode: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMetadataRefreshOverride {
+    id: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    disc_number: Option<i64>,
+    track_number: Option<i64>,
+    bpm: Option<i64>,
+    genre: Option<String>,
+    year: Option<i64>,
+    recording_mbid: Option<String>,
+    release_track_mbid: Option<String>,
+    release_mbid: Option<String>,
+    release_group_mbid: Option<String>,
+    confidence: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMetadataRefreshPayload {
+    overrides: Vec<RawMetadataRefreshOverride>,
 }
 
 #[derive(Debug, Serialize)]
@@ -437,7 +499,24 @@ pub async fn get_backend_artist_image(
     settings: &AppSettings,
     name: &str,
 ) -> Result<Option<artist::ArtistImage>> {
-    let detail = find_backend_artist_detail(settings, name).await?;
+    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    let artists = get_json::<Vec<RawSubsonicArtist>>(&client, settings, &url, "/api/artists").await?;
+    let Some(artist) = artists
+        .into_iter()
+        .find(|artist| artist.name.trim().eq_ignore_ascii_case(name.trim()))
+    else {
+        return Ok(None);
+    };
+
+    if let Some(image_url) = artist.artist_image_url {
+        return Ok(Some(artist::ArtistImage {
+            url: image_url,
+            source: "backend".into(),
+        }));
+    }
+
+    let detail = get_json_optional::<RawArtistDetailPayload>(&client, settings, &url, &format!("/api/artist/{}", artist.id)).await?;
     Ok(detail.and_then(|payload| {
         payload
             .artist
@@ -484,6 +563,139 @@ pub async fn get_backend_album_info(
         source_url: None,
         source: "backend".into(),
     }))
+}
+
+pub async fn load_backend_album_tracks(
+    settings: &AppSettings,
+    album_name: &str,
+    artist_name: Option<&str>,
+) -> Result<Vec<Track>> {
+    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    let albums = get_json::<Vec<RawSubsonicAlbum>>(&client, settings, &url, "/api/albums").await?;
+    let target = albums
+        .into_iter()
+        .find(|album| album_matches(album, album_name, artist_name))
+        .ok_or_else(|| anyhow!("Album not found in Needle backend"))?;
+
+    let detail = get_json::<RawAlbumDetailPayload>(&client, settings, &url, &format!("/api/album/{}", target.id)).await?;
+    Ok(detail
+        .album
+        .song
+        .into_iter()
+        .map(|track| {
+            let display_title = track
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("{TRACK_TOKEN_PREFIX}{}", track.id));
+            Track {
+                id: track.id.clone(),
+                path: format!("{TRACK_TOKEN_PREFIX}{}", track.id),
+                title: display_title,
+                artist: track.artist,
+                album: track.album,
+                album_artist: track.album_artist,
+                duration_seconds: track.duration.map(|value| value.max(0.0).round() as u64),
+                format: track.suffix,
+                sample_rate: None,
+                bit_depth: None,
+                disc_number: track.disc_number,
+                track_number: track.track,
+                bpm: track.bpm,
+                bpm_overridden: track.bpm_overridden.unwrap_or(false),
+                genre: track.genre,
+                primary_genre: track.primary_genre,
+                is_vinyl_rip: track.is_vinyl_rip.unwrap_or(false),
+                year: track.year,
+                added_at: None,
+                play_count: 0,
+                last_played_at: None,
+                is_favorite: false,
+                rating: None,
+            }
+        })
+        .collect())
+}
+
+pub async fn apply_backend_metadata_refresh(
+    settings: &AppSettings,
+    overrides: &[TrackMetadataOverride],
+) -> Result<BootstrapPayload> {
+    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    let payload = RawMetadataRefreshPayload {
+        overrides: overrides
+            .iter()
+            .map(|item| {
+                Ok(RawMetadataRefreshOverride {
+                    id: backend_track_id_from_path(&item.track_path)
+                        .ok_or_else(|| anyhow!("Invalid backend track reference in metadata refresh"))?
+                        .to_string(),
+                    title: item.title.clone(),
+                    artist: item.artist.clone(),
+                    album: item.album.clone(),
+                    album_artist: item.album_artist.clone(),
+                    disc_number: item.disc_number,
+                    track_number: item.track_number,
+                    bpm: item.bpm,
+                    genre: item.genre.clone(),
+                    year: item.year,
+                    recording_mbid: item.recording_mbid.clone(),
+                    release_track_mbid: item.release_track_mbid.clone(),
+                    release_mbid: item.release_mbid.clone(),
+                    release_group_mbid: item.release_group_mbid.clone(),
+                    confidence: item.confidence,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
+
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/needle/desktop/album-metadata-refresh",
+        &payload,
+    )
+    .await?;
+
+    load_backend_bootstrap(settings.clone()).await
+}
+
+pub async fn save_backend_album_genre(
+    settings: &AppSettings,
+    album_name: &str,
+    artist_name: Option<&str>,
+    genre: Option<&str>,
+    mode: MetadataEditMode,
+) -> Result<BootstrapPayload> {
+    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    let albums = get_json::<Vec<RawSubsonicAlbum>>(&client, settings, &url, "/api/albums").await?;
+    let target = albums
+        .into_iter()
+        .find(|album| album_matches(album, album_name, artist_name))
+        .ok_or_else(|| anyhow!("Album not found in Needle backend"))?;
+
+    let mode_name = match mode {
+        MetadataEditMode::NeedleOnly => "needle_only",
+        MetadataEditMode::WriteToFiles => "write_to_files",
+    };
+
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/albums/genre",
+        &RawAlbumGenrePayload {
+            id: &target.id,
+            genre,
+            mode: mode_name,
+        },
+    )
+    .await?;
+
+    load_backend_bootstrap(settings.clone()).await
 }
 
 pub fn backend_stream_url(settings: &AppSettings, track_path: &str) -> Result<String> {
