@@ -1364,7 +1364,32 @@ async fn refresh_artist_image(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Artist-image refresh is not available in Needle backend mode yet".to_string());
+        let existing = backend::get_backend_artist_image(&settings, &trimmed)
+            .await
+            .map_err(|error| error.to_string())?;
+        match artist::fetch_artist_image(&trimmed).await {
+            Ok(Some(image)) => {
+                backend::save_backend_artist_image(&settings, &trimmed, Some(&image))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok(Some(image));
+            }
+            Ok(None) => {
+                if let Some(image) = existing {
+                    return Ok(Some(image));
+                }
+                backend::save_backend_artist_image(&settings, &trimmed, None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok(None);
+            }
+            Err(error) => {
+                if let Some(image) = existing {
+                    return Ok(Some(image));
+                }
+                return Err(error.to_string());
+            }
+        }
     }
 
     let existing = db::get_artist_image(&state.db_path, &trimmed)
@@ -1456,7 +1481,42 @@ async fn refresh_artist_info(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Artist-info refresh is not available in Needle backend mode yet".to_string());
+        let existing = backend::get_backend_artist_info(&settings, &trimmed)
+            .await
+            .map_err(|error| error.to_string())?;
+        match artist::fetch_artist_info(&trimmed).await {
+            Ok(Some(info)) => {
+                let merged = if let Some(existing) = existing {
+                    artist::ArtistInfo {
+                        description: info.description.or(existing.description),
+                        source_url: info.source_url.or(existing.source_url),
+                        gender: info.gender.or(existing.gender),
+                        source: info.source,
+                    }
+                } else {
+                    info
+                };
+                backend::save_backend_artist_info(&settings, &trimmed, Some(&merged))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok(Some(merged));
+            }
+            Ok(None) => {
+                if existing.is_some() {
+                    return Ok(existing);
+                }
+                backend::save_backend_artist_info(&settings, &trimmed, None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok(None);
+            }
+            Err(error) => {
+                if existing.is_some() {
+                    return Ok(existing);
+                }
+                return Err(error.to_string());
+            }
+        }
     }
 
     let existing = db::get_artist_info(&state.db_path, &trimmed)
@@ -1597,7 +1657,32 @@ async fn refresh_album_info(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Album-info refresh is not available in Needle backend mode yet".to_string());
+        let existing = backend::get_backend_album_info(&settings, &album_trim, artist_trim.as_deref())
+            .await
+            .map_err(|error| error.to_string())?;
+        match album::fetch_album_info(&album_trim, artist_trim.as_deref()).await {
+            Ok(Some(info)) => {
+                backend::save_backend_album_info(&settings, &album_trim, artist_trim.as_deref(), Some(&info))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok(Some(info));
+            }
+            Ok(None) => {
+                if existing.is_some() {
+                    return Ok(existing);
+                }
+                backend::save_backend_album_info(&settings, &album_trim, artist_trim.as_deref(), None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Ok(None);
+            }
+            Err(error) => {
+                if existing.is_some() {
+                    return Ok(existing);
+                }
+                return Err(error.to_string());
+            }
+        }
     }
 
     let lookup_keys = album_info_lookup_keys(&album_trim, artist_trim.as_deref());

@@ -204,6 +204,31 @@ struct RawMetadataRefreshPayload {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RawArtistImagePayload<'a> {
+    name: &'a str,
+    url: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RawArtistInfoPayload<'a> {
+    name: &'a str,
+    description: Option<&'a str>,
+    source_url: Option<&'a str>,
+    gender: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RawAlbumInfoPayload<'a> {
+    album: &'a str,
+    artist: Option<&'a str>,
+    description: Option<&'a str>,
+    source_url: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RawCreatePlaylistPayload<'a> {
     name: &'a str,
     song_ids: &'a [String],
@@ -660,6 +685,73 @@ pub async fn apply_backend_metadata_refresh(
     .await?;
 
     load_backend_bootstrap(settings.clone()).await
+}
+
+pub async fn save_backend_artist_image(
+    settings: &AppSettings,
+    name: &str,
+    image: Option<&artist::ArtistImage>,
+) -> Result<()> {
+    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/needle/desktop/artist-image",
+        &RawArtistImagePayload {
+            name,
+            url: image.map(|value| value.url.as_str()),
+        },
+    )
+    .await
+}
+
+pub async fn save_backend_artist_info(
+    settings: &AppSettings,
+    name: &str,
+    info: Option<&artist::ArtistInfo>,
+) -> Result<()> {
+    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/needle/desktop/artist-info",
+        &RawArtistInfoPayload {
+            name,
+            description: info.and_then(|value| value.description.as_deref()),
+            source_url: info.and_then(|value| value.source_url.as_deref()),
+            gender: info
+                .and_then(|value| value.gender)
+                .map(|value| value.as_db_str()),
+        },
+    )
+    .await
+}
+
+pub async fn save_backend_album_info(
+    settings: &AppSettings,
+    album_name: &str,
+    artist_name: Option<&str>,
+    info: Option<&album::AlbumInfo>,
+) -> Result<()> {
+    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/needle/desktop/album-info",
+        &RawAlbumInfoPayload {
+            album: album_name,
+            artist: artist_name,
+            description: info.and_then(|value| value.description.as_deref()),
+            source_url: info.and_then(|value| value.source_url.as_deref()),
+        },
+    )
+    .await
 }
 
 pub async fn save_backend_album_genre(
