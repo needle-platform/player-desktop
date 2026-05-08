@@ -110,7 +110,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Vinyl-rip badge support** detects `vinyl-rip` tags from your files and marks matching albums with a small record badge on album artwork
 - **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
 - **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, loudness analysis with live progress output, structured progress counts, failed-file review/copy tools, live equalizer presets, manual 10-band EQ, an in-app backend version readout, and a metadata save-mode switch for `Needle only` vs `Write to files`
-- **Needle backend setup and migration prep** in Settings: choose `Local folders` or `Needle backend`, verify backend health, configure the backend URL, and migrate playlists, favourites/history, metadata caches, loudness-analysis data, and shared playback session state into the backend
+- **Needle backend setup and migration prep** in Settings: choose `Local folders` or `Needle backend`, verify backend health, configure the backend URL plus Needle account credentials, and migrate playlists, favourites/history, metadata caches, loudness-analysis data, and shared playback session state into the backend
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
@@ -214,9 +214,10 @@ Needle now supports a real desktop `Needle backend` mode in addition to `Local f
 
 What works today:
 
-- backend URL setup and health checks in Settings
+- backend URL, Needle username/password, and health checks in Settings
 - desktop-to-backend migration for playlists, favourites/history, artist and album cache data, metadata overrides, loudness-analysis rows, and shared playback session state
 - backend-backed library bootstrap in the Tauri app
+- authenticated backend API access for bootstrap, playlists, metadata/state sync, and maintenance calls
 - backend-backed playback while still keeping native `mpv` playback on desktop
 - selective offline downloads for backend-mode tracks and albums, with a local cache that playback prefers automatically
 - backend-aware Settings UI with tabbed organization for `Library`, `Playback`, and `Appearance`
@@ -224,7 +225,9 @@ What works today:
 What this means in practice:
 
 - `Local folders` remains the rich local-first mode
+- the first Needle backend account is created from the web player on first launch, then reused by desktop clients
 - `Needle backend` now loads the shared library, playlists, favourites, loudness data, and migrated cache data from the backend
+- protected backend APIs use the saved Needle credentials, while native `mpv` playback still pulls direct media and artwork from the backend without a per-track login handshake
 - native desktop listening features such as `mpv`, EQ, mini player, and deeper curation still stay on the desktop side
 
 Still intentionally incomplete:

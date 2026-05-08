@@ -249,18 +249,8 @@ async fn get_needle_backend_status(
     backend_url: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<NeedleBackendStatus, String> {
-    let configured_url = match backend_url
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        Some(url) => url,
-        None => db::load_settings(&state.db_path)
-            .map_err(|error| error.to_string())?
-            .needle_backend_url
-            .ok_or_else(|| "Needle backend URL is not configured".to_string())?,
-    };
-
-    backend::fetch_backend_status(&configured_url)
+    let settings = db::load_settings(&state.db_path).map_err(|error| error.to_string())?;
+    backend::fetch_backend_status(&settings, backend_url.as_deref())
         .await
         .map_err(|error| error.to_string())
 }
@@ -270,18 +260,8 @@ async fn migrate_desktop_state_to_needle_backend(
     backend_url: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<NeedleBackendMigrationReport, String> {
-    let configured_url = match backend_url
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        Some(url) => url,
-        None => db::load_settings(&state.db_path)
-            .map_err(|error| error.to_string())?
-            .needle_backend_url
-            .ok_or_else(|| "Needle backend URL is not configured".to_string())?,
-    };
-
-    backend::migrate_desktop_state_to_backend(&state.db_path, &configured_url)
+    let settings = db::load_settings(&state.db_path).map_err(|error| error.to_string())?;
+    backend::migrate_desktop_state_to_backend(&state.db_path, &settings, backend_url.as_deref())
         .await
         .map_err(|error| error.to_string())
 }

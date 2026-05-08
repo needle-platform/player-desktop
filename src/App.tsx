@@ -283,17 +283,24 @@ const normalizeNeedleBackendPlaybackPath = (
     return value;
   }
 
-  const streamPrefix = `${backendUrl}/api/stream/`;
-  if (!value.startsWith(streamPrefix)) {
+  try {
+    const sourceUrl = new URL(value);
+    const backendBase = new URL(backendUrl);
+    const backendPathPrefix = `${backendBase.pathname.replace(/\/+$/, '')}/api/stream/`.replace(/\/{2,}/g, '/');
+
+    if (sourceUrl.origin !== backendBase.origin || !sourceUrl.pathname.startsWith(backendPathPrefix)) {
+      return value;
+    }
+
+    const encodedId = sourceUrl.pathname.slice(backendPathPrefix.length);
+    if (!encodedId) {
+      return value;
+    }
+
+    return `needle-track:${decodeURIComponent(encodedId)}`;
+  } catch {
     return value;
   }
-
-  const encodedId = value.slice(streamPrefix.length).split(/[?#]/, 1)[0];
-  if (!encodedId) {
-    return value;
-  }
-
-  return `needle-track:${decodeURIComponent(encodedId)}`;
 };
 
 const isPlaybackStatusMessage = (message: string): boolean => {
@@ -8573,9 +8580,20 @@ function SettingsView({
   const isManualEqualizer = settings.equalizer_preset === 'manual';
   const accentColorValue = normalizeAccentColor(settings.accent_color) ?? currentAccentColor;
   const backendUrlValue = settings.needle_backend_url ?? '';
-  const canCheckBackend = backendUrlValue.trim().length > 0 && !backendStatusBusy;
+  const backendUsernameValue = settings.needle_backend_username ?? '';
+  const backendPasswordValue = settings.needle_backend_password ?? '';
+  const canCheckBackend =
+    backendUrlValue.trim().length > 0 &&
+    backendUsernameValue.trim().length > 0 &&
+    backendPasswordValue.trim().length > 0 &&
+    !backendStatusBusy;
   const canMigrateBackend =
-    backendUrlValue.trim().length > 0 && backendStatus?.enabled === true && !backendMigrationBusy && !backendStatusBusy;
+    backendUrlValue.trim().length > 0 &&
+    backendUsernameValue.trim().length > 0 &&
+    backendPasswordValue.trim().length > 0 &&
+    backendStatus?.enabled === true &&
+    !backendMigrationBusy &&
+    !backendStatusBusy;
   const [activeTab, setActiveTab] = useState<SettingsTab>('library');
   const shouldShowOfflineCachePanel =
     settings.library_source === 'needle_backend' || offlineDownloads.length > 0 || offlineDownloadProgress != null;
@@ -9098,6 +9116,35 @@ function SettingsView({
                     autoCapitalize="off"
                     autoCorrect="off"
                   />
+                  <input
+                    className="settings-backend-input"
+                    type="text"
+                    value={backendUsernameValue}
+                    placeholder="Needle backend username"
+                    onChange={(event) =>
+                      onChange({
+                        ...settings,
+                        needle_backend_username: event.currentTarget.value.trim() || null,
+                      })
+                    }
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    autoComplete="username"
+                  />
+                  <input
+                    className="settings-backend-input"
+                    type="password"
+                    value={backendPasswordValue}
+                    placeholder="Needle backend password"
+                    onChange={(event) =>
+                      onChange({
+                        ...settings,
+                        needle_backend_password: event.currentTarget.value || null,
+                      })
+                    }
+                    autoComplete="current-password"
+                  />
                   <div className="settings-backend-actions">
                     <button
                       className="ghost-button"
@@ -9121,6 +9168,8 @@ function SettingsView({
               <div className="settings-backend-note">
                 {backendUrlValue.trim().length === 0
                   ? 'Enter the backend URL to enable the connection check. Example: http://localhost:2104'
+                  : backendUsernameValue.trim().length === 0 || backendPasswordValue.trim().length === 0
+                    ? 'Enter the Needle backend username and password created in the web player before checking the connection.'
                   : backendStatus?.enabled
                     ? 'Backend verified. You can migrate your local Needle state now.'
                     : 'Check the backend first. Migration unlocks after Needle confirms the backend is ready.'}

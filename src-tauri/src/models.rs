@@ -128,6 +128,10 @@ pub struct AppSettings {
     pub library_source: LibrarySource,
     #[serde(default)]
     pub needle_backend_url: Option<String>,
+    #[serde(default)]
+    pub needle_backend_username: Option<String>,
+    #[serde(default)]
+    pub needle_backend_password: Option<String>,
     #[serde(default = "default_tracks_page_size")]
     pub tracks_page_size: u32,
     #[serde(default)]

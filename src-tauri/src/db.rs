@@ -353,6 +353,25 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
+    let needle_backend_username = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'needle_backend_username'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let needle_backend_password = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'needle_backend_password'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
     let last_maintenance_at = connection
         .query_row(
             "SELECT value FROM settings WHERE key = 'last_maintenance_at'",
@@ -403,6 +422,8 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
             _ => LibrarySource::LocalFolders,
         },
         needle_backend_url,
+        needle_backend_username,
+        needle_backend_password,
         tracks_page_size,
         last_maintenance_at,
         last_loudness_analysis_at,
@@ -467,6 +488,35 @@ pub fn save_settings(db_path: &Path, settings: &AppSettings) -> Result<AppSettin
         )?;
     } else {
         connection.execute("DELETE FROM settings WHERE key = 'needle_backend_url'", [])?;
+    }
+
+    if let Some(username) = settings
+        .needle_backend_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params!["needle_backend_username", username],
+        )?;
+    } else {
+        connection.execute("DELETE FROM settings WHERE key = 'needle_backend_username'", [])?;
+    }
+
+    if let Some(password) = settings
+        .needle_backend_password
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params!["needle_backend_password", password],
+        )?;
+    } else {
+        connection.execute("DELETE FROM settings WHERE key = 'needle_backend_password'", [])?;
     }
 
     connection.execute(

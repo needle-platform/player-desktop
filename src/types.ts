@@ -55,6 +55,8 @@ export interface AppSettings {
   metadata_edit_mode: MetadataEditMode;
   library_source: LibrarySource;
   needle_backend_url: string | null;
+  needle_backend_username: string | null;
+  needle_backend_password: string | null;
   tracks_page_size: number;
   last_maintenance_at: string | null;
   last_loudness_analysis_at: string | null;
