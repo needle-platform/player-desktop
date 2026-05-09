@@ -13,6 +13,9 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Loudness analysis now runs from desktop backend mode too, using cached offline files when available and authenticated backend streams for the rest.
 - Loudness analysis now explains when a full-library rerun is intentional because cached results came from an older loudness-analysis version.
 
+### Fixed
+- Fixed desktop backend mode so homeserver outages no longer hang the app indefinitely, and startup now falls back to cached backend data or downloaded tracks for offline playback with a clear in-app offline-mode notice.
+
 ## [0.1.2] - 2026-05-04
 
 ### Added

@@ -158,6 +158,13 @@ pub struct BootstrapPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppBootstrapState {
+    pub bootstrap: BootstrapPayload,
+    pub startup_notice: Option<String>,
+    pub offline_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeInfo {
     pub app_version: String,
     pub loudness_analysis_version: i64,

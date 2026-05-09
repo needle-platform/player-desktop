@@ -9,14 +9,14 @@ mod loudness;
 mod models;
 mod mpv;
 
-use std::{collections::HashMap, fs, path::{Path, PathBuf}, process::Command, sync::Mutex, time::Instant};
+use std::{collections::{HashMap, HashSet}, fs, path::{Path, PathBuf}, process::Command, sync::Mutex, time::Instant};
 
 use models::{
-    AlbumMetadataRefreshResult, AlbumMetadataRefreshStatus, AppSettings, BootstrapPayload,
+    AlbumMetadataRefreshResult, AlbumMetadataRefreshStatus, AppBootstrapState, AppSettings, BootstrapPayload,
     LibrarySource, MetadataEditMode, NeedleBackendMigrationReport, NeedleBackendStatus,
     OfflineDownloadEntry, OfflineDownloadOperation, OfflineDownloadProgress,
     OfflineDownloadProgressStatus, PlaybackSession, PlaybackState, RepeatMode, RuntimeInfo,
-    SavedPlaylistRule, TrackBpmAdjustment,
+    SavedPlaylistRule, TrackBpmAdjustment, LibraryData, Track,
 };
 use mpv::MpvController;
 use tauri::{Emitter, Manager};
@@ -133,6 +133,177 @@ fn load_bootstrap_for_current_mode(db_path: &Path) -> Result<BootstrapPayload, S
     }
 }
 
+fn backend_connectivity_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("unable to reach needle backend")
+        || normalized.contains("error sending request")
+        || normalized.contains("connection refused")
+        || normalized.contains("connection reset")
+        || normalized.contains("operation timed out")
+        || normalized.contains("timed out")
+        || normalized.contains("deadline has elapsed")
+        || normalized.contains("dns error")
+        || normalized.contains("failed to lookup address")
+        || normalized.contains("network is unreachable")
+        || normalized.contains("broken pipe")
+        || normalized.contains("unexpected eof")
+}
+
+fn library_data_from_tracks(mut tracks: Vec<Track>) -> LibraryData {
+    tracks.sort_by(|left, right| {
+        left.album_artist
+            .cmp(&right.album_artist)
+            .then(left.artist.cmp(&right.artist))
+            .then(left.album.cmp(&right.album))
+            .then(left.disc_number.cmp(&right.disc_number))
+            .then(left.track_number.cmp(&right.track_number))
+            .then(left.title.cmp(&right.title))
+            .then(left.path.cmp(&right.path))
+    });
+
+    let album_count = tracks
+        .iter()
+        .filter_map(|track| {
+            track.album.as_ref().and_then(|album| {
+                let trimmed = album.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some((
+                        trimmed.to_string(),
+                        track
+                            .album_artist
+                            .as_deref()
+                            .or(track.artist.as_deref())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                    ))
+                }
+            })
+        })
+        .collect::<HashSet<_>>()
+        .len();
+    let artist_count = tracks
+        .iter()
+        .filter_map(|track| {
+            track.artist.as_ref().and_then(|artist| {
+                let trimmed = artist.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+        })
+        .collect::<HashSet<_>>()
+        .len();
+
+    LibraryData {
+        track_count: tracks.len(),
+        album_count,
+        artist_count,
+        tracks,
+    }
+}
+
+fn bootstrap_from_offline_downloads(
+    db_path: &Path,
+    settings: AppSettings,
+    downloads: &[OfflineDownloadEntry],
+) -> Result<BootstrapPayload, String> {
+    let tracks = downloads
+        .iter()
+        .filter(|entry| Path::new(&entry.local_path).exists())
+        .map(|entry| {
+            let mut track = library::read_track(Path::new(&entry.local_path));
+            track.id = backend::backend_track_id_from_path(&entry.track_path)
+                .unwrap_or(&entry.track_path)
+                .to_string();
+            track.path = entry.track_path.clone();
+            track.added_at = Some(entry.downloaded_at.clone());
+            track
+        })
+        .collect::<Vec<_>>();
+
+    Ok(BootstrapPayload {
+        settings,
+        library: library_data_from_tracks(tracks),
+        playlists: Vec::new(),
+        playback_session: db::load_playback_session(db_path).map_err(|error| error.to_string())?,
+    })
+}
+
+fn backend_offline_notice(track_count: usize, used_cache: bool) -> String {
+    if used_cache {
+        format!(
+            "Needle is offline, so the app loaded your last synced library cache. Downloaded tracks remain available for offline playback. Cached library: {track_count} track{}.",
+            if track_count == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Needle is offline, so the app is showing your downloaded library for offline playback. Available offline: {track_count} track{}.",
+            if track_count == 1 { "" } else { "s" }
+        )
+    }
+}
+
+fn load_bootstrap_state_for_current_mode(db_path: &Path) -> Result<AppBootstrapState, String> {
+    let settings = db::load_settings(db_path).map_err(|error| error.to_string())?;
+
+    if matches!(settings.library_source, LibrarySource::LocalFolders) {
+        return Ok(AppBootstrapState {
+            bootstrap: db::load_bootstrap(db_path).map_err(|error| error.to_string())?,
+            startup_notice: None,
+            offline_mode: false,
+        });
+    }
+
+    match tauri::async_runtime::block_on(backend::load_backend_bootstrap(settings.clone())) {
+        Ok(bootstrap) => {
+            db::save_backend_bootstrap_cache(db_path, &bootstrap).map_err(|error| error.to_string())?;
+            let _ = db::save_playback_session(db_path, &bootstrap.playback_session);
+            Ok(AppBootstrapState {
+                bootstrap,
+                startup_notice: None,
+                offline_mode: false,
+            })
+        }
+        Err(error) => {
+            let error_message = error.to_string();
+            if let Some(mut cached) =
+                db::load_backend_bootstrap_cache(db_path).map_err(|cache_error| cache_error.to_string())?
+            {
+                cached.settings = settings.clone();
+                cached.playback_session =
+                    db::load_playback_session(db_path).map_err(|playback_error| playback_error.to_string())?;
+                let track_count = cached.library.track_count;
+                return Ok(AppBootstrapState {
+                    bootstrap: cached,
+                    startup_notice: Some(backend_offline_notice(track_count, true)),
+                    offline_mode: true,
+                });
+            }
+
+            let offline_downloads = prune_and_list_offline_downloads(db_path)?;
+            if !offline_downloads.is_empty() {
+                let bootstrap =
+                    bootstrap_from_offline_downloads(db_path, settings.clone(), &offline_downloads)?;
+                let track_count = bootstrap.library.track_count;
+                return Ok(AppBootstrapState {
+                    bootstrap,
+                    startup_notice: Some(backend_offline_notice(track_count, false)),
+                    offline_mode: true,
+                });
+            }
+
+            let guidance = if backend_connectivity_error(&error_message) {
+                "Needle couldn't reach the configured homeserver, and there is no cached library or downloaded media available yet. Reconnect the backend and relaunch the app."
+            } else {
+                "Needle couldn't initialize backend mode, and there is no cached library or downloaded media available yet. Reconnect the backend or review the backend settings, then relaunch the app."
+            };
+
+            Err(format!("{guidance} Details: {error_message}"))
+        }
+    }
+}
+
 fn load_settings_for_current_mode(db_path: &Path) -> Result<AppSettings, String> {
     db::load_settings(db_path).map_err(|error| error.to_string())
 }
@@ -213,6 +384,11 @@ fn backend_stream_urls(
 #[tauri::command]
 fn bootstrap_app(state: tauri::State<'_, AppState>) -> Result<BootstrapPayload, String> {
     load_bootstrap_for_current_mode(&state.db_path)
+}
+
+#[tauri::command]
+fn bootstrap_app_state(state: tauri::State<'_, AppState>) -> Result<AppBootstrapState, String> {
+    load_bootstrap_state_for_current_mode(&state.db_path)
 }
 
 #[tauri::command]
@@ -625,10 +801,19 @@ fn save_playback_session(
 ) -> Result<PlaybackSession, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     match settings.library_source {
-        LibrarySource::NeedleBackend => tauri::async_runtime::block_on(
-            backend::save_backend_playback_session(&settings, &session),
-        )
-        .map_err(|error| error.to_string()),
+        LibrarySource::NeedleBackend => {
+            let local_session =
+                db::save_playback_session(&state.db_path, &session).map_err(|error| error.to_string())?;
+            match tauri::async_runtime::block_on(backend::save_backend_playback_session(&settings, &session)) {
+                Ok(remote_session) => {
+                    db::save_playback_session(&state.db_path, &remote_session)
+                        .map_err(|error| error.to_string())?;
+                    Ok(remote_session)
+                }
+                Err(error) if backend_connectivity_error(&error.to_string()) => Ok(local_session),
+                Err(error) => Err(error.to_string()),
+            }
+        }
         LibrarySource::LocalFolders => {
             db::save_playback_session(&state.db_path, &session).map_err(|error| error.to_string())
         }
@@ -1947,6 +2132,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap_app,
+            bootstrap_app_state,
             get_runtime_info,
             open_external_url,
             get_needle_backend_status,

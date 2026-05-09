@@ -70,6 +70,12 @@ export interface BootstrapPayload {
   playback_session: PlaybackSession;
 }
 
+export interface AppBootstrapState {
+  bootstrap: BootstrapPayload;
+  startup_notice: string | null;
+  offline_mode: boolean;
+}
+
 export interface RuntimeInfo {
   app_version: string;
   loudness_analysis_version: number;

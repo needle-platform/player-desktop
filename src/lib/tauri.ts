@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  AppBootstrapState,
   AppSettings,
   BootstrapPayload,
   NeedleBackendMigrationReport,
@@ -15,6 +16,8 @@ import type {
 } from '../types';
 
 export const bootstrapApp = () => invoke<BootstrapPayload>('bootstrap_app');
+
+export const bootstrapAppState = () => invoke<AppBootstrapState>('bootstrap_app_state');
 
 export const getRuntimeInfo = () => invoke<RuntimeInfo>('get_runtime_info');
 

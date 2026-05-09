@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::{path::{Path, PathBuf}, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -1014,6 +1014,8 @@ fn normalize_path(value: &str) -> PathBuf {
 fn http_client() -> Result<Client> {
     reqwest::Client::builder()
         .user_agent("NeedleDesktop/0.1")
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
         .build()
         .map_err(|error| anyhow!("Unable to create Needle backend HTTP client: {error}"))
 }

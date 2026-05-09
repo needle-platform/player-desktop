@@ -9,7 +9,7 @@ import {
   applyVolumeLevelingForTrack,
   appendTracksToPlaylist,
   appendQueue,
-  bootstrapApp,
+  bootstrapAppState,
   createPlaylist,
   downloadOfflineTracks,
   getNeedleBackendStatus,
@@ -54,6 +54,7 @@ import {
 } from './lib/tauri';
 import type {
   AudioDevice,
+  AppBootstrapState,
   AppSettings,
   BootstrapPayload,
   EqualizerPreset,
@@ -1468,10 +1469,12 @@ function App() {
     tone: 'info' | 'success' | 'warning' | 'error';
     message: string;
   } | null>(null);
+  const [backendModeNotice, setBackendModeNotice] = useState<string | null>(null);
   const [isNeedleBackendStatusLoading, setIsNeedleBackendStatusLoading] = useState(false);
   const [isNeedleBackendMigrationRunning, setIsNeedleBackendMigrationRunning] = useState(false);
   const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
   const [status, setStatus] = useState('');
+  const [startupError, setStartupError] = useState<string | null>(null);
   const [notification, setNotification] = useState<{
     id: number;
     message: string;
@@ -1514,6 +1517,12 @@ function App() {
   const windowRestoreStateRef = useRef<WindowRestoreState | null>(null);
   const miniQueueResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const notificationIdRef = useRef(0);
+
+  const applyBootstrapState = (nextState: AppBootstrapState) => {
+    setData(nextState.bootstrap);
+    setBackendModeNotice(nextState.offline_mode ? nextState.startup_notice ?? null : null);
+    setStartupError(null);
+  };
 
   useEffect(() => {
     const message = status.trim();
@@ -1995,7 +2004,7 @@ function App() {
     void (async () => {
       try {
         const [bootstrapResult, runtimeInfoResult, offlineDownloadsResult] = await Promise.allSettled([
-          bootstrapApp(),
+          bootstrapAppState(),
           getRuntimeInfo(),
           listOfflineDownloads(),
         ]);
@@ -2004,7 +2013,7 @@ function App() {
           throw bootstrapResult.reason;
         }
 
-        setData(bootstrapResult.value);
+        applyBootstrapState(bootstrapResult.value);
         if (runtimeInfoResult.status === 'fulfilled') {
           setRuntimeInfo(runtimeInfoResult.value);
         }
@@ -2012,7 +2021,9 @@ function App() {
           setOfflineDownloads(offlineDownloadsResult.value);
         }
       } catch (error) {
-        setStatus(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        setStartupError(message);
+        setStatus(message);
       } finally {
         setLoading(false);
       }
@@ -3122,16 +3133,18 @@ function App() {
             ? 'Connecting to Needle backend…'
             : 'Loading local library…',
         );
-        const [nextBootstrap, nextOfflineDownloads] = await Promise.all([
-          bootstrapApp(),
+        const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
+          bootstrapAppState(),
           listOfflineDownloads(),
         ]);
-        setData(nextBootstrap);
+        applyBootstrapState(nextBootstrapState);
         setOfflineDownloads(nextOfflineDownloads);
         setStatus(
           normalizedSettings.library_source === 'needle_backend'
-            ? `Connected to Needle backend · ${nextBootstrap.library.track_count} tracks`
-            : `Switched to local library · ${nextBootstrap.library.track_count} tracks`,
+            ? nextBootstrapState.offline_mode
+              ? `Needle backend offline · using ${nextBootstrapState.bootstrap.library.track_count} offline track${nextBootstrapState.bootstrap.library.track_count === 1 ? '' : 's'}`
+              : `Connected to Needle backend · ${nextBootstrapState.bootstrap.library.track_count} tracks`
+            : `Switched to local library · ${nextBootstrapState.bootstrap.library.track_count} tracks`,
         );
       }
     } catch (error) {
@@ -3258,11 +3271,11 @@ function App() {
       });
       if (data.settings.library_source === 'needle_backend' && backendStatus.enabled) {
         setBusy('Loading Needle backend library…');
-        const [nextBootstrap, nextOfflineDownloads] = await Promise.all([
-          bootstrapApp(),
+        const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
+          bootstrapAppState(),
           listOfflineDownloads(),
         ]);
-        setData(nextBootstrap);
+        applyBootstrapState(nextBootstrapState);
         setOfflineDownloads(nextOfflineDownloads);
       }
       setStatus(
@@ -4544,7 +4557,19 @@ function App() {
     return <div className="fullscreen-message">Loading…</div>;
   }
   if (!data) {
-    return <div className="fullscreen-message">Failed to initialize.</div>;
+    return (
+      <div className="fullscreen-message">
+        <div className="startup-failure-card" role="alert">
+          <div className="startup-failure-eyebrow">Startup problem</div>
+          <h1>Needle couldn&apos;t finish launching</h1>
+          <p>{startupError ?? 'The app failed to initialize.'}</p>
+          <p>
+            If your homeserver is offline, bring it back and relaunch Needle. Once the app has connected at
+            least once, it will reuse its cached library and downloaded tracks for offline playback.
+          </p>
+        </div>
+      </div>
+    );
   }
 
   const lib = data.library;
@@ -4699,6 +4724,14 @@ function App() {
       </aside>
 
       <main className="content">
+        {backendModeNotice && (
+          <div className="connection-banner" role="status">
+            <div className="connection-banner-title">Offline mode</div>
+            <div className="connection-banner-copy">
+              {backendModeNotice} Reconnect the homeserver, then use Settings to check the backend when it is back.
+            </div>
+          </div>
+        )}
         {view === 'dashboard' && (
           <DashboardView
             tracks={allTracks}

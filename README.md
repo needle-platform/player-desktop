@@ -47,6 +47,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Queue-aware playback**: play album · shuffle artist · play all Quick picks · shuffle a From-your-library playlist — mpv auto-advances through the queue
 - **Playback persistence** restores queue, selected track, repeat mode, shuffle state, and last position between launches
 - **Safe relaunch behavior** restores the last session in a stopped state, never surprise-autoplays on app launch
+- **Backend-offline startup fallback** now reopens from the last synced backend library cache, or from downloaded tracks when no cache is available, so offline playback stays usable during homeserver outages
 - **Repeat modes**: off · one · all
 - **Shuffle state** is visible and persistent
 - **Artwork-first mini player** with full-bleed cover art, drag-to-move behavior, pinned always-on-top mode, and an expandable / resizable Up Next queue
@@ -217,6 +218,7 @@ What works today:
 - backend URL, Needle username/password, and health checks in Settings
 - desktop-to-backend migration for playlists, favourites/history, artist and album cache data, metadata overrides, loudness-analysis rows, and shared playback session state
 - backend-backed library bootstrap in the Tauri app
+- offline-safe backend startup that falls back to cached library data or downloaded tracks instead of failing on a blank screen when the homeserver is unavailable
 - authenticated backend API access for bootstrap, playlists, metadata/state sync, and maintenance calls
 - backend-backed playback while still keeping native `mpv` playback on desktop
 - backend-mode loudness analysis from the desktop app, reusing offline downloads when present and falling back to backend streams when needed

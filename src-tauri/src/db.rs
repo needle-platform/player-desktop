@@ -201,6 +201,12 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             file_size INTEGER,
             downloaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS backend_bootstrap_cache (
+            cache_key TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         ",
     )?;
 
@@ -1401,6 +1407,36 @@ pub fn save_playback_session(db_path: &Path, session: &PlaybackSession) -> Resul
         params!["playback_session", serde_json::to_string(session)?],
     )?;
     load_playback_session(db_path)
+}
+
+pub fn load_backend_bootstrap_cache(db_path: &Path) -> Result<Option<BootstrapPayload>> {
+    let connection = Connection::open(db_path)?;
+    let value = connection
+        .query_row(
+            "SELECT payload_json FROM backend_bootstrap_cache WHERE cache_key = 'needle_backend'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    value
+        .map(|json| serde_json::from_str::<BootstrapPayload>(&json).map_err(anyhow::Error::from))
+        .transpose()
+}
+
+pub fn save_backend_bootstrap_cache(db_path: &Path, payload: &BootstrapPayload) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "
+        INSERT INTO backend_bootstrap_cache (cache_key, payload_json, updated_at)
+        VALUES ('needle_backend', ?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(cache_key) DO UPDATE SET
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        ",
+        params![serde_json::to_string(payload)?],
+    )?;
+    Ok(())
 }
 
 pub fn list_offline_downloads(db_path: &Path) -> Result<Vec<OfflineDownloadEntry>> {
