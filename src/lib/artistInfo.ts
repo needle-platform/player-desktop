@@ -3,6 +3,7 @@ import { getArtistInfo, refreshArtistInfo, type ArtistInfo } from './tauri';
 
 const cache = new Map<string, ArtistInfo | null>();
 const inflight = new Map<string, Promise<ArtistInfo | null>>();
+const autoRefreshAttempts = new Set<string>();
 
 const fetchOnce = (name: string): Promise<ArtistInfo | null> => {
   if (cache.has(name)) return Promise.resolve(cache.get(name) ?? null);
@@ -32,7 +33,15 @@ export interface ArtistInfoState {
   retry: () => Promise<void>;
 }
 
-export function useArtistInfo(name: string | null | undefined): ArtistInfoState {
+interface UseArtistInfoOptions {
+  autoRefreshOnMiss?: boolean;
+}
+
+export function useArtistInfo(
+  name: string | null | undefined,
+  options?: UseArtistInfoOptions,
+): ArtistInfoState {
+  const autoRefreshOnMiss = options?.autoRefreshOnMiss === true;
   const [state, setState] = useState<Omit<ArtistInfoState, 'retry'>>(() => {
     if (!name) return { info: null, loading: false, retrying: false };
     if (cache.has(name)) {
@@ -62,6 +71,31 @@ export function useArtistInfo(name: string | null | undefined): ArtistInfoState 
       cancelled = true;
     };
   }, [name]);
+
+  useEffect(() => {
+    if (!name || !autoRefreshOnMiss) {
+      return;
+    }
+    if (state.loading || state.retrying || state.info) {
+      return;
+    }
+
+    const key = name.trim().toLocaleLowerCase();
+    if (!key || autoRefreshAttempts.has(key)) {
+      return;
+    }
+
+    autoRefreshAttempts.add(key);
+    setState((current) => ({ ...current, loading: true, retrying: true }));
+    void refreshArtistInfo(name)
+      .then((result) => {
+        cache.set(name, result);
+        setState({ info: result, loading: false, retrying: false });
+      })
+      .catch(() => {
+        setState((current) => ({ info: current.info, loading: false, retrying: false }));
+      });
+  }, [autoRefreshOnMiss, name, state.info, state.loading, state.retrying]);
 
   const retry = async () => {
     if (!name) return;

@@ -5,6 +5,7 @@ const fullCache = new Map<string, string | null>();
 const fullInflight = new Map<string, Promise<string | null>>();
 const peekCache = new Map<string, string | null>();
 const peekInflight = new Map<string, Promise<string | null>>();
+const autoRefreshAttempts = new Set<string>();
 const MAX_CONCURRENT_FETCHES = 4;
 let activeFetches = 0;
 const pendingFetches: Array<() => void> = [];
@@ -93,6 +94,7 @@ interface UseArtistImageOptions {
   cacheOnly?: boolean;
   defer?: boolean;
   enabled?: boolean;
+  autoRefreshOnMiss?: boolean;
 }
 
 export function useArtistImage(
@@ -102,6 +104,7 @@ export function useArtistImage(
   const cacheOnly = options?.cacheOnly === true;
   const defer = options?.defer === true;
   const enabled = options?.enabled !== false;
+  const autoRefreshOnMiss = options?.autoRefreshOnMiss === true;
   const cache = cacheOnly ? peekCache : fullCache;
   const [state, setState] = useState<Omit<ArtistImageState, 'retry'>>(() => {
     if (!name) return { url: null, loading: false, retrying: false };
@@ -158,6 +161,32 @@ export function useArtistImage(
       cancelled = true;
     };
   }, [cache, cacheOnly, defer, enabled, name]);
+
+  useEffect(() => {
+    if (!name || !enabled || cacheOnly || !autoRefreshOnMiss) {
+      return;
+    }
+    if (state.loading || state.retrying || state.url) {
+      return;
+    }
+
+    const key = name.trim().toLocaleLowerCase();
+    if (!key || autoRefreshAttempts.has(key)) {
+      return;
+    }
+
+    autoRefreshAttempts.add(key);
+    setState((current) => ({ ...current, loading: true, retrying: true }));
+    void refreshArtistImage(name)
+      .then((result) => {
+        const url = result?.url ?? null;
+        seedArtistImageCaches(name, url);
+        setState({ url, loading: false, retrying: false });
+      })
+      .catch(() => {
+        setState((current) => ({ url: current.url, loading: false, retrying: false }));
+      });
+  }, [autoRefreshOnMiss, cacheOnly, enabled, name, state.loading, state.retrying, state.url]);
 
   const retry = async () => {
     if (!name) return;

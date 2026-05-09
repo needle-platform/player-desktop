@@ -1597,20 +1597,12 @@ async fn refresh_artist_image(
         let existing = backend::get_backend_artist_image(&settings, &trimmed)
             .await
             .map_err(|error| error.to_string())?;
-        match artist::fetch_artist_image(&trimmed).await {
-            Ok(Some(image)) => {
-                backend::save_backend_artist_image(&settings, &trimmed, Some(&image))
-                    .await
-                    .map_err(|error| error.to_string())?;
-                return Ok(Some(image));
-            }
+        match backend::refresh_backend_artist_image(&settings, &trimmed).await {
+            Ok(Some(image)) => return Ok(Some(image)),
             Ok(None) => {
                 if let Some(image) = existing {
                     return Ok(Some(image));
                 }
-                backend::save_backend_artist_image(&settings, &trimmed, None)
-                    .await
-                    .map_err(|error| error.to_string())?;
                 return Ok(None);
             }
             Err(error) => {
@@ -1714,35 +1706,17 @@ async fn refresh_artist_info(
         let existing = backend::get_backend_artist_info(&settings, &trimmed)
             .await
             .map_err(|error| error.to_string())?;
-        match artist::fetch_artist_info(&trimmed).await {
-            Ok(Some(info)) => {
-                let merged = if let Some(existing) = existing {
-                    artist::ArtistInfo {
-                        description: info.description.or(existing.description),
-                        source_url: info.source_url.or(existing.source_url),
-                        gender: info.gender.or(existing.gender),
-                        source: info.source,
-                    }
-                } else {
-                    info
-                };
-                backend::save_backend_artist_info(&settings, &trimmed, Some(&merged))
-                    .await
-                    .map_err(|error| error.to_string())?;
-                return Ok(Some(merged));
-            }
+        match backend::refresh_backend_artist_info(&settings, &trimmed).await {
+            Ok(Some(info)) => return Ok(Some(info)),
             Ok(None) => {
-                if existing.is_some() {
-                    return Ok(existing);
+                if let Some(info) = existing {
+                    return Ok(Some(info));
                 }
-                backend::save_backend_artist_info(&settings, &trimmed, None)
-                    .await
-                    .map_err(|error| error.to_string())?;
                 return Ok(None);
             }
             Err(error) => {
-                if existing.is_some() {
-                    return Ok(existing);
+                if let Some(info) = existing {
+                    return Ok(Some(info));
                 }
                 return Err(error.to_string());
             }

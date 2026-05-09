@@ -7743,8 +7743,10 @@ function ArtistDetailView({
     url: artistImageUrl,
     retrying: artistImageRetrying,
     retry: retryArtistImage,
-  } = useArtistImage(artist);
-  const { info, loading: infoLoading, retrying: infoRetrying, retry: retryArtistInfo } = useArtistInfo(artist);
+  } = useArtistImage(artist, { autoRefreshOnMiss: true });
+  const { info, loading: infoLoading, retrying: infoRetrying, retry: retryArtistInfo } = useArtistInfo(artist, {
+    autoRefreshOnMiss: true,
+  });
   const artistTracks = useMemo(
     () => tracks.filter((track) => artistNameForTrack(track, mode) === artist),
     [artist, mode, tracks],

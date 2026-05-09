@@ -89,9 +89,9 @@ struct RawArtistDetailPayload {
 #[serde(rename_all = "camelCase")]
 struct RawArtistInfo {
     biography: Option<String>,
-    small_image_url: Option<String>,
+    source_url: Option<String>,
+    gender: Option<String>,
     medium_image_url: Option<String>,
-    large_image_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -536,7 +536,7 @@ pub async fn get_backend_artist_image(
 
     if let Some(image_url) = artist.artist_image_url {
         return Ok(Some(artist::ArtistImage {
-            url: image_url,
+            url: resolve_backend_asset_url(&url, &image_url),
             source: "backend".into(),
         }));
     }
@@ -547,8 +547,8 @@ pub async fn get_backend_artist_image(
             .artist
             .artist_image_url
             .or_else(|| payload.info.as_ref().and_then(|info| info.medium_image_url.clone()))
-            .map(|url| artist::ArtistImage {
-                url,
+            .map(|image_url| artist::ArtistImage {
+                url: resolve_backend_asset_url(&url, &image_url),
                 source: "backend".into(),
             })
     }))
@@ -562,8 +562,11 @@ pub async fn get_backend_artist_info(
     Ok(detail.and_then(|payload| {
         payload.info.map(|info| artist::ArtistInfo {
             description: info.biography,
-            source_url: None,
-            gender: None,
+            source_url: info.source_url,
+            gender: info
+                .gender
+                .as_deref()
+                .and_then(artist::ArtistGender::from_db_str),
             source: "backend".into(),
         })
     }))
@@ -687,48 +690,48 @@ pub async fn apply_backend_metadata_refresh(
     load_backend_bootstrap(settings.clone()).await
 }
 
-pub async fn save_backend_artist_image(
+pub async fn refresh_backend_artist_image(
     settings: &AppSettings,
     name: &str,
-    image: Option<&artist::ArtistImage>,
-) -> Result<()> {
+) -> Result<Option<artist::ArtistImage>> {
     let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     post_json_expect_empty(
         &client,
         settings,
         &url,
-        "/api/needle/desktop/artist-image",
+        "/api/needle/desktop/artist-image/refresh",
         &RawArtistImagePayload {
             name,
-            url: image.map(|value| value.url.as_str()),
+            url: None,
         },
     )
-    .await
+    .await?;
+
+    get_backend_artist_image(settings, name).await
 }
 
-pub async fn save_backend_artist_info(
+pub async fn refresh_backend_artist_info(
     settings: &AppSettings,
     name: &str,
-    info: Option<&artist::ArtistInfo>,
-) -> Result<()> {
+) -> Result<Option<artist::ArtistInfo>> {
     let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     post_json_expect_empty(
         &client,
         settings,
         &url,
-        "/api/needle/desktop/artist-info",
+        "/api/needle/desktop/artist-info/refresh",
         &RawArtistInfoPayload {
             name,
-            description: info.and_then(|value| value.description.as_deref()),
-            source_url: info.and_then(|value| value.source_url.as_deref()),
-            gender: info
-                .and_then(|value| value.gender)
-                .map(|value| value.as_db_str()),
+            description: None,
+            source_url: None,
+            gender: None,
         },
     )
-    .await
+    .await?;
+
+    get_backend_artist_info(settings, name).await
 }
 
 pub async fn save_backend_album_info(
@@ -974,6 +977,22 @@ fn normalize_backend_url(value: &str) -> Result<String> {
         normalized.pop();
     }
     Ok(normalized)
+}
+
+fn resolve_backend_asset_url(base_url: &str, value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if reqwest::Url::parse(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+
+    reqwest::Url::parse(base_url)
+        .and_then(|base| base.join(trimmed))
+        .map(|resolved| resolved.to_string())
+        .unwrap_or_else(|_| trimmed.to_string())
 }
 
 fn backend_url_from_settings(settings: &AppSettings, raw_url_override: Option<&str>) -> Result<String> {
