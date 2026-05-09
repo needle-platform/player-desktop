@@ -7354,6 +7354,7 @@ function AlbumDetailView({
   const { info, loading: infoLoading, retrying: infoRetrying, retry: retryAlbumInfo } = useAlbumInfo(
     album,
     primaryArtist,
+    { autoRefreshOnMiss: true },
   );
 
   useEffect(() => {

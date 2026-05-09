@@ -1864,25 +1864,17 @@ async fn refresh_album_info(
         let existing = backend::get_backend_album_info(&settings, &album_trim, artist_trim.as_deref())
             .await
             .map_err(|error| error.to_string())?;
-        match album::fetch_album_info(&album_trim, artist_trim.as_deref()).await {
-            Ok(Some(info)) => {
-                backend::save_backend_album_info(&settings, &album_trim, artist_trim.as_deref(), Some(&info))
-                    .await
-                    .map_err(|error| error.to_string())?;
-                return Ok(Some(info));
-            }
+        match backend::refresh_backend_album_info(&settings, &album_trim, artist_trim.as_deref()).await {
+            Ok(Some(info)) => return Ok(Some(info)),
             Ok(None) => {
-                if existing.is_some() {
-                    return Ok(existing);
+                if let Some(info) = existing {
+                    return Ok(Some(info));
                 }
-                backend::save_backend_album_info(&settings, &album_trim, artist_trim.as_deref(), None)
-                    .await
-                    .map_err(|error| error.to_string())?;
                 return Ok(None);
             }
             Err(error) => {
-                if existing.is_some() {
-                    return Ok(existing);
+                if let Some(info) = existing {
+                    return Ok(Some(info));
                 }
                 return Err(error.to_string());
             }

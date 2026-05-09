@@ -121,6 +121,7 @@ struct RawSubsonicAlbumDetail {
 #[serde(rename_all = "camelCase")]
 struct RawAlbumInfo {
     notes: Option<String>,
+    source_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -588,7 +589,7 @@ pub async fn get_backend_album_info(
     let detail = get_json::<RawAlbumDetailPayload>(&client, settings, &url, &format!("/api/album/{}", album_summary.id)).await?;
     Ok(detail.info.map(|info| album::AlbumInfo {
         description: info.notes,
-        source_url: None,
+        source_url: info.source_url,
         source: "backend".into(),
     }))
 }
@@ -734,27 +735,28 @@ pub async fn refresh_backend_artist_info(
     get_backend_artist_info(settings, name).await
 }
 
-pub async fn save_backend_album_info(
+pub async fn refresh_backend_album_info(
     settings: &AppSettings,
     album_name: &str,
     artist_name: Option<&str>,
-    info: Option<&album::AlbumInfo>,
-) -> Result<()> {
+) -> Result<Option<album::AlbumInfo>> {
     let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     post_json_expect_empty(
         &client,
         settings,
         &url,
-        "/api/needle/desktop/album-info",
+        "/api/needle/desktop/album-info/refresh",
         &RawAlbumInfoPayload {
             album: album_name,
             artist: artist_name,
-            description: info.and_then(|value| value.description.as_deref()),
-            source_url: info.and_then(|value| value.source_url.as_deref()),
+            description: None,
+            source_url: None,
         },
     )
-    .await
+    .await?;
+
+    get_backend_album_info(settings, album_name, artist_name).await
 }
 
 pub async fn save_backend_album_genre(

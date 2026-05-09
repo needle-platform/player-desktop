@@ -225,6 +225,7 @@ What works today:
 - backend-mode album genre editing, including `Needle only` saves and backend file write-back when the server allows it
 - backend-mode MusicBrainz album metadata refresh, using the existing desktop matcher against backend library tracks
 - backend-owned artist photo and biography refresh in backend mode, with shared results stored once on the homeserver for every connected app
+- backend-owned album notes refresh in backend mode, with shared album descriptions and source links stored once on the homeserver for every connected app
 - selective offline downloads for backend-mode tracks and albums, with a local cache that playback prefers automatically
 - backend-aware Settings UI with tabbed organization for `Library`, `Playback`, and `Appearance`
 
@@ -234,6 +235,7 @@ What this means in practice:
 - the first Needle backend account is created from the web player on first launch, then reused by desktop clients
 - `Needle backend` now loads the shared library, playlists, favourites, loudness data, and migrated cache data from the backend
 - artist detail pages now auto-trigger a one-shot backend enrichment pass when the shared artist photo or biography is still missing, then repaint from the backend result when it arrives
+- album detail pages now auto-trigger a one-shot backend enrichment pass when the shared album notes are still missing, then repaint from the backend result when it arrives
 - protected backend APIs use the saved Needle credentials, while native `mpv` playback still pulls direct original media and artwork from the backend without a per-track login handshake
 - backend mode now keeps desktop-only quality-of-life behavior such as dashboard artist-art fallbacks and shared MusicBrainz cleanup workflows closer to local-mode expectations
 - native desktop listening features such as `mpv`, EQ, mini player, and deeper curation still stay on the desktop side
