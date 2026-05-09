@@ -796,6 +796,20 @@ pub fn backend_stream_url(settings: &AppSettings, track_path: &str) -> Result<St
     Ok(format!("{url}/api/stream/{track_id}?format=raw"))
 }
 
+pub fn backend_analysis_stream_url(settings: &AppSettings, track_path: &str) -> Result<String> {
+    let stream_url = backend_stream_url(settings, track_path)?;
+    let (username, password) = backend_credentials(settings)?;
+    let mut parsed = reqwest::Url::parse(&stream_url)
+        .with_context(|| format!("Invalid Needle backend stream URL: {stream_url}"))?;
+    parsed
+        .set_username(username)
+        .map_err(|_| anyhow!("Needle backend username contains characters that cannot be used in a stream URL"))?;
+    parsed
+        .set_password(Some(password))
+        .map_err(|_| anyhow!("Needle backend password contains characters that cannot be used in a stream URL"))?;
+    Ok(parsed.to_string())
+}
+
 pub async fn download_backend_track(
     settings: &AppSettings,
     track_path: &str,

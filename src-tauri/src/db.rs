@@ -49,6 +49,23 @@ pub struct TrackLoudnessAnalysisRecord {
     pub analysis_version: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct BackendTrackLoudnessCacheEntry {
+    pub track_path: String,
+    pub source_fingerprint: String,
+    pub analysis_version: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackendTrackLoudnessAnalysisRecord {
+    pub track_path: String,
+    pub integrated_lufs: f32,
+    pub true_peak_db: f32,
+    pub target_gain_db: f32,
+    pub source_fingerprint: String,
+    pub analysis_version: i64,
+}
+
 pub fn init_database(db_path: &Path) -> Result<()> {
     let connection = Connection::open(db_path)?;
 
@@ -163,6 +180,16 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             target_gain_db REAL NOT NULL,
             file_size INTEGER NOT NULL,
             file_modified_at INTEGER NOT NULL,
+            analysis_version INTEGER NOT NULL DEFAULT 1,
+            analyzed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS backend_track_loudness (
+            track_path TEXT PRIMARY KEY,
+            integrated_lufs REAL NOT NULL,
+            true_peak_db REAL NOT NULL,
+            target_gain_db REAL NOT NULL,
+            source_fingerprint TEXT NOT NULL,
             analysis_version INTEGER NOT NULL DEFAULT 1,
             analyzed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -1258,6 +1285,18 @@ pub fn get_track_loudness_gain(db_path: &Path, path: &str) -> Result<Option<f32>
         .map_err(Into::into)
 }
 
+pub fn get_backend_track_loudness_gain(db_path: &Path, path: &str) -> Result<Option<f32>> {
+    let connection = Connection::open(db_path)?;
+    connection
+        .query_row(
+            "SELECT target_gain_db FROM backend_track_loudness WHERE track_path = ?1",
+            params![path],
+            |row| row.get::<_, f32>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
 pub fn list_tracks_for_loudness_analysis(
     db_path: &Path,
 ) -> Result<Vec<TrackLoudnessAnalysisCandidate>> {
@@ -2055,6 +2094,79 @@ fn ensure_playlist_is_track_editable_tx(
     if load_playlist_rule_tx(transaction, playlist_id)?.is_some() {
         bail!("Auto-updating playlists can't be edited manually");
     }
+
+    Ok(())
+}
+
+pub fn list_backend_track_loudness_cache(
+    db_path: &Path,
+) -> Result<Vec<BackendTrackLoudnessCacheEntry>> {
+    let connection = Connection::open(db_path)?;
+    let mut statement = connection.prepare(
+        "
+        SELECT track_path, source_fingerprint, analysis_version
+        FROM backend_track_loudness
+        ",
+    )?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(BackendTrackLoudnessCacheEntry {
+                track_path: row.get(0)?,
+                source_fingerprint: row.get(1)?,
+                analysis_version: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)?;
+
+    Ok(rows)
+}
+
+pub fn save_backend_track_loudness_records(
+    db_path: &Path,
+    records: &[BackendTrackLoudnessAnalysisRecord],
+) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    let mut statement = transaction.prepare(
+        "
+        INSERT INTO backend_track_loudness (
+            track_path,
+            integrated_lufs,
+            true_peak_db,
+            target_gain_db,
+            source_fingerprint,
+            analysis_version,
+            analyzed_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)
+        ON CONFLICT(track_path) DO UPDATE SET
+            integrated_lufs = excluded.integrated_lufs,
+            true_peak_db = excluded.true_peak_db,
+            target_gain_db = excluded.target_gain_db,
+            source_fingerprint = excluded.source_fingerprint,
+            analysis_version = excluded.analysis_version,
+            analyzed_at = excluded.analyzed_at
+        ",
+    )?;
+
+    for record in records {
+        statement.execute(params![
+            record.track_path,
+            record.integrated_lufs,
+            record.true_peak_db,
+            record.target_gain_db,
+            record.source_fingerprint,
+            record.analysis_version,
+        ])?;
+    }
+
+    drop(statement);
+    transaction.commit()?;
 
     Ok(())
 }

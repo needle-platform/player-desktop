@@ -61,11 +61,24 @@ fn volume_leveling_gain_for_path(
     if matches!(settings.library_source, LibrarySource::NeedleBackend)
         && backend::is_backend_track_path(track_path)
     {
-        return tauri::async_runtime::block_on(backend::get_backend_track_gain(
+        match tauri::async_runtime::block_on(backend::get_backend_track_gain(
             &settings,
             track_path,
-        ))
-        .map_err(|error| error.to_string());
+        )) {
+            Ok(Some(gain)) => return Ok(Some(gain)),
+            Ok(None) => {
+                return db::get_backend_track_loudness_gain(db_path, track_path)
+                    .map_err(|error| error.to_string())
+            }
+            Err(error) => {
+                if let Some(gain) = db::get_backend_track_loudness_gain(db_path, track_path)
+                    .map_err(|db_error| db_error.to_string())?
+                {
+                    return Ok(Some(gain));
+                }
+                return Err(error.to_string());
+            }
+        }
     }
 
     db::get_track_loudness_gain(db_path, track_path).map_err(|error| error.to_string())
@@ -1241,11 +1254,43 @@ async fn run_loudness_analysis(
     state: tauri::State<'_, AppState>,
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
-    if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Loudness analysis is not available from desktop backend mode yet".to_string());
-    }
     let db_path = state.db_path.clone();
     let app_handle = app.clone();
+
+    if matches!(settings.library_source, LibrarySource::NeedleBackend) {
+        let backend_bootstrap = backend::load_backend_bootstrap(settings.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        let offline_downloads = prune_and_list_offline_downloads(&db_path)?;
+        let analysis_settings = settings.clone();
+        let backend_tracks = backend_bootstrap.library.tracks.clone();
+
+        tauri::async_runtime::spawn_blocking(move || {
+            let emit_log = |message: String| {
+                let _ = app_handle.emit("loudness-analysis-log", message);
+            };
+            let emit_progress = |progress: loudness::LoudnessAnalysisProgress| {
+                let _ = app_handle.emit("loudness-analysis-progress", progress);
+            };
+
+            loudness::analyze_backend_library(
+                &db_path,
+                &analysis_settings,
+                &backend_tracks,
+                &offline_downloads,
+                emit_log,
+                emit_progress,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+
+        let refreshed_settings = load_settings_for_current_mode(&state.db_path)?;
+        return backend::load_backend_bootstrap(refreshed_settings)
+            .await
+            .map_err(|error| error.to_string());
+    }
 
     tauri::async_runtime::spawn_blocking(move || {
         let emit_log = |message: String| {

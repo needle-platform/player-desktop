@@ -219,6 +219,7 @@ What works today:
 - backend-backed library bootstrap in the Tauri app
 - authenticated backend API access for bootstrap, playlists, metadata/state sync, and maintenance calls
 - backend-backed playback while still keeping native `mpv` playback on desktop
+- backend-mode loudness analysis from the desktop app, reusing offline downloads when present and falling back to backend streams when needed
 - backend-mode album genre editing, including `Needle only` saves and backend file write-back when the server allows it
 - backend-mode MusicBrainz album metadata refresh, using the existing desktop matcher against backend library tracks
 - selective offline downloads for backend-mode tracks and albums, with a local cache that playback prefers automatically
@@ -252,6 +253,7 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 - **BPM editing** can stay local to Needle or write back to the embedded file tags, depending on the metadata save mode you choose in Settings
 - **BPM sanity review** compares genre-family expectations with album-local BPM medians so obvious half/double-time spikes can be reviewed, bulk-applied, auto-fixed when confidence is strong enough, while tracks with no BPM tag are pulled into the same maintenance flow for manual review
 - **Optional loudness analysis** stores LUFS / peak-derived gain data locally so Needle can level mixed queues when you enable volume leveling
+- **Backend-mode loudness analysis** can scan either cached offline downloads or authenticated backend streams, so volume leveling still works while the library itself lives on Needle backend
 - **Two-worker loudness scans** make the first analysis pass much more practical on modern Macs without overcommitting the whole machine
 - **Version-aware loudness refresh messaging** calls out when a full-library rerun is expected because Needle upgraded its loudness-analysis method
 - **Playlist-local genre focus** lets smart playlists keep their generated order while narrowing the current mix to one or more genres already represented in that playlist

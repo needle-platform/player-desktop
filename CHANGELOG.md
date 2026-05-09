@@ -10,6 +10,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Added backend runtime details in Settings so the current Needle app version and loudness-analysis version are visible in-app.
 
 ### Changed
+- Loudness analysis now runs from desktop backend mode too, using cached offline files when available and authenticated backend streams for the rest.
 - Loudness analysis now explains when a full-library rerun is intentional because cached results came from an older loudness-analysis version.
 
 ## [0.1.2] - 2026-05-04
