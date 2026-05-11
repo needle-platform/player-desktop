@@ -8,6 +8,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 
 ### Added
 - Added backend runtime details in Settings so the current Needle app version and loudness-analysis version are visible in-app.
+- Added backend-mode custom artist photo uploads from the artist page, including a quick “use automatic photo again” reset path.
 
 ### Changed
 - Loudness analysis now runs from desktop backend mode too, using cached offline files when available and authenticated backend streams for the rest.
@@ -18,6 +19,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 ### Fixed
 - Fixed desktop backend mode so homeserver outages no longer hang the app indefinitely, and startup now falls back to cached backend data or downloaded tracks for offline playback with a clear in-app offline-mode notice.
 - Fixed backend-mode artist pages so a missing shared photo or biography now auto-triggers a one-shot backend refresh and re-renders when the homeserver finishes enrichment.
+- Fixed backend-mode custom artist photo updates so replacing an existing portrait now repaints immediately on the current artist page instead of waiting for navigation.
 - Fixed backend-mode album pages so missing shared album notes now auto-trigger a one-shot backend refresh and re-render when the homeserver finishes enrichment.
 
 ## [0.1.2] - 2026-05-04

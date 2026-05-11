@@ -94,6 +94,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - Cached in SQLite (`artist_images`) for 30 days, including misses so we don't keep hammering the API
 - Cached in SQLite (`artist_info`) for 90 days on successful lookups, while empty misses expire quickly so transient upstream failures do not stick around for months
 - **Artist-page recovery tools** are hidden behind a right-click menu on the hero portrait for Refresh photo / Refresh bio, with loading feedback during background refreshes
+- **Backend-mode custom artist photos** can be uploaded from that same right-click portrait menu when automatic enrichment picks a poor image, and you can switch back to the automatic source later without leaving the artist page
 - **Graceful artwork fallback** uses the artist's album art across the artist page and Artists browser before falling back to a gradient initial when no portrait loads
 - **Artists browser performance** favors cached portraits and lazy offscreen loading so large artist grids feel fast without hammering remote lookups up front
 

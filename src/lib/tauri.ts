@@ -187,6 +187,12 @@ export const peekArtistImage = (name: string) =>
 export const refreshArtistImage = (name: string) =>
   invoke<ArtistImage | null>('refresh_artist_image', { name });
 
+export const uploadCustomArtistImage = (name: string, imagePath: string) =>
+  invoke<ArtistImage | null>('upload_custom_artist_image', { name, imagePath });
+
+export const restoreAutomaticArtistImage = (name: string) =>
+  invoke<ArtistImage | null>('restore_automatic_artist_image', { name });
+
 export interface ArtistInfo {
   description: string | null;
   source_url: string | null;

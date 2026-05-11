@@ -122,13 +122,23 @@ fn migrate_legacy_app_data(app_data_dir: &Path) {
     }
 }
 
+fn finalize_loaded_backend_bootstrap(
+    db_path: &Path,
+    bootstrap: BootstrapPayload,
+) -> Result<BootstrapPayload, String> {
+    db::save_backend_bootstrap_cache(db_path, &bootstrap).map_err(|error| error.to_string())?;
+    let _ = db::save_playback_session(db_path, &bootstrap.playback_session);
+    Ok(bootstrap)
+}
+
 fn load_bootstrap_for_current_mode(db_path: &Path) -> Result<BootstrapPayload, String> {
     let settings = db::load_settings(db_path).map_err(|error| error.to_string())?;
     match settings.library_source {
-        LibrarySource::NeedleBackend => tauri::async_runtime::block_on(
-            backend::load_backend_bootstrap(settings),
-        )
-        .map_err(|error| error.to_string()),
+        LibrarySource::NeedleBackend => {
+            let bootstrap = tauri::async_runtime::block_on(backend::load_backend_bootstrap(settings))
+                .map_err(|error| error.to_string())?;
+            finalize_loaded_backend_bootstrap(db_path, bootstrap)
+        }
         LibrarySource::LocalFolders => db::load_bootstrap(db_path).map_err(|error| error.to_string()),
     }
 }
@@ -257,8 +267,7 @@ fn load_bootstrap_state_for_current_mode(db_path: &Path) -> Result<AppBootstrapS
 
     match tauri::async_runtime::block_on(backend::load_backend_bootstrap(settings.clone())) {
         Ok(bootstrap) => {
-            db::save_backend_bootstrap_cache(db_path, &bootstrap).map_err(|error| error.to_string())?;
-            let _ = db::save_playback_session(db_path, &bootstrap.playback_session);
+            let bootstrap = finalize_loaded_backend_bootstrap(db_path, bootstrap)?;
             Ok(AppBootstrapState {
                 bootstrap,
                 startup_notice: None,
@@ -1124,14 +1133,15 @@ fn set_album_primary_genre(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return tauri::async_runtime::block_on(backend::save_backend_album_genre(
+        let bootstrap = tauri::async_runtime::block_on(backend::save_backend_album_genre(
             &settings,
             &album,
             album_artist.as_deref(),
             primary_genre.as_deref(),
             MetadataEditMode::NeedleOnly,
         ))
-        .map_err(|error| error.to_string());
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
     db::set_album_primary_genre(
         &state.db_path,
@@ -1154,14 +1164,15 @@ fn save_album_genre(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return tauri::async_runtime::block_on(backend::save_backend_album_genre(
+        let bootstrap = tauri::async_runtime::block_on(backend::save_backend_album_genre(
             &settings,
             &album,
             album_artist.as_deref(),
             genre.as_deref(),
             mode,
         ))
-        .map_err(|error| error.to_string());
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
     if track_paths.is_empty() {
         return Err("No tracks were provided for this album edit".to_string());
@@ -1208,10 +1219,13 @@ fn set_track_rating(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     match settings.library_source {
-        LibrarySource::NeedleBackend => tauri::async_runtime::block_on(
-            backend::set_backend_track_rating(&settings, &path, rating),
-        )
-        .map_err(|error| error.to_string()),
+        LibrarySource::NeedleBackend => {
+            let bootstrap = tauri::async_runtime::block_on(
+                backend::set_backend_track_rating(&settings, &path, rating),
+            )
+            .map_err(|error| error.to_string())?;
+            finalize_loaded_backend_bootstrap(&state.db_path, bootstrap)
+        }
         LibrarySource::LocalFolders => {
             db::set_track_rating(&state.db_path, &path, rating).map_err(|error| error.to_string())?;
             db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
@@ -1227,10 +1241,13 @@ fn set_track_favorite(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     match settings.library_source {
-        LibrarySource::NeedleBackend => tauri::async_runtime::block_on(
-            backend::set_backend_track_favorite(&settings, &path, favorite),
-        )
-        .map_err(|error| error.to_string()),
+        LibrarySource::NeedleBackend => {
+            let bootstrap = tauri::async_runtime::block_on(
+                backend::set_backend_track_favorite(&settings, &path, favorite),
+            )
+            .map_err(|error| error.to_string())?;
+            finalize_loaded_backend_bootstrap(&state.db_path, bootstrap)
+        }
         LibrarySource::LocalFolders => {
             db::set_track_favorite(&state.db_path, &path, favorite).map_err(|error| error.to_string())?;
             db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
@@ -1247,7 +1264,14 @@ fn save_track_bpm(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("BPM editing is not available in Needle backend mode yet".to_string());
+        let bootstrap = tauri::async_runtime::block_on(backend::save_backend_track_bpm(
+            &settings,
+            &path,
+            Some(bpm.max(1)),
+            mode,
+        ))
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
     let normalized_bpm = bpm.max(1);
     match mode {
@@ -1276,7 +1300,39 @@ fn adjust_track_bpm(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("BPM editing is not available in Needle backend mode yet".to_string());
+        let current = load_bootstrap_for_current_mode(&state.db_path)?;
+        let track = current
+            .library
+            .tracks
+            .iter()
+            .find(|track| track.path == path)
+            .ok_or_else(|| "Track not found in the current backend library".to_string())?;
+        let next_bpm = match adjustment {
+            TrackBpmAdjustment::Reset => None,
+            TrackBpmAdjustment::Double => Some(
+                track
+                    .bpm
+                    .ok_or_else(|| "No BPM available for this track".to_string())?
+                    .saturating_mul(2)
+                    .max(1),
+            ),
+            TrackBpmAdjustment::Half => Some(
+                ((track
+                    .bpm
+                    .ok_or_else(|| "No BPM available for this track".to_string())? as f64)
+                    / 2.0)
+                    .round()
+                    .max(1.0) as i64,
+            ),
+        };
+        let bootstrap = tauri::async_runtime::block_on(backend::save_backend_track_bpm(
+            &settings,
+            &path,
+            next_bpm,
+            MetadataEditMode::NeedleOnly,
+        ))
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
     db::adjust_track_bpm(&state.db_path, &path, adjustment).map_err(|error| error.to_string())?;
     db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
@@ -1443,9 +1499,12 @@ async fn run_loudness_analysis(
     let app_handle = app.clone();
 
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        let backend_bootstrap = backend::load_backend_bootstrap(settings.clone())
-            .await
-            .map_err(|error| error.to_string())?;
+        let backend_bootstrap = finalize_loaded_backend_bootstrap(
+            &db_path,
+            backend::load_backend_bootstrap(settings.clone())
+                .await
+                .map_err(|error| error.to_string())?,
+        )?;
         let offline_downloads = prune_and_list_offline_downloads(&db_path)?;
         let analysis_settings = settings.clone();
         let backend_tracks = backend_bootstrap.library.tracks.clone();
@@ -1472,9 +1531,10 @@ async fn run_loudness_analysis(
         .map_err(|error| error.to_string())??;
 
         let refreshed_settings = load_settings_for_current_mode(&state.db_path)?;
-        return backend::load_backend_bootstrap(refreshed_settings)
+        let bootstrap = backend::load_backend_bootstrap(refreshed_settings)
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -1643,6 +1703,52 @@ async fn refresh_artist_image(
             Err(error.to_string())
         }
     }
+}
+
+#[tauri::command]
+async fn upload_custom_artist_image(
+    name: String,
+    image_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<artist::ArtistImage>, String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let path = image_path.trim().to_string();
+    if path.is_empty() {
+        return Err("Please choose an image file".to_string());
+    }
+
+    let settings = load_settings_for_current_mode(&state.db_path)?;
+    if !matches!(settings.library_source, LibrarySource::NeedleBackend) {
+        return Err("Custom artist photo uploads are available only in Needle backend mode right now".to_string());
+    }
+
+    backend::upload_backend_artist_image(&settings, &trimmed, Path::new(&path))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn restore_automatic_artist_image(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<artist::ArtistImage>, String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let settings = load_settings_for_current_mode(&state.db_path)?;
+    if !matches!(settings.library_source, LibrarySource::NeedleBackend) {
+        return Err("Automatic artist photo restore is available only in Needle backend mode right now".to_string());
+    }
+
+    backend::restore_backend_artist_image(&settings, &trimmed)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1945,9 +2051,12 @@ async fn refresh_album_metadata_from_musicbrainz(
         Ok(result) => result,
         Err(error) => {
             let bootstrap = if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-                backend::load_backend_bootstrap(settings.clone())
-                    .await
-                    .map_err(|db_error| db_error.to_string())?
+                finalize_loaded_backend_bootstrap(
+                    &state.db_path,
+                    backend::load_backend_bootstrap(settings.clone())
+                        .await
+                        .map_err(|db_error| db_error.to_string())?,
+                )?
             } else {
                 db::load_bootstrap(&state.db_path).map_err(|db_error| db_error.to_string())?
             };
@@ -1968,9 +2077,12 @@ async fn refresh_album_metadata_from_musicbrainz(
 
     if matches!(result.status, AlbumMetadataRefreshStatus::Matched) {
         if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-            let bootstrap = backend::apply_backend_metadata_refresh(&settings, &result.overrides)
-                .await
-                .map_err(|error| error.to_string())?;
+            let bootstrap = finalize_loaded_backend_bootstrap(
+                &state.db_path,
+                backend::apply_backend_metadata_refresh(&settings, &result.overrides)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            )?;
             return Ok(AlbumMetadataRefreshResult {
                 status: result.status,
                 album: album_trim,
@@ -1990,9 +2102,12 @@ async fn refresh_album_metadata_from_musicbrainz(
     }
 
     let bootstrap = if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        backend::load_backend_bootstrap(settings.clone())
-            .await
-            .map_err(|error| error.to_string())?
+        finalize_loaded_backend_bootstrap(
+            &state.db_path,
+            backend::load_backend_bootstrap(settings.clone())
+                .await
+                .map_err(|error| error.to_string())?,
+        )?
     } else {
         db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())?
     };
@@ -2150,6 +2265,8 @@ pub fn run() {
             get_artist_image,
             peek_artist_image,
             refresh_artist_image,
+            upload_custom_artist_image,
+            restore_automatic_artist_image,
             get_artist_info,
             refresh_artist_info,
             get_album_info,

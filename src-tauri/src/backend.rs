@@ -179,6 +179,14 @@ struct RawAlbumGenrePayload<'a> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RawTrackBpmPayload<'a> {
+    id: &'a str,
+    bpm: Option<i64>,
+    mode: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RawMetadataRefreshOverride {
     id: String,
     title: Option<String>,
@@ -208,6 +216,10 @@ struct RawMetadataRefreshPayload {
 struct RawArtistImagePayload<'a> {
     name: &'a str,
     url: Option<&'a str>,
+    content_type: Option<&'a str>,
+    data_base64: Option<&'a str>,
+    clear_manual: bool,
+    is_manual: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -447,6 +459,34 @@ pub async fn set_backend_track_rating(
     let client = http_client()?;
     let normalized_rating = rating.unwrap_or(0).clamp(0, 5);
     post_json_expect_empty(&client, settings, &url, "/api/tracks/rating", &RawRatingPayload { id: track_id, rating: normalized_rating }).await?;
+    load_backend_bootstrap(settings.clone()).await
+}
+
+pub async fn save_backend_track_bpm(
+    settings: &AppSettings,
+    track_path: &str,
+    bpm: Option<i64>,
+    mode: MetadataEditMode,
+) -> Result<BootstrapPayload> {
+    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
+    let client = http_client()?;
+    let mode_name = match mode {
+        MetadataEditMode::NeedleOnly => "needle_only",
+        MetadataEditMode::WriteToFiles => "write_to_files",
+    };
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/tracks/bpm",
+        &RawTrackBpmPayload {
+            id: track_id,
+            bpm: bpm.map(|value| value.max(1)),
+            mode: mode_name,
+        },
+    )
+    .await?;
     load_backend_bootstrap(settings.clone()).await
 }
 
@@ -705,6 +745,70 @@ pub async fn refresh_backend_artist_image(
         &RawArtistImagePayload {
             name,
             url: None,
+            content_type: None,
+            data_base64: None,
+            clear_manual: false,
+            is_manual: false,
+        },
+    )
+    .await?;
+
+    get_backend_artist_image(settings, name).await
+}
+
+pub async fn upload_backend_artist_image(
+    settings: &AppSettings,
+    name: &str,
+    image_path: &Path,
+) -> Result<Option<artist::ArtistImage>> {
+    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let bytes = std::fs::read(image_path)
+        .with_context(|| format!("Unable to read artist image from {}", image_path.display()))?;
+    if bytes.is_empty() {
+        bail!("The selected artist image file was empty");
+    }
+
+    let content_type = content_type_from_image_path(image_path)
+        .ok_or_else(|| anyhow!("Please choose a JPEG, PNG, WebP, GIF, or BMP image"))?;
+    let client = http_client()?;
+    let encoded = BASE64.encode(&bytes);
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/needle/desktop/artist-image",
+        &RawArtistImagePayload {
+            name,
+            url: None,
+            content_type: Some(content_type),
+            data_base64: Some(&encoded),
+            clear_manual: false,
+            is_manual: true,
+        },
+    )
+    .await?;
+
+    get_backend_artist_image(settings, name).await
+}
+
+pub async fn restore_backend_artist_image(
+    settings: &AppSettings,
+    name: &str,
+) -> Result<Option<artist::ArtistImage>> {
+    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/needle/desktop/artist-image",
+        &RawArtistImagePayload {
+            name,
+            url: None,
+            content_type: None,
+            data_base64: None,
+            clear_manual: true,
+            is_manual: false,
         },
     )
     .await?;
@@ -1234,6 +1338,18 @@ fn extension_from_content_type(content_type: Option<&str>) -> Option<&'static st
         "audio/opus" => Some("opus"),
         "audio/x-aiff" => Some("aiff"),
         "audio/aiff" => Some("aiff"),
+        _ => None,
+    }
+}
+
+fn content_type_from_image_path(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.trim().to_ascii_lowercase();
+    match extension.as_str() {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        "bmp" => Some("image/bmp"),
         _ => None,
     }
 }

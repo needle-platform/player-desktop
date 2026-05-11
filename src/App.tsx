@@ -26,6 +26,7 @@ import {
   playQueue as tauriPlayQueue,
   playTrack,
   recordPlay,
+  restoreAutomaticArtistImage as restoreAutomaticBackendArtistImage,
   removePlaylistTrack,
   removeQueueIndex as tauriRemoveQueueIndex,
   removeLibraryRoot,
@@ -51,6 +52,7 @@ import {
   seekPlayback,
   stopPlayback,
   syncPlaybackSession,
+  uploadCustomArtistImage,
 } from './lib/tauri';
 import type {
   AudioDevice,
@@ -5127,6 +5129,9 @@ function App() {
             onAdjustBpm={adjustTrackBpmValue}
             onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
             pendingBpmPaths={pendingTrackBpms}
+            isNeedleBackendMode={isNeedleBackendMode}
+            onSetBusy={setBusy}
+            onSetStatus={setStatus}
           />
         )}
 
@@ -7700,6 +7705,9 @@ interface ArtistDetailViewProps {
   onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
   onOpenBpmEditor: (track: Track) => void;
   pendingBpmPaths: string[];
+  isNeedleBackendMode: boolean;
+  onSetBusy: (value: string | null) => void;
+  onSetStatus: (value: string) => void;
 }
 
 function ArtistDetailView({
@@ -7736,14 +7744,19 @@ function ArtistDetailView({
   onAdjustBpm,
   onOpenBpmEditor,
   pendingBpmPaths,
+  isNeedleBackendMode,
+  onSetBusy,
+  onSetStatus,
 }: ArtistDetailViewProps) {
   const [isBioExpanded, setIsBioExpanded] = useState(false);
   const [isImageMenuOpen, setIsImageMenuOpen] = useState(false);
+  const [isArtistPhotoUpdating, setIsArtistPhotoUpdating] = useState(false);
   const imageMenuRef = useRef<HTMLDivElement | null>(null);
   const {
     url: artistImageUrl,
     retrying: artistImageRetrying,
     retry: retryArtistImage,
+    reload: reloadArtistImage,
   } = useArtistImage(artist, { autoRefreshOnMiss: true });
   const { info, loading: infoLoading, retrying: infoRetrying, retry: retryArtistInfo } = useArtistInfo(artist, {
     autoRefreshOnMiss: true,
@@ -7790,6 +7803,51 @@ function ArtistDetailView({
   const fallbackArtworkPath = artistAlbums[0]?.samplePath ?? artistTracks[0]?.path ?? null;
   const shouldClampBio = (info?.description?.length ?? 0) > 320;
   const canRefreshBio = infoLoading || infoRetrying ? false : true;
+  const isArtistPhotoActionBusy = artistImageRetrying || isArtistPhotoUpdating;
+
+  const handleUploadArtistPhoto = async () => {
+    if (!isNeedleBackendMode) return;
+
+    const selection = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'] }],
+    });
+    const imagePath = Array.isArray(selection) ? selection[0] ?? null : selection;
+    if (!imagePath || typeof imagePath !== 'string') {
+      return;
+    }
+
+    setIsArtistPhotoUpdating(true);
+    onSetBusy('Uploading artist photo…');
+    try {
+      await uploadCustomArtistImage(artist, imagePath);
+      await reloadArtistImage();
+      onSetStatus(`Updated artist photo · ${artist}`);
+    } catch (error) {
+      onSetStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsArtistPhotoUpdating(false);
+      onSetBusy(null);
+    }
+  };
+
+  const handleRestoreAutomaticArtistPhoto = async () => {
+    if (!isNeedleBackendMode) return;
+
+    setIsArtistPhotoUpdating(true);
+    onSetBusy('Restoring automatic artist photo…');
+    try {
+      await restoreAutomaticBackendArtistImage(artist);
+      await reloadArtistImage();
+      onSetStatus(`Restored automatic artist photo · ${artist}`);
+    } catch (error) {
+      onSetStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsArtistPhotoUpdating(false);
+      onSetBusy(null);
+    }
+  };
   useEffect(() => {
     setIsBioExpanded(false);
     setIsImageMenuOpen(false);
@@ -7840,21 +7898,49 @@ function ArtistDetailView({
             urlOverride={artistImageUrl}
             fallbackTrackPath={fallbackArtworkPath}
           />
-          {artistImageRetrying && (
+          {isArtistPhotoActionBusy && (
             <div className="artist-image-refresh-overlay" aria-hidden="true">
               <div className="artist-image-refresh-spinner" />
-              <div className="artist-image-refresh-label">Refreshing photo…</div>
+              <div className="artist-image-refresh-label">
+                {isArtistPhotoUpdating ? 'Updating photo…' : 'Refreshing photo…'}
+              </div>
             </div>
           )}
           {isImageMenuOpen && (
             <div className="artist-image-menu-panel" role="menu" aria-label={`Refresh options for ${artist}`}>
+              {isNeedleBackendMode && (
+                <button
+                  className="artist-image-menu-option"
+                  onClick={() => {
+                    setIsImageMenuOpen(false);
+                    void handleUploadArtistPhoto();
+                  }}
+                  disabled={isArtistPhotoActionBusy}
+                  role="menuitem"
+                >
+                  {isArtistPhotoUpdating ? 'Updating photo…' : 'Upload photo…'}
+                </button>
+              )}
+              {isNeedleBackendMode && (
+                <button
+                  className="artist-image-menu-option"
+                  onClick={() => {
+                    setIsImageMenuOpen(false);
+                    void handleRestoreAutomaticArtistPhoto();
+                  }}
+                  disabled={isArtistPhotoActionBusy}
+                  role="menuitem"
+                >
+                  Use automatic photo again
+                </button>
+              )}
               <button
                 className="artist-image-menu-option"
                 onClick={() => {
                   setIsImageMenuOpen(false);
                   void retryArtistImage();
                 }}
-                disabled={artistImageRetrying}
+                disabled={isArtistPhotoActionBusy}
                 role="menuitem"
               >
                 {artistImageRetrying ? 'Refreshing photo…' : 'Refresh photo'}

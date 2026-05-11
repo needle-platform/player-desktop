@@ -37,6 +37,19 @@ const seedArtistImageCaches = (name: string, url: string | null) => {
   peekCache.set(name, url);
 };
 
+const withCacheBust = (url: string | null): string | null => {
+  if (!url) return null;
+  if (!/^https?:/i.test(url)) return url;
+
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set('cb', `${Date.now()}`);
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+};
+
 const fetchOnce = (name: string): Promise<string | null> => {
   if (fullCache.has(name)) return Promise.resolve(fullCache.get(name) ?? null);
   const existing = fullInflight.get(name);
@@ -88,6 +101,7 @@ export interface ArtistImageState {
   loading: boolean;
   retrying: boolean;
   retry: () => Promise<void>;
+  reload: () => Promise<void>;
 }
 
 interface UseArtistImageOptions {
@@ -106,7 +120,7 @@ export function useArtistImage(
   const enabled = options?.enabled !== false;
   const autoRefreshOnMiss = options?.autoRefreshOnMiss === true;
   const cache = cacheOnly ? peekCache : fullCache;
-  const [state, setState] = useState<Omit<ArtistImageState, 'retry'>>(() => {
+  const [state, setState] = useState<Omit<ArtistImageState, 'retry' | 'reload'>>(() => {
     if (!name) return { url: null, loading: false, retrying: false };
     if (cache.has(name)) {
       return { url: cache.get(name) ?? null, loading: false, retrying: false };
@@ -197,7 +211,7 @@ export function useArtistImage(
     setState((current) => ({ ...current, loading: true, retrying: true }));
     try {
       const result = await refreshArtistImage(name);
-      const url = result?.url ?? null;
+      const url = withCacheBust(result?.url ?? null);
       seedArtistImageCaches(name, url);
       setState({ url, loading: false, retrying: false });
     } catch {
@@ -205,5 +219,22 @@ export function useArtistImage(
     }
   };
 
-  return { ...state, retry };
+  const reload = async () => {
+    if (!name) return;
+    fullCache.delete(name);
+    fullInflight.delete(name);
+    peekCache.delete(name);
+    peekInflight.delete(name);
+    setState((current) => ({ ...current, loading: true, retrying: false }));
+    try {
+      const result = await getArtistImage(name);
+      const url = withCacheBust(result?.url ?? null);
+      seedArtistImageCaches(name, url);
+      setState({ url, loading: false, retrying: false });
+    } catch {
+      setState((current) => ({ url: current.url, loading: false, retrying: false }));
+    }
+  };
+
+  return { ...state, retry, reload };
 }
