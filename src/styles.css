@@ -1680,7 +1680,50 @@ input, select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 14px;
+  min-height: 28px;
+}
+.track-number-indicator {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 999px;
+}
+.track-number-indicator-value {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.track-number-indicator-ring {
+  position: absolute;
+  inset: 0;
+  width: 28px;
+  height: 28px;
+  overflow: visible;
+  transform: rotate(-90deg);
+}
+.track-number-indicator-ring-track,
+.track-number-indicator-ring-progress {
+  fill: none;
+  stroke-width: 2;
+}
+.track-number-indicator-ring-track {
+  stroke: color-mix(in srgb, var(--accent) 14%, var(--border));
+}
+.track-number-indicator-ring-progress {
+  stroke: color-mix(in srgb, var(--accent) 84%, white 0%);
+  stroke-linecap: round;
+  transform-origin: center;
+}
+.track-number-indicator-ring-progress.is-spinning {
+  stroke-dasharray: 28 47.4;
+  animation: offline-download-spin 900ms linear infinite;
 }
 .playing-indicator {
   display: inline-flex;
@@ -1708,6 +1751,11 @@ input, select {
 @keyframes playing-bars {
   0%, 100% { transform: scaleY(0.35); opacity: 0.7; }
   50% { transform: scaleY(1); opacity: 1; }
+}
+
+@keyframes offline-download-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .track-title {
@@ -2210,6 +2258,40 @@ input, select {
   pointer-events: none;
 }
 
+.offline-available-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 10px 20px -16px rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+}
+.offline-available-badge.is-full {
+  background: color-mix(in srgb, var(--accent) 78%, rgba(12, 14, 19, 0.92));
+  border: 1px solid color-mix(in srgb, var(--accent) 62%, white 12%);
+  color: var(--accent-contrast);
+}
+.offline-available-badge.is-partial {
+  background: color-mix(in srgb, #d9a248 78%, rgba(12, 14, 19, 0.92));
+  border: 1px solid color-mix(in srgb, #e9bc72 72%, white 10%);
+  color: #fffaf1;
+}
+.offline-available-badge svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .vinyl-rip-badge svg {
   width: 100%;
   height: 100%;
@@ -2229,7 +2311,19 @@ input, select {
   height: 42px;
 }
 
+.offline-available-badge-hero {
+  top: 14px;
+  right: 14px;
+  width: 40px;
+  height: 40px;
+}
+
 .vinyl-rip-badge-card {
+  width: 30px;
+  height: 30px;
+}
+
+.offline-available-badge-card {
   width: 30px;
   height: 30px;
 }
@@ -2242,11 +2336,32 @@ input, select {
   height: 22px;
 }
 
+.offline-available-badge-md,
+.offline-available-badge-queue {
+  top: 5px;
+  right: 5px;
+  width: 22px;
+  height: 22px;
+}
+
+.offline-available-badge-md svg,
+.offline-available-badge-queue svg {
+  width: 11px;
+  height: 11px;
+}
+
 .vinyl-rip-badge-mini {
   right: 10px;
   bottom: 10px;
   width: 36px;
   height: 36px;
+}
+
+.offline-available-badge-mini {
+  top: 10px;
+  right: 10px;
+  width: 34px;
+  height: 34px;
 }
 
 .card-art {
@@ -5140,7 +5255,7 @@ input, select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 14px;
+  min-height: 28px;
 }
 .album-track-copy {
   min-width: 0;

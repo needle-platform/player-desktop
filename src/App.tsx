@@ -2,7 +2,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
 import { LogicalSize, PhysicalSize } from '@tauri-apps/api/dpi';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { CSSProperties, RefObject } from 'react';
+import type { CSSProperties, ReactNode, RefObject } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   adjustTrackBpm as persistTrackBpmAdjustment,
@@ -162,6 +162,7 @@ type DashboardPlaylistSection = {
   title: string;
   playlists: AutoPlaylist[];
 };
+type OfflineAvailability = 'none' | 'partial' | 'full';
 type AlbumSummary = {
   key: string;
   album: string;
@@ -171,6 +172,7 @@ type AlbumSummary = {
   samplePath: string;
   is_vinyl_rip: boolean;
   addedAt: string | null;
+  offlineAvailability: OfflineAvailability;
 };
 type ArtistSummary = {
   artist: string;
@@ -534,6 +536,16 @@ const filteredPlaylistName = (artist: string, genre: string) => {
 const effectiveTrackGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
 const uniqueSorted = (values: string[]) =>
   Array.from(new Set(values.filter(Boolean))).sort((a, b) => compareText(a, b));
+const uniqueInOrder = (values: string[]) => {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+};
 const dedupeTracksByPath = (tracks: Track[]) => Array.from(new Map(tracks.map((track) => [track.path, track])).values());
 const yearFilterNumber = (value: TrackYearBoundaryFilter) => {
   if (value === allTrackFilterValue) return null;
@@ -636,6 +648,17 @@ const albumKey = (album: string | null | undefined, albumArtist: string | null |
 const trackAlbumKey = (track: Pick<Track, 'album' | 'album_artist' | 'artist'>) =>
   track.album ? albumKey(track.album, albumArtistForTrack(track)) : null;
 const albumTitleFromKey = (key: string) => key.split(albumIdentitySeparator)[0] ?? key;
+const offlineAvailabilityFromCounts = (downloadedCount: number, totalCount: number): OfflineAvailability => {
+  if (downloadedCount <= 0 || totalCount <= 0) return 'none';
+  return downloadedCount < totalCount ? 'partial' : 'full';
+};
+const offlineDownloadIndicatorState = (
+  trackPath: string,
+  activeTrackPath: string | null,
+): 'idle' | 'active' => {
+  if (activeTrackPath === trackPath) return 'active';
+  return 'idle';
+};
 const normalizePlaylistRuleText = (value: string | null | undefined) => {
   const trimmed = value?.trim() ?? '';
   return trimmed ? trimmed : null;
@@ -1085,6 +1108,80 @@ function DownloadIcon() {
   );
 }
 
+function DownloadDoneIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 4v8" />
+      <path d="m8.5 8.5 3.5 3.5 3.5-3.5" />
+      <path d="M5 18h7" />
+      <path d="m14 17 2 2 4-4" />
+    </svg>
+  );
+}
+
+function OfflineAvailableBadge({
+  availability,
+  size,
+}: {
+  availability: OfflineAvailability;
+  size: CoverProps['size'];
+}) {
+  if (availability === 'none') return null;
+
+  const label = availability === 'full' ? 'Available offline' : 'Partially available offline';
+  return (
+    <span
+      className={`offline-available-badge offline-available-badge-${size} ${
+        availability === 'full' ? 'is-full' : 'is-partial'
+      }`}
+      title={label}
+      aria-label={label}
+    >
+      {availability === 'full' ? <DownloadDoneIcon /> : <DownloadIcon />}
+    </span>
+  );
+}
+
+function TrackNumberIndicator({
+  value,
+  isCurrent,
+  downloadState,
+  progressRatio,
+}: {
+  value: ReactNode;
+  isCurrent: boolean;
+  downloadState: 'idle' | 'active';
+  progressRatio?: number | null;
+}) {
+  const clampedProgress =
+    typeof progressRatio === 'number' && Number.isFinite(progressRatio)
+      ? Math.max(0, Math.min(progressRatio, 1))
+      : null;
+  const ringCircumference = 75.39822368615503;
+  return (
+    <span className={`track-number-indicator ${downloadState === 'active' ? 'is-active' : ''}`}>
+      {!isCurrent && downloadState === 'active' && (
+        <svg className={`track-number-indicator-ring ${clampedProgress == null ? 'is-indeterminate' : ''}`} viewBox="0 0 28 28" aria-hidden="true">
+          <circle className="track-number-indicator-ring-track" cx="14" cy="14" r="12" />
+          {clampedProgress == null ? (
+            <circle className="track-number-indicator-ring-progress is-spinning" cx="14" cy="14" r="12" />
+          ) : (
+            <circle
+              className="track-number-indicator-ring-progress"
+              cx="14"
+              cy="14"
+              r="12"
+              strokeDasharray={`${ringCircumference} ${ringCircumference}`}
+              strokeDashoffset={ringCircumference * (1 - clampedProgress)}
+            />
+          )}
+        </svg>
+      )}
+      <span className="track-number-indicator-value">{isCurrent ? <PlayingIndicator /> : value}</span>
+    </span>
+  );
+}
+
 function TrackFavoriteControl({
   track,
   disabled,
@@ -1479,6 +1576,7 @@ function App() {
   const [offlineDownloads, setOfflineDownloads] = useState<OfflineDownloadEntry[]>([]);
   const [offlineDownloadProgress, setOfflineDownloadProgress] = useState<OfflineDownloadProgress | null>(null);
   const [pendingOfflinePaths, setPendingOfflinePaths] = useState<string[]>([]);
+  const [optimisticOfflinePaths, setOptimisticOfflinePaths] = useState<string[]>([]);
   const [needleBackendFeedback, setNeedleBackendFeedback] = useState<{
     tone: 'info' | 'success' | 'warning' | 'error';
     message: string;
@@ -1509,6 +1607,10 @@ function App() {
     () => new Map(offlineDownloads.map((entry) => [entry.track_path, entry])),
     [offlineDownloads],
   );
+  const offlineAvailableTrackPathSet = useMemo(
+    () => new Set(offlineDownloads.map((entry) => entry.track_path).concat(optimisticOfflinePaths)),
+    [offlineDownloads, optimisticOfflinePaths],
+  );
   const offlineDownloadByLocalPath = useMemo(
     () => new Map(offlineDownloads.map((entry) => [entry.local_path, entry.track_path])),
     [offlineDownloads],
@@ -1534,6 +1636,8 @@ function App() {
   const notificationIdRef = useRef(0);
   const backendOfflineRecoveryRef = useRef(false);
   const backendHeartbeatInFlightRef = useRef(false);
+  const offlineDownloadsSyncProgressRef = useRef<string | null>(null);
+  const offlineCompletedTracksRef = useRef(0);
 
   const applyBootstrapState = (nextState: AppBootstrapState) => {
     setData(nextState.bootstrap);
@@ -1567,14 +1671,14 @@ function App() {
   }, [status]);
 
   useEffect(() => {
-    if (!notification || notification.tone !== 'success') {
+    if (!notification || (notification.tone !== 'success' && notification.tone !== 'info')) {
       return;
     }
 
-    const dismissTimer =
-      window.setTimeout(() => {
-        setNotification((current) => (current?.id === notification.id ? null : current));
-      }, 4200);
+    const dismissAfterMs = notification.tone === 'info' ? 3200 : 4200;
+    const dismissTimer = window.setTimeout(() => {
+      setNotification((current) => (current?.id === notification.id ? null : current));
+    }, dismissAfterMs);
 
     return () => {
       window.clearTimeout(dismissTimer);
@@ -1712,7 +1816,7 @@ function App() {
     }
   };
   const setOfflineCopiesByPaths = async (trackPaths: string[], shouldDownload: boolean, label: string) => {
-    const normalizedPaths = uniqueSorted(trackPaths.filter(Boolean));
+    const normalizedPaths = uniqueInOrder(trackPaths.filter(Boolean));
     if (normalizedPaths.length === 0) {
       return;
     }
@@ -2111,6 +2215,9 @@ function App() {
 
     let cancelled = false;
     const heartbeatIntervalMs = 3000;
+    const offlineTransferRunning =
+      offlineDownloadProgress?.status === 'running' &&
+      (offlineDownloadProgress.operation === 'download' || offlineDownloadProgress.operation === 'remove');
 
     const triggerOfflineRecovery = (message?: string) => {
       window.dispatchEvent(
@@ -2125,7 +2232,7 @@ function App() {
     };
 
     const runHeartbeat = async (options?: { restoreIfOnline?: boolean }) => {
-      if (backendHeartbeatInFlightRef.current || backendOfflineRecoveryRef.current) {
+      if (offlineTransferRunning || backendHeartbeatInFlightRef.current || backendOfflineRecoveryRef.current) {
         return;
       }
 
@@ -2183,7 +2290,7 @@ function App() {
       window.removeEventListener('offline', handleBrowserOffline);
       window.removeEventListener('online', handleBrowserOnline);
     };
-  }, [data?.settings.needle_backend_url, isBackendOfflineMode, isNeedleBackendMode]);
+  }, [data?.settings.needle_backend_url, isBackendOfflineMode, isNeedleBackendMode, offlineDownloadProgress]);
 
   useEffect(() => {
     if (!data) {
@@ -2242,6 +2349,47 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!offlineDownloadProgress) {
+      offlineDownloadsSyncProgressRef.current = null;
+      return;
+    }
+
+    if (offlineDownloadProgress.operation !== 'download' && offlineDownloadProgress.operation !== 'remove') {
+      return;
+    }
+
+    const syncKey = [
+      offlineDownloadProgress.operation,
+      offlineDownloadProgress.status,
+      offlineDownloadProgress.completed_tracks,
+      offlineDownloadProgress.current_track_path ?? '',
+    ].join(':');
+
+    if (offlineDownloadsSyncProgressRef.current === syncKey) {
+      return;
+    }
+
+    const shouldSync =
+      offlineDownloadProgress.status === 'completed' || offlineDownloadProgress.status === 'error';
+
+    if (!shouldSync) {
+      return;
+    }
+
+    offlineDownloadsSyncProgressRef.current = syncKey;
+    void (async () => {
+      try {
+        setOfflineDownloads(await listOfflineDownloads());
+        if (offlineDownloadProgress.operation === 'download') {
+          setOptimisticOfflinePaths([]);
+        }
+      } catch {
+        // Keep the existing list until the next successful refresh.
+      }
+    })();
+  }, [offlineDownloadProgress]);
+
+  useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void (async () => {
@@ -2252,6 +2400,42 @@ function App() {
         }
 
         setOfflineDownloadProgress(payload);
+        if (payload.operation === 'download') {
+          if (
+            payload.status === 'running' &&
+            payload.current_track_path &&
+            payload.completed_tracks > offlineCompletedTracksRef.current
+          ) {
+            offlineCompletedTracksRef.current = payload.completed_tracks;
+            setOptimisticOfflinePaths((current) =>
+              current.includes(payload.current_track_path as string)
+                ? current
+                : current.concat(payload.current_track_path as string),
+            );
+          }
+
+          const downloadedBytes = payload.current_track_downloaded_bytes;
+          const totalBytes = payload.current_track_total_bytes;
+          if (
+            payload.status === 'running' &&
+            payload.current_track_path &&
+            typeof downloadedBytes === 'number' &&
+            typeof totalBytes === 'number' &&
+            totalBytes > 0 &&
+            downloadedBytes >= totalBytes
+          ) {
+            setOptimisticOfflinePaths((current) =>
+              current.includes(payload.current_track_path as string)
+                ? current
+                : current.concat(payload.current_track_path as string),
+            );
+          }
+          if (payload.status === 'completed' || payload.status === 'error') {
+            offlineCompletedTracksRef.current = 0;
+          }
+        } else if (payload.operation === 'remove' && (payload.status === 'completed' || payload.status === 'error')) {
+          offlineCompletedTracksRef.current = 0;
+        }
       });
       if (cancelled) {
         dispose();
@@ -2561,6 +2745,27 @@ function App() {
   );
   const bpmAuditTrackPathSet = useMemo(() => new Set(bpmAuditTrackPaths), [bpmAuditTrackPaths]);
   const trackByPath = useMemo(() => new Map(allTracks.map((track) => [track.path, track])), [allTracks]);
+  const activeOfflineDownloadTrackPath =
+    offlineDownloadProgress?.operation === 'download' && offlineDownloadProgress.status === 'running'
+      ? offlineDownloadProgress.current_track_path
+      : null;
+  const activeOfflineDownloadTrackProgress =
+    offlineDownloadProgress?.operation === 'download' &&
+    offlineDownloadProgress.status === 'running' &&
+    activeOfflineDownloadTrackPath &&
+    offlineDownloadProgress.current_track_path === activeOfflineDownloadTrackPath &&
+    typeof offlineDownloadProgress.current_track_downloaded_bytes === 'number' &&
+    typeof offlineDownloadProgress.current_track_total_bytes === 'number' &&
+    offlineDownloadProgress.current_track_total_bytes > 0
+      ? Math.max(
+          0,
+          Math.min(
+            offlineDownloadProgress.current_track_downloaded_bytes /
+              offlineDownloadProgress.current_track_total_bytes,
+            1,
+          ),
+        )
+      : null;
   const offlineDownloadCurrentLabel = useMemo(() => {
     const currentPath = offlineDownloadProgress?.current_track_path;
     if (!currentPath) {
@@ -2933,13 +3138,14 @@ function App() {
   }, [selectedSmartPlaylist, smartPlaylistGenreOptions]);
 
   const albums = useMemo(() => {
-    const map = new Map<string, AlbumSummary>();
+    const map = new Map<string, AlbumSummary & { downloadedCount: number }>();
     for (const t of allTracks) {
       const key = trackAlbumKey(t);
       if (!key || !t.album) continue;
       const existing = map.get(key);
       if (existing) {
         existing.count += 1;
+        if (offlineAvailableTrackPathSet.has(t.path)) existing.downloadedCount += 1;
         if (t.added_at && (!existing.addedAt || t.added_at > existing.addedAt)) {
           existing.addedAt = t.added_at;
         }
@@ -2959,11 +3165,16 @@ function App() {
           samplePath: t.path,
           is_vinyl_rip: t.is_vinyl_rip,
           addedAt: t.added_at ?? null,
+          downloadedCount: offlineAvailableTrackPathSet.has(t.path) ? 1 : 0,
+          offlineAvailability: 'none',
         });
       }
     }
-    return Array.from(map.values());
-  }, [allTracks]);
+    return Array.from(map.values()).map(({ downloadedCount, ...album }) => ({
+      ...album,
+      offlineAvailability: offlineAvailabilityFromCounts(downloadedCount, album.count),
+    }));
+  }, [allTracks, offlineAvailableTrackPathSet]);
   const sortedAlbums = useMemo(() => {
     return albums.slice().sort((a, b) => {
       if (albumSort === 'artist') {
@@ -5015,8 +5226,10 @@ function App() {
             onToggleFavorite={updateTrackFavorite}
             pendingFavoritePaths={pendingTrackFavorites}
             showOfflineControls={isNeedleBackendMode && !isBackendOfflineMode}
-            isOfflineAvailable={(track) => offlineDownloadByTrackPath.has(track.path)}
+            isOfflineAvailable={(track) => offlineAvailableTrackPathSet.has(track.path)}
             pendingOfflinePaths={pendingOfflinePaths}
+            activeOfflineDownloadTrackPath={activeOfflineDownloadTrackPath}
+            activeOfflineDownloadTrackProgress={activeOfflineDownloadTrackProgress}
             onToggleOffline={(track, shouldDownload) => void toggleTrackOffline(track, shouldDownload)}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
@@ -5138,10 +5351,12 @@ function App() {
             }
             showOfflineActions={isNeedleBackendMode && !isBackendOfflineMode}
             isBackendOfflineMode={isBackendOfflineMode}
-            areAllTracksOffline={tracksForAlbum(selectedAlbum).every((track) => offlineDownloadByTrackPath.has(track.path))}
-            hasAnyOfflineTracks={tracksForAlbum(selectedAlbum).some((track) => offlineDownloadByTrackPath.has(track.path))}
-            isOfflineAvailable={(track) => offlineDownloadByTrackPath.has(track.path)}
+            areAllTracksOffline={tracksForAlbum(selectedAlbum).every((track) => offlineAvailableTrackPathSet.has(track.path))}
+            hasAnyOfflineTracks={tracksForAlbum(selectedAlbum).some((track) => offlineAvailableTrackPathSet.has(track.path))}
+            isOfflineAvailable={(track) => offlineAvailableTrackPathSet.has(track.path)}
             pendingOfflinePaths={pendingOfflinePaths}
+            activeOfflineDownloadTrackPath={activeOfflineDownloadTrackPath}
+            activeOfflineDownloadTrackProgress={activeOfflineDownloadTrackProgress}
             onToggleOfflineTrack={(track, shouldDownload) => void toggleTrackOffline(track, shouldDownload)}
             onDownloadAlbumOffline={() =>
               void toggleTracksOffline(tracksForAlbum(selectedAlbum), true, selectedAlbumSummary.album)
@@ -5282,6 +5497,8 @@ function App() {
             pendingFavoritePaths={pendingTrackFavorites}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
+            activeOfflineDownloadTrackPath={activeOfflineDownloadTrackPath}
+            activeOfflineDownloadTrackProgress={activeOfflineDownloadTrackProgress}
             metadataEditMode={metadataEditMode}
             onAdjustBpm={adjustTrackBpmValue}
             onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
@@ -6811,6 +7028,8 @@ interface TracksViewProps {
   showOfflineControls?: boolean;
   isOfflineAvailable?: (track: Track) => boolean;
   pendingOfflinePaths: string[];
+  activeOfflineDownloadTrackPath: string | null;
+  activeOfflineDownloadTrackProgress: number | null;
   onToggleOffline?: (track: Track, shouldDownload: boolean) => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
@@ -6885,6 +7104,8 @@ function TracksView({
   showOfflineControls = false,
   isOfflineAvailable,
   pendingOfflinePaths,
+  activeOfflineDownloadTrackPath,
+  activeOfflineDownloadTrackProgress,
   onToggleOffline,
   onSetRating,
   pendingRatingPaths,
@@ -6907,6 +7128,7 @@ function TracksView({
 }: TracksViewProps) {
   const rangeStart = totalTracks === 0 ? 0 : pageStartIndex + 1;
   const rangeEnd = totalTracks === 0 ? 0 : Math.min(pageStartIndex + tracks.length, totalTracks);
+  const pendingOfflinePathSet = useMemo(() => new Set(pendingOfflinePaths), [pendingOfflinePaths]);
   const renderPagination = () =>
     totalTracks > 0 ? (
       <div className="tracks-pagination" aria-label="Track list pagination">
@@ -7173,7 +7395,8 @@ function TracksView({
                   ? playlistSourceTotalCount - 1
                   : Math.max(totalTracks - 1, 0);
               const offlineAvailable = isOfflineAvailable?.(track) ?? false;
-              const offlineIsPending = pendingOfflinePaths.includes(track.path);
+              const downloadState = offlineDownloadIndicatorState(track.path, activeOfflineDownloadTrackPath);
+              const offlineIsPending = pendingOfflinePathSet.has(track.path);
               const favoriteIsPending = pendingFavoritePaths.includes(track.path);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
               const bpmIsPending = pendingBpmPaths.includes(track.path);
@@ -7188,7 +7411,12 @@ function TracksView({
                   />
                   <button className="track-row-main" onClick={() => onPlay(track)}>
                     <span className="track-index">
-                      {isCurrent ? <PlayingIndicator /> : displayIndex + 1}
+                      <TrackNumberIndicator
+                        value={displayIndex + 1}
+                        isCurrent={isCurrent}
+                        downloadState={downloadState}
+                        progressRatio={downloadState === 'active' ? activeOfflineDownloadTrackProgress : null}
+                      />
                     </span>
                     <span className="track-title-wrap">
                       <span className="track-title">{track.title}</span>
@@ -7367,6 +7595,8 @@ interface AlbumDetailViewProps {
   hasAnyOfflineTracks?: boolean;
   isOfflineAvailable: (track: Track) => boolean;
   pendingOfflinePaths: string[];
+  activeOfflineDownloadTrackPath: string | null;
+  activeOfflineDownloadTrackProgress: number | null;
   onToggleOfflineTrack: (track: Track, shouldDownload: boolean) => void;
   onDownloadAlbumOffline: () => void;
   onRemoveAlbumOffline: () => void;
@@ -7410,6 +7640,8 @@ function AlbumDetailView({
   hasAnyOfflineTracks = false,
   isOfflineAvailable,
   pendingOfflinePaths,
+  activeOfflineDownloadTrackPath,
+  activeOfflineDownloadTrackProgress,
   onToggleOfflineTrack,
   onDownloadAlbumOffline,
   onRemoveAlbumOffline,
@@ -7429,6 +7661,7 @@ function AlbumDetailView({
 }: AlbumDetailViewProps) {
   const [isMetadataMenuOpen, setIsMetadataMenuOpen] = useState(false);
   const metadataMenuRef = useRef<HTMLDivElement | null>(null);
+  const pendingOfflinePathSet = useMemo(() => new Set(pendingOfflinePaths), [pendingOfflinePaths]);
   const albumTracks = useMemo(
     () =>
       tracks
@@ -7516,6 +7749,7 @@ function AlbumDetailView({
   }, [albumTracks]);
 
   const samplePath = albumTracks[0]?.path ?? null;
+  const albumOfflineAvailability = areAllTracksOffline ? 'full' : hasAnyOfflineTracks ? 'partial' : 'none';
   const { info, loading: infoLoading, retrying: infoRetrying, retry: retryAlbumInfo } = useAlbumInfo(
     album,
     primaryArtist,
@@ -7580,6 +7814,7 @@ function AlbumDetailView({
             fallback={album[0]?.toUpperCase() ?? '◉'}
             size="hero"
             vinylRip={isVinylRip}
+            offlineAvailability={albumOfflineAvailability}
           />
           {isMetadataRefreshing && (
             <div className="artist-image-refresh-overlay" aria-hidden="true">
@@ -7657,7 +7892,7 @@ function AlbumDetailView({
             <button className="ghost-button" onClick={onAddAlbumToQueue}>
               + Add to queue
             </button>
-                  <button className="ghost-button" onClick={onAddAlbumToPlaylist}>
+            <button className="ghost-button" onClick={onAddAlbumToPlaylist}>
               + Add to playlist
             </button>
             <button className="ghost-button" onClick={onShuffleAlbum}>
@@ -7726,7 +7961,8 @@ function AlbumDetailView({
                   const isQueued = queuePaths.includes(t.path);
                   const offlineAvailable = isOfflineAvailable(t);
                   const favoriteIsPending = pendingFavoritePaths.includes(t.path);
-                  const offlineIsPending = pendingOfflinePaths.includes(t.path);
+                  const offlineIsPending = pendingOfflinePathSet.has(t.path);
+                  const downloadState = offlineDownloadIndicatorState(t.path, activeOfflineDownloadTrackPath);
                   const ratingIsPending = pendingRatingPaths.includes(t.path);
                   const bpmIsPending = pendingBpmPaths.includes(t.path);
                   const techDetails = formatTrackTechDetails(t);
@@ -7741,7 +7977,12 @@ function AlbumDetailView({
                         onClick={() => onPlayTrack(t)}
                       >
                         <span className="album-track-num">
-                          {isCurrent ? <PlayingIndicator /> : (t.track_number ?? '—')}
+                          <TrackNumberIndicator
+                            value={t.track_number ?? '—'}
+                            isCurrent={isCurrent}
+                            downloadState={downloadState}
+                            progressRatio={downloadState === 'active' ? activeOfflineDownloadTrackProgress : null}
+                          />
                         </span>
                         <span className="album-track-copy">
                           <span className="album-track-title">{t.title}</span>
@@ -7864,6 +8105,8 @@ interface ArtistDetailViewProps {
   pendingFavoritePaths: string[];
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
+  activeOfflineDownloadTrackPath: string | null;
+  activeOfflineDownloadTrackProgress: number | null;
   metadataEditMode: MetadataEditMode;
   onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
   onOpenBpmEditor: (track: Track) => void;
@@ -7904,6 +8147,8 @@ function ArtistDetailView({
   pendingFavoritePaths,
   onSetRating,
   pendingRatingPaths,
+  activeOfflineDownloadTrackPath,
+  activeOfflineDownloadTrackProgress,
   metadataEditMode,
   onAdjustBpm,
   onOpenBpmEditor,
@@ -8237,6 +8482,7 @@ function ArtistDetailView({
                     fallback={album.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
                     vinylRip={album.is_vinyl_rip}
+                    offlineAvailability={album.offlineAvailability}
                   />
                   <div className="card-title">{album.album}</div>
                   <div className="card-sub">{album.year ?? relativeAdded(album.addedAt)}</div>
@@ -8302,6 +8548,7 @@ function ArtistDetailView({
               const isCurrent = currentPath === track.path;
               const isQueued = queuePaths.includes(track.path);
               const albumKeyValue = trackAlbumKey(track);
+              const downloadState = offlineDownloadIndicatorState(track.path, activeOfflineDownloadTrackPath);
               const favoriteIsPending = pendingFavoritePaths.includes(track.path);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
               const bpmIsPending = pendingBpmPaths.includes(track.path);
@@ -8314,7 +8561,12 @@ function ArtistDetailView({
                   />
                   <button className="album-track-row-main artist-top-track-main" onClick={() => onPlayTrack(track)}>
                     <span className="album-track-num">
-                      {isCurrent ? <PlayingIndicator /> : index + 1}
+                      <TrackNumberIndicator
+                        value={index + 1}
+                        isCurrent={isCurrent}
+                        downloadState={downloadState}
+                        progressRatio={downloadState === 'active' ? activeOfflineDownloadTrackProgress : null}
+                      />
                     </span>
                     <span className="artist-track-title-wrap">
                       <span className="album-track-title">{track.title}</span>
@@ -8453,6 +8705,7 @@ function AlbumsView({
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
                     vinylRip={a.is_vinyl_rip}
+                    offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
                   />
@@ -8499,6 +8752,7 @@ interface CoverProps {
   fallback: string;
   size: 'md' | 'card' | 'hero' | 'queue' | 'mini';
   vinylRip?: boolean;
+  offlineAvailability?: OfflineAvailability;
   imageMode?: 'default' | 'cache_only' | 'deferred';
   lazyLoad?: boolean;
 }
@@ -8508,6 +8762,7 @@ function Cover({
   fallback,
   size,
   vinylRip = false,
+  offlineAvailability = 'none',
   imageMode = 'default',
   lazyLoad = false,
 }: CoverProps) {
@@ -8532,6 +8787,7 @@ function Cover({
     return (
       <div className={className} ref={ref}>
         <img src={url} alt="" className="cover-img" />
+        <OfflineAvailableBadge availability={offlineAvailability} size={size} />
         {vinylRip && <VinylRipBadge size={size} />}
       </div>
     );
@@ -8540,6 +8796,7 @@ function Cover({
   return (
     <div className={className} ref={ref}>
       {fallback}
+      <OfflineAvailableBadge availability={offlineAvailability} size={size} />
       {vinylRip && <VinylRipBadge size={size} />}
     </div>
   );
@@ -10526,6 +10783,7 @@ function DashboardView({
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
                     vinylRip={a.is_vinyl_rip}
+                    offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
                   />
@@ -10588,6 +10846,7 @@ function DashboardView({
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
                     vinylRip={a.is_vinyl_rip}
+                    offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
                   />

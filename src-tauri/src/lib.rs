@@ -414,6 +414,8 @@ fn emit_offline_download_progress(
     total_tracks: usize,
     completed_tracks: usize,
     current_track_path: Option<String>,
+    current_track_downloaded_bytes: Option<u64>,
+    current_track_total_bytes: Option<u64>,
     error_message: Option<String>,
 ) {
     let _ = app_handle.emit(
@@ -424,6 +426,8 @@ fn emit_offline_download_progress(
             total_tracks,
             completed_tracks,
             current_track_path,
+            current_track_downloaded_bytes,
+            current_track_total_bytes,
             error_message,
         },
     );
@@ -571,6 +575,8 @@ async fn download_offline_tracks(
         total_tracks,
         0,
         normalized_paths.first().cloned(),
+        Some(0),
+        None,
         None,
     );
 
@@ -582,6 +588,8 @@ async fn download_offline_tracks(
             total_tracks,
             index,
             Some(track_path.clone()),
+            Some(0),
+            None,
             None,
         );
 
@@ -597,6 +605,8 @@ async fn download_offline_tracks(
                     index + 1,
                     Some(track_path.clone()),
                     None,
+                    None,
+                    None,
                 );
                 continue;
             }
@@ -607,6 +617,19 @@ async fn download_offline_tracks(
             &settings,
             track_path,
             &cache_dir,
+            |downloaded_bytes, total_bytes| {
+                emit_offline_download_progress(
+                    &app,
+                    OfflineDownloadOperation::Download,
+                    OfflineDownloadProgressStatus::Running,
+                    total_tracks,
+                    index,
+                    Some(track_path.clone()),
+                    Some(downloaded_bytes),
+                    total_bytes,
+                    None,
+                );
+            },
         )
         .await
         .map_err(|error| {
@@ -618,6 +641,8 @@ async fn download_offline_tracks(
                 total_tracks,
                 index,
                 Some(track_path.clone()),
+                None,
+                None,
                 Some(message.clone()),
             );
             message
@@ -631,6 +656,8 @@ async fn download_offline_tracks(
             total_tracks,
             index + 1,
             Some(track_path.clone()),
+            entry.file_size,
+            entry.file_size,
             None,
         );
     }
@@ -641,6 +668,8 @@ async fn download_offline_tracks(
         OfflineDownloadProgressStatus::Completed,
         total_tracks,
         total_tracks,
+        None,
+        None,
         None,
         None,
     );
@@ -674,6 +703,8 @@ async fn remove_offline_tracks(
             0,
             normalized_paths.first().cloned(),
             None,
+            None,
+            None,
         );
     }
 
@@ -685,6 +716,8 @@ async fn remove_offline_tracks(
             total_tracks,
             index,
             Some(track_path.clone()),
+            None,
+            None,
             None,
         );
 
@@ -706,6 +739,8 @@ async fn remove_offline_tracks(
             index + 1,
             Some(track_path.clone()),
             None,
+            None,
+            None,
         );
     }
 
@@ -716,6 +751,8 @@ async fn remove_offline_tracks(
             OfflineDownloadProgressStatus::Completed,
             total_tracks,
             total_tracks,
+            None,
+            None,
             None,
             None,
         );

@@ -237,6 +237,8 @@ pub struct OfflineDownloadProgress {
     pub total_tracks: usize,
     pub completed_tracks: usize,
     pub current_track_path: Option<String>,
+    pub current_track_downloaded_bytes: Option<u64>,
+    pub current_track_total_bytes: Option<u64>,
     pub error_message: Option<String>,
 }
 

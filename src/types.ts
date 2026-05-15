@@ -136,6 +136,8 @@ export interface OfflineDownloadProgress {
   total_tracks: number;
   completed_tracks: number;
   current_track_path: string | null;
+  current_track_downloaded_bytes: number | null;
+  current_track_total_bytes: number | null;
   error_message: string | null;
 }
 

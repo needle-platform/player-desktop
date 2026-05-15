@@ -49,6 +49,8 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Safe relaunch behavior** restores the last session in a stopped state, never surprise-autoplays on app launch
 - **Backend offline mode** now switches automatically when the homeserver becomes unreachable, keeps the regular dashboard UI, hides online-only actions, and shows only downloaded tracks for offline playback until the backend comes back
 - **Automatic backend reconnect** checks run quietly in the background, so backend mode can move between online and offline without needing a manual Settings health check
+- **Backend offline download feedback** now shows per-track progress directly on track numbers and marks albums as fully or partially downloaded with the same badge language used on Android
+- **Remote backend offline downloads** now use streaming-friendly timeouts, so public homeserver downloads do not trip the same short request deadline used for heartbeat checks
 - **Repeat modes**: off · one · all
 - **Shuffle state** is visible and persistent
 - **Artwork-first mini player** with full-bleed cover art, drag-to-move behavior, pinned always-on-top mode, and an expandable / resizable Up Next queue
@@ -134,7 +136,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Themes**: System, Light, Dark
 - **Custom accent color** persisted in SQLite and applied across playback controls, queue highlights, buttons, and selection states
 - **Theme-aware branding** with separate light/dark app icons and a dock-tuned macOS icon set
-- **Top-right toast notifications** now surface success, warning, and error states in a clear app-level notification card instead of hiding transient messages in the sidebar footer, with success confirmations auto-dismissing after a short delay
+- **Top-right toast notifications** now surface success, warning, and error states in a clear app-level notification card instead of hiding transient messages in the sidebar footer, with info and success confirmations auto-dismissing after a short delay
 - **Mini player runtime dark override** keeps the compact artwork-first window in a dark presentation without changing the user's saved theme preference
 - **Wikipedia links** from album and artist metadata open in the system browser instead of relying on webview behavior
 - **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Bass/Treble Boost, Vocal, Treble Boost, Lounge

@@ -1,4 +1,9 @@
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::{
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -988,10 +993,11 @@ pub async fn download_backend_track(
     settings: &AppSettings,
     track_path: &str,
     destination_dir: &Path,
+    mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<OfflineDownloadEntry> {
     let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
-    let client = http_client()?;
+    let client = stream_http_client()?;
     let response = backend_request(client.get(format!("{url}/api/stream/{track_id}?format=raw")), settings)?
         .send()
         .await
@@ -1016,11 +1022,8 @@ pub async fn download_backend_track(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    let total_bytes = response.content_length();
     let extension = extension_from_content_type(content_type.as_deref()).unwrap_or("audio");
-    let bytes = response
-        .bytes()
-        .await
-        .context("Unable to read downloaded track bytes from Needle backend")?;
 
     std::fs::create_dir_all(destination_dir).with_context(|| {
         format!(
@@ -1031,9 +1034,32 @@ pub async fn download_backend_track(
 
     let final_path = destination_dir.join(format!("{track_id}.{extension}"));
     let temp_path = destination_dir.join(format!("{track_id}.{extension}.part"));
-    std::fs::write(&temp_path, &bytes).with_context(|| {
+    let mut temp_file = File::create(&temp_path).with_context(|| {
         format!(
-            "Unable to write offline track data to {}",
+            "Unable to create offline track temp file at {}",
+            temp_path.display()
+        )
+    })?;
+    let mut downloaded_bytes = 0u64;
+    on_progress(downloaded_bytes, total_bytes);
+    let mut response = response;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Unable to read downloaded track bytes from Needle backend")?
+    {
+        temp_file.write_all(&chunk).with_context(|| {
+            format!(
+                "Unable to write offline track data to {}",
+                temp_path.display()
+            )
+        })?;
+        downloaded_bytes += chunk.len() as u64;
+        on_progress(downloaded_bytes, total_bytes);
+    }
+    temp_file.flush().with_context(|| {
+        format!(
+            "Unable to flush offline track data to {}",
             temp_path.display()
         )
     })?;
@@ -1048,7 +1074,7 @@ pub async fn download_backend_track(
         track_path: track_path.to_string(),
         local_path: final_path.to_string_lossy().to_string(),
         content_type,
-        file_size: Some(bytes.len() as u64),
+        file_size: Some(downloaded_bytes),
         downloaded_at: chrono_like_timestamp(),
     })
 }
@@ -1257,6 +1283,15 @@ fn http_client() -> Result<Client> {
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|error| anyhow!("Unable to create Needle backend HTTP client: {error}"))
+}
+
+fn stream_http_client() -> Result<Client> {
+    reqwest::Client::builder()
+        .user_agent("NeedleDesktop/0.1")
+        .connect_timeout(Duration::from_secs(2))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| anyhow!("Unable to create Needle backend streaming HTTP client: {error}"))
 }
 
 async fn get_json<T: DeserializeOwned>(client: &Client, settings: &AppSettings, base_url: &str, route: &str) -> Result<T> {

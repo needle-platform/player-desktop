@@ -15,6 +15,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Loudness analysis now explains when a full-library rerun is intentional because cached results came from an older loudness-analysis version.
 - Artist-page enrichment in backend mode is now backend-owned for both photos and biographies, so clients share one source of truth instead of re-fetching artist data per app.
 - Album-page enrichment in backend mode is now backend-owned too, so shared album notes and source links come from the homeserver instead of being fetched separately by each client.
+- Backend-mode info toasts now dismiss themselves automatically after a short delay instead of lingering until manually closed.
 
 ### Fixed
 - Fixed desktop backend mode so homeserver outages no longer hang the app indefinitely, and the app now switches itself into a downloaded-only offline mode with a calm in-app notice instead of freezing or waiting for a manual backend check.
@@ -22,6 +23,8 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Fixed backend-mode custom artist photo updates so replacing an existing portrait now repaints immediately on the current artist page instead of waiting for navigation.
 - Fixed backend-mode album pages so missing shared album notes now auto-trigger a one-shot backend refresh and re-render when the homeserver finishes enrichment.
 - Fixed backend-mode offline presentation so the normal dashboard stays intact, online-only actions are hidden, and the app switches back automatically once the homeserver is reachable again.
+- Fixed backend-mode offline downloads so tracks and albums now surface active download progress and partial/full offline availability directly in the library UI.
+- Fixed remote backend offline downloads so track streaming no longer uses the same short total-request timeout as lightweight backend heartbeat checks.
 
 ## [0.1.2] - 2026-05-04
 
