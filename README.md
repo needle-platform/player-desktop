@@ -47,7 +47,8 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Queue-aware playback**: play album · shuffle artist · play all Quick picks · shuffle a From-your-library playlist — mpv auto-advances through the queue
 - **Playback persistence** restores queue, selected track, repeat mode, shuffle state, and last position between launches
 - **Safe relaunch behavior** restores the last session in a stopped state, never surprise-autoplays on app launch
-- **Backend-offline startup fallback** now reopens from the last synced backend library cache, or from downloaded tracks when no cache is available, so offline playback stays usable during homeserver outages
+- **Backend offline mode** now switches automatically when the homeserver becomes unreachable, keeps the regular dashboard UI, hides online-only actions, and shows only downloaded tracks for offline playback until the backend comes back
+- **Automatic backend reconnect** checks run quietly in the background, so backend mode can move between online and offline without needing a manual Settings health check
 - **Repeat modes**: off · one · all
 - **Shuffle state** is visible and persistent
 - **Artwork-first mini player** with full-bleed cover art, drag-to-move behavior, pinned always-on-top mode, and an expandable / resizable Up Next queue

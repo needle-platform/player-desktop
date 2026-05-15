@@ -17,10 +17,11 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Album-page enrichment in backend mode is now backend-owned too, so shared album notes and source links come from the homeserver instead of being fetched separately by each client.
 
 ### Fixed
-- Fixed desktop backend mode so homeserver outages no longer hang the app indefinitely, and startup now falls back to cached backend data or downloaded tracks for offline playback with a clear in-app offline-mode notice.
+- Fixed desktop backend mode so homeserver outages no longer hang the app indefinitely, and the app now switches itself into a downloaded-only offline mode with a calm in-app notice instead of freezing or waiting for a manual backend check.
 - Fixed backend-mode artist pages so a missing shared photo or biography now auto-triggers a one-shot backend refresh and re-renders when the homeserver finishes enrichment.
 - Fixed backend-mode custom artist photo updates so replacing an existing portrait now repaints immediately on the current artist page instead of waiting for navigation.
 - Fixed backend-mode album pages so missing shared album notes now auto-trigger a one-shot backend refresh and re-render when the homeserver finishes enrichment.
+- Fixed backend-mode offline presentation so the normal dashboard stays intact, online-only actions are hidden, and the app switches back automatically once the homeserver is reachable again.
 
 ## [0.1.2] - 2026-05-04
 

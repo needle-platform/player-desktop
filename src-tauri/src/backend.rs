@@ -247,16 +247,37 @@ struct RawCreatePlaylistPayload<'a> {
     song_ids: &'a [String],
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Deserialize, Default)]
 struct RawNeedlePlaybackSession {
+    #[serde(default, alias = "queueTrackIds")]
     queue_track_ids: Vec<String>,
+    #[serde(default, alias = "baseQueueTrackIds")]
     base_queue_track_ids: Vec<String>,
+    #[serde(default, alias = "queuePaths")]
+    queue_paths: Vec<String>,
+    #[serde(default, alias = "baseQueuePaths")]
+    base_queue_paths: Vec<String>,
+    #[serde(default, alias = "currentIndex")]
     current_index: usize,
+    #[serde(default, alias = "positionSeconds")]
     position_seconds: f64,
+    #[serde(default)]
     paused: bool,
+    #[serde(default, alias = "repeatMode")]
     repeat_mode: crate::models::RepeatMode,
+    #[serde(default, alias = "shuffleEnabled")]
     shuffle_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawNeedlePlaybackSessionResponse {
+    Direct(RawNeedlePlaybackSession),
+    SnakeWrapped { playback_session: RawNeedlePlaybackSession },
+    CamelWrapped {
+        #[serde(rename = "playbackSession")]
+        playback_session: RawNeedlePlaybackSession,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -433,8 +454,45 @@ pub async fn save_backend_playback_session(
         updated_at: chrono_like_timestamp(),
     };
 
-    let raw = put_json::<RawNeedlePlaybackSession, _>(&client, settings, &url, "/api/needle/playback-session", &update).await?;
-    Ok(map_remote_playback_session(raw))
+    let response = backend_request(
+        client
+            .put(format!("{url}/api/needle/playback-session"))
+            .json(&update),
+        settings,
+    )?
+    .send()
+    .await
+    .with_context(|| "Unable to reach Needle backend route /api/needle/playback-session")?;
+
+    if !response.status().is_success() {
+        let status_code = response.status();
+        let message = response.text().await.unwrap_or_default();
+        bail!(
+            "Needle backend request to /api/needle/playback-session failed with {}{}",
+            status_code,
+            if message.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", message.trim())
+            }
+        );
+    }
+
+    let body = response.text().await.unwrap_or_default();
+    if body.trim().is_empty() {
+        return Ok(normalize_backend_playback_session(session));
+    }
+
+    match serde_json::from_str::<RawNeedlePlaybackSessionResponse>(&body) {
+        Ok(RawNeedlePlaybackSessionResponse::Direct(raw)) => Ok(map_remote_playback_session(raw)),
+        Ok(RawNeedlePlaybackSessionResponse::SnakeWrapped { playback_session }) => {
+            Ok(map_remote_playback_session(playback_session))
+        }
+        Ok(RawNeedlePlaybackSessionResponse::CamelWrapped { playback_session }) => {
+            Ok(map_remote_playback_session(playback_session))
+        }
+        Err(_) => Ok(normalize_backend_playback_session(session)),
+    }
 }
 
 pub async fn set_backend_track_favorite(
@@ -575,23 +633,30 @@ pub async fn get_backend_artist_image(
         return Ok(None);
     };
 
-    if let Some(image_url) = artist.artist_image_url {
-        return Ok(Some(artist::ArtistImage {
-            url: resolve_backend_asset_url(&url, &image_url),
-            source: "backend".into(),
-        }));
-    }
+    let raw_image_url = if let Some(image_url) = artist.artist_image_url {
+        Some(image_url)
+    } else {
+        let detail =
+            get_json_optional::<RawArtistDetailPayload>(&client, settings, &url, &format!("/api/artist/{}", artist.id))
+                .await?;
+        detail.and_then(|payload| {
+            payload
+                .artist
+                .artist_image_url
+                .or_else(|| payload.info.as_ref().and_then(|info| info.medium_image_url.clone()))
+        })
+    };
 
-    let detail = get_json_optional::<RawArtistDetailPayload>(&client, settings, &url, &format!("/api/artist/{}", artist.id)).await?;
-    Ok(detail.and_then(|payload| {
-        payload
-            .artist
-            .artist_image_url
-            .or_else(|| payload.info.as_ref().and_then(|info| info.medium_image_url.clone()))
-            .map(|image_url| artist::ArtistImage {
-                url: resolve_backend_asset_url(&url, &image_url),
-                source: "backend".into(),
-            })
+    let Some(image_url) = raw_image_url else {
+        return Ok(None);
+    };
+    let resolved_url = resolve_backend_asset_url(&url, &image_url);
+    let cached_url = fetch_asset_as_data_url(&client, settings, &url, &resolved_url)
+        .await
+        .unwrap_or(resolved_url);
+    Ok(Some(artist::ArtistImage {
+        url: cached_url,
+        source: "backend".into(),
     }))
 }
 
@@ -1101,6 +1166,55 @@ fn resolve_backend_asset_url(base_url: &str, value: &str) -> String {
         .unwrap_or_else(|_| trimmed.to_string())
 }
 
+async fn fetch_asset_as_data_url(
+    client: &Client,
+    settings: &AppSettings,
+    base_url: &str,
+    resolved_url: &str,
+) -> Result<String> {
+    let backend_origin = reqwest::Url::parse(base_url)
+        .ok()
+        .map(|url| url.origin().ascii_serialization());
+    let asset_origin = reqwest::Url::parse(resolved_url)
+        .ok()
+        .map(|url| url.origin().ascii_serialization());
+    let builder = client.get(resolved_url.to_string());
+    let response = if backend_origin.is_some() && backend_origin == asset_origin {
+        backend_request(builder, settings)?
+    } else {
+        builder
+    }
+    .send()
+    .await
+    .with_context(|| format!("Unable to load backend asset from {resolved_url}"))?;
+
+    if !response.status().is_success() {
+        let status_code = response.status();
+        let message = response.text().await.unwrap_or_default();
+        bail!(
+            "Needle backend asset request failed with {}{}",
+            status_code,
+            if message.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", message.trim())
+            }
+        );
+    }
+
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+    let bytes = response
+        .bytes()
+        .await
+        .context("Unable to read backend asset bytes")?;
+    Ok(format!("data:{mime};base64,{}", BASE64.encode(bytes)))
+}
+
 fn backend_url_from_settings(settings: &AppSettings, raw_url_override: Option<&str>) -> Result<String> {
     match raw_url_override
         .map(str::trim)
@@ -1175,21 +1289,6 @@ async fn post_json<T: DeserializeOwned, B: Serialize>(
     body: &B,
 ) -> Result<T> {
     let response = backend_request(client.post(format!("{base_url}{route}")).json(body), settings)?
-        .send()
-        .await
-        .with_context(|| format!("Unable to reach Needle backend route {route}"))?;
-
-    decode_json_response(response, route).await
-}
-
-async fn put_json<T: DeserializeOwned, B: Serialize>(
-    client: &Client,
-    settings: &AppSettings,
-    base_url: &str,
-    route: &str,
-    body: &B,
-) -> Result<T> {
-    let response = backend_request(client.put(format!("{base_url}{route}")).json(body), settings)?
         .send()
         .await
         .with_context(|| format!("Unable to reach Needle backend route {route}"))?;
@@ -1283,16 +1382,42 @@ fn normalize_backend_playback_session(session: &PlaybackSession) -> PlaybackSess
 }
 
 fn map_remote_playback_session(session: RawNeedlePlaybackSession) -> PlaybackSession {
+    let queue_track_ids = if session.queue_track_ids.is_empty() {
+        session.queue_paths
+    } else {
+        session.queue_track_ids
+    };
+    let base_queue_track_ids = if session.base_queue_track_ids.is_empty() {
+        session.base_queue_paths
+    } else {
+        session.base_queue_track_ids
+    };
     normalize_backend_playback_session(&PlaybackSession {
-        queue_paths: session
-            .queue_track_ids
+        queue_paths: queue_track_ids
             .into_iter()
-            .map(|track_id| format!("{TRACK_TOKEN_PREFIX}{track_id}"))
+            .filter_map(|track_id| {
+                let trimmed = track_id.trim();
+                if trimmed.is_empty() {
+                    None
+                } else if trimmed.starts_with(TRACK_TOKEN_PREFIX) {
+                    Some(trimmed.to_string())
+                } else {
+                    Some(format!("{TRACK_TOKEN_PREFIX}{trimmed}"))
+                }
+            })
             .collect(),
-        base_queue_paths: session
-            .base_queue_track_ids
+        base_queue_paths: base_queue_track_ids
             .into_iter()
-            .map(|track_id| format!("{TRACK_TOKEN_PREFIX}{track_id}"))
+            .filter_map(|track_id| {
+                let trimmed = track_id.trim();
+                if trimmed.is_empty() {
+                    None
+                } else if trimmed.starts_with(TRACK_TOKEN_PREFIX) {
+                    Some(trimmed.to_string())
+                } else {
+                    Some(format!("{TRACK_TOKEN_PREFIX}{trimmed}"))
+                }
+            })
             .collect(),
         current_index: session.current_index,
         position_seconds: session.position_seconds,

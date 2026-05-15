@@ -16,7 +16,7 @@ use models::{
     LibrarySource, MetadataEditMode, NeedleBackendMigrationReport, NeedleBackendStatus,
     OfflineDownloadEntry, OfflineDownloadOperation, OfflineDownloadProgress,
     OfflineDownloadProgressStatus, PlaybackSession, PlaybackState, RepeatMode, RuntimeInfo,
-    SavedPlaylistRule, TrackBpmAdjustment, LibraryData, Track,
+    SavedPlaylist, SavedPlaylistRule, TrackBpmAdjustment, LibraryData, Track,
 };
 use mpv::MpvController;
 use tauri::{Emitter, Manager};
@@ -132,15 +132,7 @@ fn finalize_loaded_backend_bootstrap(
 }
 
 fn load_bootstrap_for_current_mode(db_path: &Path) -> Result<BootstrapPayload, String> {
-    let settings = db::load_settings(db_path).map_err(|error| error.to_string())?;
-    match settings.library_source {
-        LibrarySource::NeedleBackend => {
-            let bootstrap = tauri::async_runtime::block_on(backend::load_backend_bootstrap(settings))
-                .map_err(|error| error.to_string())?;
-            finalize_loaded_backend_bootstrap(db_path, bootstrap)
-        }
-        LibrarySource::LocalFolders => db::load_bootstrap(db_path).map_err(|error| error.to_string()),
-    }
+    load_bootstrap_state_for_current_mode(db_path).map(|state| state.bootstrap)
 }
 
 fn backend_connectivity_error(error: &str) -> bool {
@@ -213,44 +205,138 @@ fn library_data_from_tracks(mut tracks: Vec<Track>) -> LibraryData {
     }
 }
 
-fn bootstrap_from_offline_downloads(
+fn offline_track_from_download(entry: &OfflineDownloadEntry) -> Track {
+    let mut track = library::read_track(Path::new(&entry.local_path));
+    track.id = backend::backend_track_id_from_path(&entry.track_path)
+        .unwrap_or(&entry.track_path)
+        .to_string();
+    track.path = entry.track_path.clone();
+    track.added_at = Some(entry.downloaded_at.clone());
+    track
+}
+
+fn filter_playback_session_for_available_tracks(
+    session: PlaybackSession,
+    available_track_paths: &HashSet<String>,
+) -> PlaybackSession {
+    let current_path = session.queue_paths.get(session.current_index).cloned();
+    let filtered_queue = session
+        .queue_paths
+        .into_iter()
+        .filter(|path| available_track_paths.contains(path))
+        .collect::<Vec<_>>();
+    let filtered_base = if session.base_queue_paths.is_empty() {
+        filtered_queue.clone()
+    } else {
+        session
+            .base_queue_paths
+            .into_iter()
+            .filter(|path| available_track_paths.contains(path))
+            .collect::<Vec<_>>()
+    };
+    let normalized_base = if filtered_base.is_empty() {
+        filtered_queue.clone()
+    } else {
+        filtered_base
+    };
+    let current_index = current_path
+        .as_deref()
+        .and_then(|path| filtered_queue.iter().position(|candidate| candidate == path))
+        .unwrap_or_else(|| session.current_index.min(filtered_queue.len().saturating_sub(1)));
+
+    PlaybackSession {
+        queue_paths: filtered_queue.clone(),
+        base_queue_paths: normalized_base,
+        current_index,
+        position_seconds: if filtered_queue.is_empty() {
+            0.0
+        } else {
+            session.position_seconds.max(0.0)
+        },
+        paused: if filtered_queue.is_empty() { true } else { session.paused },
+        repeat_mode: session.repeat_mode,
+        shuffle_enabled: session.shuffle_enabled,
+    }
+}
+
+fn filter_playlists_for_available_tracks(
+    playlists: Vec<SavedPlaylist>,
+    available_track_paths: &HashSet<String>,
+) -> Vec<SavedPlaylist> {
+    playlists
+        .into_iter()
+        .map(|mut playlist| {
+            playlist
+                .track_paths
+                .retain(|path| available_track_paths.contains(path));
+            playlist
+        })
+        .collect()
+}
+
+fn build_offline_backend_bootstrap(
     db_path: &Path,
     settings: AppSettings,
     downloads: &[OfflineDownloadEntry],
 ) -> Result<BootstrapPayload, String> {
-    let tracks = downloads
+    let available_downloads = downloads
         .iter()
         .filter(|entry| Path::new(&entry.local_path).exists())
-        .map(|entry| {
-            let mut track = library::read_track(Path::new(&entry.local_path));
-            track.id = backend::backend_track_id_from_path(&entry.track_path)
-                .unwrap_or(&entry.track_path)
-                .to_string();
-            track.path = entry.track_path.clone();
-            track.added_at = Some(entry.downloaded_at.clone());
-            track
-        })
+        .cloned()
         .collect::<Vec<_>>();
+    let offline_by_track_path = available_downloads
+        .iter()
+        .map(|entry| (entry.track_path.clone(), entry.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut offline_tracks = HashMap::<String, Track>::new();
+    let mut playlists = Vec::new();
+
+    if let Some(cached) =
+        db::load_backend_bootstrap_cache(db_path).map_err(|error| error.to_string())?
+    {
+        for mut track in cached.library.tracks {
+            if let Some(download) = offline_by_track_path.get(&track.path) {
+                if track.added_at.is_none() {
+                    track.added_at = Some(download.downloaded_at.clone());
+                }
+                offline_tracks.insert(track.path.clone(), track);
+            }
+        }
+        playlists = filter_playlists_for_available_tracks(
+            cached.playlists,
+            &offline_by_track_path.keys().cloned().collect::<HashSet<_>>(),
+        );
+    }
+
+    for entry in &available_downloads {
+        offline_tracks
+            .entry(entry.track_path.clone())
+            .or_insert_with(|| offline_track_from_download(entry));
+    }
+
+    let tracks = offline_tracks.into_values().collect::<Vec<_>>();
+    let available_track_paths = tracks.iter().map(|track| track.path.clone()).collect::<HashSet<_>>();
+    let playback_session = filter_playback_session_for_available_tracks(
+        db::load_playback_session(db_path).map_err(|error| error.to_string())?,
+        &available_track_paths,
+    );
 
     Ok(BootstrapPayload {
         settings,
         library: library_data_from_tracks(tracks),
-        playlists: Vec::new(),
-        playback_session: db::load_playback_session(db_path).map_err(|error| error.to_string())?,
+        playlists,
+        playback_session,
     })
 }
 
-fn backend_offline_notice(track_count: usize, used_cache: bool) -> String {
-    if used_cache {
+fn backend_offline_notice(track_count: usize) -> String {
+    if track_count > 0 {
         format!(
-            "Needle is offline, so the app loaded your last synced library cache. Downloaded tracks remain available for offline playback. Cached library: {track_count} track{}.",
+            "Needle couldn't reach the configured homeserver, so offline mode is active and only downloaded tracks are shown. Available offline: {track_count} track{}.",
             if track_count == 1 { "" } else { "s" }
         )
     } else {
-        format!(
-            "Needle is offline, so the app is showing your downloaded library for offline playback. Available offline: {track_count} track{}.",
-            if track_count == 1 { "" } else { "s" }
-        )
+        "Needle couldn't reach the configured homeserver, so offline mode is active. No downloaded tracks are available on this computer yet.".to_string()
     }
 }
 
@@ -276,39 +362,21 @@ fn load_bootstrap_state_for_current_mode(db_path: &Path) -> Result<AppBootstrapS
         }
         Err(error) => {
             let error_message = error.to_string();
-            if let Some(mut cached) =
-                db::load_backend_bootstrap_cache(db_path).map_err(|cache_error| cache_error.to_string())?
-            {
-                cached.settings = settings.clone();
-                cached.playback_session =
-                    db::load_playback_session(db_path).map_err(|playback_error| playback_error.to_string())?;
-                let track_count = cached.library.track_count;
-                return Ok(AppBootstrapState {
-                    bootstrap: cached,
-                    startup_notice: Some(backend_offline_notice(track_count, true)),
-                    offline_mode: true,
-                });
-            }
-
-            let offline_downloads = prune_and_list_offline_downloads(db_path)?;
-            if !offline_downloads.is_empty() {
+            if backend_connectivity_error(&error_message) {
+                let offline_downloads = prune_and_list_offline_downloads(db_path)?;
                 let bootstrap =
-                    bootstrap_from_offline_downloads(db_path, settings.clone(), &offline_downloads)?;
+                    build_offline_backend_bootstrap(db_path, settings.clone(), &offline_downloads)?;
                 let track_count = bootstrap.library.track_count;
                 return Ok(AppBootstrapState {
                     bootstrap,
-                    startup_notice: Some(backend_offline_notice(track_count, false)),
+                    startup_notice: Some(backend_offline_notice(track_count)),
                     offline_mode: true,
                 });
             }
 
-            let guidance = if backend_connectivity_error(&error_message) {
-                "Needle couldn't reach the configured homeserver, and there is no cached library or downloaded media available yet. Reconnect the backend and relaunch the app."
-            } else {
-                "Needle couldn't initialize backend mode, and there is no cached library or downloaded media available yet. Reconnect the backend or review the backend settings, then relaunch the app."
-            };
-
-            Err(format!("{guidance} Details: {error_message}"))
+            Err(format!(
+                "Needle couldn't initialize backend mode. Reconnect the backend or review the backend settings, then try again. Details: {error_message}"
+            ))
         }
     }
 }
@@ -1590,9 +1658,24 @@ async fn get_artist_image(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return backend::get_backend_artist_image(&settings, &trimmed)
+        if let Some(cached) =
+            db::get_artist_image(&state.db_path, &trimmed).map_err(|error| error.to_string())?
+        {
+            return Ok(cached.map(|url| artist::ArtistImage {
+                url,
+                source: "cache".into(),
+            }));
+        }
+
+        let image = backend::get_backend_artist_image(&settings, &trimmed)
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string())?;
+        let _ = db::cache_artist_image(
+            &state.db_path,
+            &trimmed,
+            image.as_ref().map(|value| value.url.as_str()),
+        );
+        return Ok(image);
     }
 
     if let Some(cached) =
@@ -1629,9 +1712,12 @@ async fn peek_artist_image(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return backend::get_backend_artist_image(&settings, &trimmed)
-            .await
-            .map_err(|error| error.to_string());
+        let cached =
+            db::get_artist_image(&state.db_path, &trimmed).map_err(|error| error.to_string())?;
+        return Ok(cached.flatten().map(|url| artist::ArtistImage {
+            url,
+            source: "cache".into(),
+        }));
     }
 
     let cached =
@@ -1654,12 +1740,20 @@ async fn refresh_artist_image(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        let existing = backend::get_backend_artist_image(&settings, &trimmed)
-            .await
-            .map_err(|error| error.to_string())?;
+        let existing = db::get_artist_image(&state.db_path, &trimmed)
+            .map_err(|error| error.to_string())?
+            .flatten()
+            .map(|url| artist::ArtistImage {
+                url,
+                source: "cache".into(),
+            });
         match backend::refresh_backend_artist_image(&settings, &trimmed).await {
-            Ok(Some(image)) => return Ok(Some(image)),
+            Ok(Some(image)) => {
+                let _ = db::cache_artist_image(&state.db_path, &trimmed, Some(&image.url));
+                return Ok(Some(image));
+            }
             Ok(None) => {
+                let _ = db::cache_artist_image(&state.db_path, &trimmed, None);
                 if let Some(image) = existing {
                     return Ok(Some(image));
                 }
@@ -1726,9 +1820,15 @@ async fn upload_custom_artist_image(
         return Err("Custom artist photo uploads are available only in Needle backend mode right now".to_string());
     }
 
-    backend::upload_backend_artist_image(&settings, &trimmed, Path::new(&path))
+    let image = backend::upload_backend_artist_image(&settings, &trimmed, Path::new(&path))
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let _ = db::cache_artist_image(
+        &state.db_path,
+        &trimmed,
+        image.as_ref().map(|value| value.url.as_str()),
+    );
+    Ok(image)
 }
 
 #[tauri::command]
@@ -1746,9 +1846,15 @@ async fn restore_automatic_artist_image(
         return Err("Automatic artist photo restore is available only in Needle backend mode right now".to_string());
     }
 
-    backend::restore_backend_artist_image(&settings, &trimmed)
+    let image = backend::restore_backend_artist_image(&settings, &trimmed)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let _ = db::cache_artist_image(
+        &state.db_path,
+        &trimmed,
+        image.as_ref().map(|value| value.url.as_str()),
+    );
+    Ok(image)
 }
 
 #[tauri::command]
@@ -1763,9 +1869,27 @@ async fn get_artist_info(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return backend::get_backend_artist_info(&settings, &trimmed)
+        if let Some(cached) =
+            db::get_artist_info(&state.db_path, &trimmed).map_err(|error| error.to_string())?
+        {
+            return Ok(cached.map(|info| artist::ArtistInfo {
+                description: info.description,
+                source_url: info.source_url,
+                gender: info.gender,
+                source: "cache".into(),
+            }));
+        }
+
+        let info = backend::get_backend_artist_info(&settings, &trimmed)
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string())?;
+        let cached = info.as_ref().map(|value| db::CachedArtistInfo {
+            description: value.description.clone(),
+            source_url: value.source_url.clone(),
+            gender: value.gender,
+        });
+        let _ = db::cache_artist_info(&state.db_path, &trimmed, cached.as_ref());
+        return Ok(info);
     }
 
     if let Some(cached) =
@@ -1809,12 +1933,27 @@ async fn refresh_artist_info(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        let existing = backend::get_backend_artist_info(&settings, &trimmed)
-            .await
-            .map_err(|error| error.to_string())?;
+        let existing = db::get_artist_info(&state.db_path, &trimmed)
+            .map_err(|error| error.to_string())?
+            .flatten()
+            .map(|info| artist::ArtistInfo {
+                description: info.description,
+                source_url: info.source_url,
+                gender: info.gender,
+                source: "cache".into(),
+            });
         match backend::refresh_backend_artist_info(&settings, &trimmed).await {
-            Ok(Some(info)) => return Ok(Some(info)),
+            Ok(Some(info)) => {
+                let cached = db::CachedArtistInfo {
+                    description: info.description.clone(),
+                    source_url: info.source_url.clone(),
+                    gender: info.gender,
+                };
+                let _ = db::cache_artist_info(&state.db_path, &trimmed, Some(&cached));
+                return Ok(Some(info));
+            }
             Ok(None) => {
+                let _ = db::cache_artist_info(&state.db_path, &trimmed, None);
                 if let Some(info) = existing {
                     return Ok(Some(info));
                 }
@@ -1896,9 +2035,40 @@ async fn get_album_info(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return backend::get_backend_album_info(&settings, &album_trim, artist_trim.as_deref())
+        let lookup_keys = album_info_lookup_keys(&album_trim, artist_trim.as_deref());
+        let primary_key = lookup_keys
+            .first()
+            .cloned()
+            .unwrap_or_else(|| album_info_cache_key(&album_trim, artist_trim.as_deref()));
+        for lookup_key in &lookup_keys {
+            if let Some(cached) =
+                db::get_album_info(&state.db_path, lookup_key).map_err(|error| error.to_string())?
+            {
+                if let Some(info) = cached {
+                    if lookup_key != &primary_key {
+                        let _ = db::cache_album_info(&state.db_path, &primary_key, Some(&info));
+                    }
+                    return Ok(Some(album::AlbumInfo {
+                        description: info.description,
+                        source_url: info.source_url,
+                        source: "cache".into(),
+                    }));
+                }
+                return Ok(None);
+            }
+        }
+
+        let info = backend::get_backend_album_info(&settings, &album_trim, artist_trim.as_deref())
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string())?;
+        let cached = info.as_ref().map(|value| db::CachedAlbumInfo {
+            description: value.description.clone(),
+            source_url: value.source_url.clone(),
+        });
+        for lookup_key in &lookup_keys {
+            let _ = db::cache_album_info(&state.db_path, lookup_key, cached.as_ref());
+        }
+        return Ok(info);
     }
 
     let lookup_keys = album_info_lookup_keys(&album_trim, artist_trim.as_deref());
@@ -1967,12 +2137,34 @@ async fn refresh_album_info(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        let existing = backend::get_backend_album_info(&settings, &album_trim, artist_trim.as_deref())
-            .await
-            .map_err(|error| error.to_string())?;
+        let lookup_keys = album_info_lookup_keys(&album_trim, artist_trim.as_deref());
+        let existing = lookup_keys
+            .iter()
+            .find_map(|lookup_key| {
+                db::get_album_info(&state.db_path, lookup_key)
+                    .ok()
+                    .and_then(|cached| cached.flatten())
+            })
+            .map(|info| album::AlbumInfo {
+                description: info.description,
+                source_url: info.source_url,
+                source: "cache".into(),
+            });
         match backend::refresh_backend_album_info(&settings, &album_trim, artist_trim.as_deref()).await {
-            Ok(Some(info)) => return Ok(Some(info)),
+            Ok(Some(info)) => {
+                let cached = db::CachedAlbumInfo {
+                    description: info.description.clone(),
+                    source_url: info.source_url.clone(),
+                };
+                for lookup_key in &lookup_keys {
+                    let _ = db::cache_album_info(&state.db_path, lookup_key, Some(&cached));
+                }
+                return Ok(Some(info));
+            }
             Ok(None) => {
+                for lookup_key in &lookup_keys {
+                    let _ = db::cache_album_info(&state.db_path, lookup_key, None);
+                }
                 if let Some(info) = existing {
                     return Ok(Some(info));
                 }
@@ -2152,6 +2344,15 @@ async fn get_cover_art(
     if matches!(settings.library_source, LibrarySource::NeedleBackend)
         && backend::is_backend_track_path(&track_path)
     {
+        if let Some(download) = db::get_offline_download(&state.db_path, &track_path)
+            .map_err(|error| error.to_string())?
+        {
+            let local_path = Path::new(&download.local_path);
+            if local_path.exists() {
+                return cover::find_cover_for(local_path).map_err(|error| error.to_string());
+            }
+        }
+
         return backend::get_backend_cover_art(&settings, &track_path)
             .await
             .map_err(|error| error.to_string());

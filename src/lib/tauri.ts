@@ -15,42 +15,91 @@ import type {
   TrackBpmAdjustment,
 } from '../types';
 
-export const bootstrapApp = () => invoke<BootstrapPayload>('bootstrap_app');
+export const backendConnectivityEventName = 'needle-backend-connectivity-error';
 
-export const bootstrapAppState = () => invoke<AppBootstrapState>('bootstrap_app_state');
+const isBackendConnectivityErrorMessage = (message: string) => {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("couldn't reach the configured homeserver") ||
+    normalized.includes('unable to reach needle backend') ||
+    normalized.includes('unable to reach needle backend route') ||
+    normalized.includes('error sending request') ||
+    normalized.includes('connection refused') ||
+    normalized.includes('connection reset') ||
+    normalized.includes('operation timed out') ||
+    normalized.includes('timed out') ||
+    normalized.includes('deadline has elapsed') ||
+    normalized.includes('dns error') ||
+    normalized.includes('failed to lookup address') ||
+    normalized.includes('network is unreachable') ||
+    normalized.includes('broken pipe') ||
+    normalized.includes('unexpected eof')
+  );
+};
 
-export const getRuntimeInfo = () => invoke<RuntimeInfo>('get_runtime_info');
+const reportBackendConnectivityError = (message: string) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
 
-export const openExternalUrl = (url: string) => invoke<void>('open_external_url', { url });
+  window.dispatchEvent(
+    new CustomEvent(backendConnectivityEventName, {
+      detail: {
+        message,
+        happenedAt: Date.now(),
+      },
+    }),
+  );
+};
+
+const invokeMonitored = async <T>(command: string, args?: Record<string, unknown>) => {
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isBackendConnectivityErrorMessage(message)) {
+      reportBackendConnectivityError(message);
+    }
+    throw error;
+  }
+};
+
+export const bootstrapApp = () => invokeMonitored<BootstrapPayload>('bootstrap_app');
+
+export const bootstrapAppState = () => invokeMonitored<AppBootstrapState>('bootstrap_app_state');
+
+export const getRuntimeInfo = () => invokeMonitored<RuntimeInfo>('get_runtime_info');
+
+export const openExternalUrl = (url: string) => invokeMonitored<void>('open_external_url', { url });
 
 export const getNeedleBackendStatus = (backendUrl?: string | null) =>
-  invoke<NeedleBackendStatus>('get_needle_backend_status', {
+  invokeMonitored<NeedleBackendStatus>('get_needle_backend_status', {
     backendUrl: backendUrl ?? null,
   });
 
 export const migrateDesktopStateToNeedleBackend = (backendUrl?: string | null) =>
-  invoke<NeedleBackendMigrationReport>('migrate_desktop_state_to_needle_backend', {
+  invokeMonitored<NeedleBackendMigrationReport>('migrate_desktop_state_to_needle_backend', {
     backendUrl: backendUrl ?? null,
   });
 
 export const listOfflineDownloads = () =>
-  invoke<OfflineDownloadEntry[]>('list_offline_downloads');
+  invokeMonitored<OfflineDownloadEntry[]>('list_offline_downloads');
 
 export const downloadOfflineTracks = (trackPaths: string[]) =>
-  invoke<OfflineDownloadEntry[]>('download_offline_tracks', { trackPaths });
+  invokeMonitored<OfflineDownloadEntry[]>('download_offline_tracks', { trackPaths });
 
 export const removeOfflineTracks = (trackPaths: string[]) =>
-  invoke<OfflineDownloadEntry[]>('remove_offline_tracks', { trackPaths });
+  invokeMonitored<OfflineDownloadEntry[]>('remove_offline_tracks', { trackPaths });
 
 export const scanLibrary = (folder: string) =>
   invoke<BootstrapPayload>('scan_library', { folder });
 
 export const saveSettings = (settings: AppSettings) =>
-  invoke<AppSettings>('save_settings', { settings });
+  invokeMonitored<AppSettings>('save_settings', { settings });
 
-export const playTrack = (path: string) => invoke<void>('play_track', { path });
+export const playTrack = (path: string) => invokeMonitored<void>('play_track', { path });
 
-export const playQueue = (paths: string[]) => invoke<void>('play_queue', { paths });
+export const playQueue = (paths: string[]) => invokeMonitored<void>('play_queue', { paths });
 
 export const pausePlayback = () => invoke<void>('pause_playback');
 
@@ -64,10 +113,10 @@ export const seekPlayback = (positionSeconds: number) =>
 export const getPlaybackState = () => invoke<PlaybackState>('get_playback_state');
 
 export const savePlaybackSession = (session: PlaybackSession) =>
-  invoke<PlaybackSession>('save_playback_session', { session });
+  invokeMonitored<PlaybackSession>('save_playback_session', { session });
 
 export const syncPlaybackSession = (session: PlaybackSession) =>
-  invoke<void>('sync_playback_session', { session });
+  invokeMonitored<void>('sync_playback_session', { session });
 
 export const playQueueIndex = (index: number) =>
   invoke<void>('play_queue_index', { index });
@@ -115,7 +164,7 @@ export const createPlaylist = (
   name: string,
   trackPaths: string[],
   rule?: SavedPlaylistRule | null,
-) => invoke<BootstrapPayload>('create_playlist', { name, trackPaths, rule: rule ?? null });
+) => invokeMonitored<BootstrapPayload>('create_playlist', { name, trackPaths, rule: rule ?? null });
 
 export const renamePlaylist = (playlistId: string, name: string) =>
   invoke<BootstrapPayload>('rename_playlist', { playlistId, name });
@@ -139,7 +188,7 @@ export const setAlbumPrimaryGenre = (
   album: string,
   albumArtist: string | null,
   primaryGenre: string | null,
-) => invoke<BootstrapPayload>('set_album_primary_genre', { album, albumArtist, primaryGenre });
+) => invokeMonitored<BootstrapPayload>('set_album_primary_genre', { album, albumArtist, primaryGenre });
 
 export const saveAlbumGenre = (
   album: string,
@@ -147,19 +196,19 @@ export const saveAlbumGenre = (
   trackPaths: string[],
   genre: string | null,
   mode: MetadataEditMode,
-) => invoke<BootstrapPayload>('save_album_genre', { album, albumArtist, trackPaths, genre, mode });
+) => invokeMonitored<BootstrapPayload>('save_album_genre', { album, albumArtist, trackPaths, genre, mode });
 
 export const setTrackRating = (path: string, rating: number | null) =>
-  invoke<BootstrapPayload>('set_track_rating', { path, rating });
+  invokeMonitored<BootstrapPayload>('set_track_rating', { path, rating });
 
 export const setTrackFavorite = (path: string, favorite: boolean) =>
-  invoke<BootstrapPayload>('set_track_favorite', { path, favorite });
+  invokeMonitored<BootstrapPayload>('set_track_favorite', { path, favorite });
 
 export const saveTrackBpm = (path: string, bpm: number, mode: MetadataEditMode) =>
-  invoke<BootstrapPayload>('save_track_bpm', { path, bpm, mode });
+  invokeMonitored<BootstrapPayload>('save_track_bpm', { path, bpm, mode });
 
 export const adjustTrackBpm = (path: string, adjustment: TrackBpmAdjustment) =>
-  invoke<BootstrapPayload>('adjust_track_bpm', { path, adjustment });
+  invokeMonitored<BootstrapPayload>('adjust_track_bpm', { path, adjustment });
 
 export interface CoverArt {
   data_url: string;
@@ -167,9 +216,9 @@ export interface CoverArt {
 }
 
 export const getCoverArt = (trackPath: string) =>
-  invoke<CoverArt | null>('get_cover_art', { trackPath });
+  invokeMonitored<CoverArt | null>('get_cover_art', { trackPath });
 
-export const recordPlay = (path: string) => invoke<void>('record_play', { path });
+export const recordPlay = (path: string) => invokeMonitored<void>('record_play', { path });
 
 export interface ArtistImage {
   url: string;
@@ -179,19 +228,19 @@ export interface ArtistImage {
 export type ArtistGender = 'female' | 'male' | 'non_binary' | 'other' | 'not_applicable';
 
 export const getArtistImage = (name: string) =>
-  invoke<ArtistImage | null>('get_artist_image', { name });
+  invokeMonitored<ArtistImage | null>('get_artist_image', { name });
 
 export const peekArtistImage = (name: string) =>
-  invoke<ArtistImage | null>('peek_artist_image', { name });
+  invokeMonitored<ArtistImage | null>('peek_artist_image', { name });
 
 export const refreshArtistImage = (name: string) =>
-  invoke<ArtistImage | null>('refresh_artist_image', { name });
+  invokeMonitored<ArtistImage | null>('refresh_artist_image', { name });
 
 export const uploadCustomArtistImage = (name: string, imagePath: string) =>
-  invoke<ArtistImage | null>('upload_custom_artist_image', { name, imagePath });
+  invokeMonitored<ArtistImage | null>('upload_custom_artist_image', { name, imagePath });
 
 export const restoreAutomaticArtistImage = (name: string) =>
-  invoke<ArtistImage | null>('restore_automatic_artist_image', { name });
+  invokeMonitored<ArtistImage | null>('restore_automatic_artist_image', { name });
 
 export interface ArtistInfo {
   description: string | null;
@@ -201,10 +250,10 @@ export interface ArtistInfo {
 }
 
 export const getArtistInfo = (name: string) =>
-  invoke<ArtistInfo | null>('get_artist_info', { name });
+  invokeMonitored<ArtistInfo | null>('get_artist_info', { name });
 
 export const refreshArtistInfo = (name: string) =>
-  invoke<ArtistInfo | null>('refresh_artist_info', { name });
+  invokeMonitored<ArtistInfo | null>('refresh_artist_info', { name });
 
 export interface AlbumInfo {
   description: string | null;
@@ -213,10 +262,10 @@ export interface AlbumInfo {
 }
 
 export const getAlbumInfo = (album: string, artist: string | null) =>
-  invoke<AlbumInfo | null>('get_album_info', { album, artist });
+  invokeMonitored<AlbumInfo | null>('get_album_info', { album, artist });
 
 export const refreshAlbumInfo = (album: string, artist: string | null) =>
-  invoke<AlbumInfo | null>('refresh_album_info', { album, artist });
+  invokeMonitored<AlbumInfo | null>('refresh_album_info', { album, artist });
 
 export type AlbumMetadataRefreshStatus = 'matched' | 'ambiguous' | 'no_match' | 'error';
 
@@ -237,7 +286,7 @@ export const refreshAlbumMetadataFromMusicBrainz = (
   album: string,
   albumArtist: string | null,
 ) =>
-  invoke<AlbumMetadataRefreshResult>('refresh_album_metadata_from_musicbrainz', {
+  invokeMonitored<AlbumMetadataRefreshResult>('refresh_album_metadata_from_musicbrainz', {
     album,
     albumArtist,
   });

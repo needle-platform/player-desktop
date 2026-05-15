@@ -9,6 +9,7 @@ import {
   applyVolumeLevelingForTrack,
   appendTracksToPlaylist,
   appendQueue,
+  backendConnectivityEventName,
   bootstrapAppState,
   createPlaylist,
   downloadOfflineTracks,
@@ -189,9 +190,20 @@ type WindowRestoreState = {
 type NotificationTone = 'info' | 'success' | 'warning' | 'error';
 type SettingsTab = 'appearance' | 'playback' | 'library';
 
+const isBackendOfflineStatusMessage = (message: string): boolean => {
+  const normalized = message.trim().toLowerCase();
+  return (
+    normalized.includes('offline mode active') ||
+    normalized.includes('needle backend offline') ||
+    normalized.includes("couldn't reach the configured homeserver") ||
+    (normalized.includes('using ') && normalized.includes('offline track'))
+  );
+};
+
 const inferNotificationTone = (message: string): NotificationTone => {
   const normalized = message.trim().toLowerCase();
   if (!normalized) return 'info';
+  if (isBackendOfflineStatusMessage(normalized)) return 'info';
 
   if (
     normalized.includes('failed') ||
@@ -1472,6 +1484,7 @@ function App() {
     message: string;
   } | null>(null);
   const [backendModeNotice, setBackendModeNotice] = useState<string | null>(null);
+  const [isBackendOfflineMode, setIsBackendOfflineMode] = useState(false);
   const [isNeedleBackendStatusLoading, setIsNeedleBackendStatusLoading] = useState(false);
   const [isNeedleBackendMigrationRunning, setIsNeedleBackendMigrationRunning] = useState(false);
   const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
@@ -1519,9 +1532,12 @@ function App() {
   const windowRestoreStateRef = useRef<WindowRestoreState | null>(null);
   const miniQueueResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const notificationIdRef = useRef(0);
+  const backendOfflineRecoveryRef = useRef(false);
+  const backendHeartbeatInFlightRef = useRef(false);
 
   const applyBootstrapState = (nextState: AppBootstrapState) => {
     setData(nextState.bootstrap);
+    setIsBackendOfflineMode(nextState.offline_mode);
     setBackendModeNotice(nextState.offline_mode ? nextState.startup_notice ?? null : null);
     setStartupError(null);
   };
@@ -1533,6 +1549,12 @@ function App() {
     }
 
     if (isPlaybackStatusMessage(message)) {
+      setStatus((current) => (current === message ? '' : current));
+      return;
+    }
+
+    if (isBackendOfflineStatusMessage(message)) {
+      setNotification(null);
       setStatus((current) => (current === message ? '' : current));
       return;
     }
@@ -2031,6 +2053,137 @@ function App() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (!isNeedleBackendMode || typeof window === 'undefined') {
+      return;
+    }
+
+    const handleBackendConnectivityLoss = (event: Event) => {
+      const detail =
+        event instanceof CustomEvent && event.detail && typeof event.detail === 'object'
+          ? (event.detail as { message?: string })
+          : null;
+
+      if (isBackendOfflineMode) {
+        return;
+      }
+
+      if (backendOfflineRecoveryRef.current) {
+        return;
+      }
+
+      backendOfflineRecoveryRef.current = true;
+      void (async () => {
+        try {
+          const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
+            bootstrapAppState(),
+            listOfflineDownloads(),
+          ]);
+          applyBootstrapState(nextBootstrapState);
+          setOfflineDownloads(nextOfflineDownloads);
+          setStatus(
+            nextBootstrapState.startup_notice ??
+              detail?.message ??
+              'Needle backend unreachable · offline mode active',
+          );
+        } catch (error) {
+          setStatus(detail?.message ?? (error instanceof Error ? error.message : String(error)));
+        } finally {
+          backendOfflineRecoveryRef.current = false;
+        }
+      })();
+    };
+
+    window.addEventListener('needle-backend-connectivity-error', handleBackendConnectivityLoss as EventListener);
+    return () => {
+      window.removeEventListener(
+        'needle-backend-connectivity-error',
+        handleBackendConnectivityLoss as EventListener,
+      );
+    };
+  }, [isBackendOfflineMode, isNeedleBackendMode]);
+
+  useEffect(() => {
+    if (!isNeedleBackendMode || !data?.settings.needle_backend_url || typeof window === 'undefined') {
+      return;
+    }
+
+    let cancelled = false;
+    const heartbeatIntervalMs = 3000;
+
+    const triggerOfflineRecovery = (message?: string) => {
+      window.dispatchEvent(
+        new CustomEvent(backendConnectivityEventName, {
+          detail: {
+            message,
+            happenedAt: Date.now(),
+            source: 'heartbeat',
+          },
+        }),
+      );
+    };
+
+    const runHeartbeat = async (options?: { restoreIfOnline?: boolean }) => {
+      if (backendHeartbeatInFlightRef.current || backendOfflineRecoveryRef.current) {
+        return;
+      }
+
+      backendHeartbeatInFlightRef.current = true;
+      try {
+        await getNeedleBackendStatus(data.settings.needle_backend_url);
+        if (cancelled || !options?.restoreIfOnline || !isBackendOfflineMode) {
+          return;
+        }
+
+        const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
+          bootstrapAppState(),
+          listOfflineDownloads(),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        applyBootstrapState(nextBootstrapState);
+        setOfflineDownloads(nextOfflineDownloads);
+        if (!nextBootstrapState.offline_mode) {
+          setStatus(
+            `Needle backend reconnected · ${nextBootstrapState.bootstrap.library.track_count} tracks`,
+          );
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        triggerOfflineRecovery(message);
+      } finally {
+        backendHeartbeatInFlightRef.current = false;
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void runHeartbeat({ restoreIfOnline: true });
+    }, heartbeatIntervalMs);
+
+    const handleBrowserOffline = () => {
+      triggerOfflineRecovery("Needle couldn't reach the configured homeserver.");
+    };
+
+    const handleBrowserOnline = () => {
+      void runHeartbeat({ restoreIfOnline: true });
+    };
+
+    window.addEventListener('offline', handleBrowserOffline);
+    window.addEventListener('online', handleBrowserOnline);
+    void runHeartbeat({ restoreIfOnline: true });
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('offline', handleBrowserOffline);
+      window.removeEventListener('online', handleBrowserOnline);
+    };
+  }, [data?.settings.needle_backend_url, isBackendOfflineMode, isNeedleBackendMode]);
 
   useEffect(() => {
     if (!data) {
@@ -4730,7 +4883,7 @@ function App() {
           <div className="connection-banner" role="status">
             <div className="connection-banner-title">Offline mode</div>
             <div className="connection-banner-copy">
-              {backendModeNotice} Reconnect the homeserver, then use Settings to check the backend when it is back.
+              {backendModeNotice} Needle will switch back automatically when the homeserver is reachable again.
             </div>
           </div>
         )}
@@ -4776,6 +4929,8 @@ function App() {
             onOpenView={(v) => setView(v)}
             onPlay={play}
             busy={!!busy}
+            isNeedleBackendMode={isNeedleBackendMode}
+            isBackendOfflineMode={isBackendOfflineMode}
           />
         )}
 
@@ -4859,7 +5014,7 @@ function App() {
             onClearSmartPlaylistGenres={() => setSelectedSmartPlaylistGenres([])}
             onToggleFavorite={updateTrackFavorite}
             pendingFavoritePaths={pendingTrackFavorites}
-            showOfflineControls={isNeedleBackendMode}
+            showOfflineControls={isNeedleBackendMode && !isBackendOfflineMode}
             isOfflineAvailable={(track) => offlineDownloadByTrackPath.has(track.path)}
             pendingOfflinePaths={pendingOfflinePaths}
             onToggleOffline={(track, shouldDownload) => void toggleTrackOffline(track, shouldDownload)}
@@ -4981,7 +5136,8 @@ function App() {
                 suggestedName: `${selectedAlbumSummary.album} picks`,
               })
             }
-            showOfflineActions={isNeedleBackendMode}
+            showOfflineActions={isNeedleBackendMode && !isBackendOfflineMode}
+            isBackendOfflineMode={isBackendOfflineMode}
             areAllTracksOffline={tracksForAlbum(selectedAlbum).every((track) => offlineDownloadByTrackPath.has(track.path))}
             hasAnyOfflineTracks={tracksForAlbum(selectedAlbum).some((track) => offlineDownloadByTrackPath.has(track.path))}
             isOfflineAvailable={(track) => offlineDownloadByTrackPath.has(track.path)}
@@ -5048,6 +5204,7 @@ function App() {
             layoutMode={artistLayoutMode}
             onLayoutModeChange={setArtistLayoutMode}
             onSelect={(artist) => openArtist(artist, artistBrowseMode)}
+            isBackendOfflineMode={isBackendOfflineMode}
           />
         )}
 
@@ -5130,6 +5287,7 @@ function App() {
             onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
             pendingBpmPaths={pendingTrackBpms}
             isNeedleBackendMode={isNeedleBackendMode}
+            isBackendOfflineMode={isBackendOfflineMode}
             onSetBusy={setBusy}
             onSetStatus={setStatus}
           />
@@ -7204,6 +7362,7 @@ interface AlbumDetailViewProps {
   onAddAlbumToPlaylist: () => void;
   onAddTrackToPlaylist: (track: Track) => void;
   showOfflineActions?: boolean;
+  isBackendOfflineMode: boolean;
   areAllTracksOffline?: boolean;
   hasAnyOfflineTracks?: boolean;
   isOfflineAvailable: (track: Track) => boolean;
@@ -7246,6 +7405,7 @@ function AlbumDetailView({
   onAddAlbumToPlaylist,
   onAddTrackToPlaylist,
   showOfflineActions = false,
+  isBackendOfflineMode,
   areAllTracksOffline = false,
   hasAnyOfflineTracks = false,
   isOfflineAvailable,
@@ -7359,7 +7519,7 @@ function AlbumDetailView({
   const { info, loading: infoLoading, retrying: infoRetrying, retry: retryAlbumInfo } = useAlbumInfo(
     album,
     primaryArtist,
-    { autoRefreshOnMiss: true },
+    { autoRefreshOnMiss: !isBackendOfflineMode },
   );
 
   useEffect(() => {
@@ -7408,6 +7568,9 @@ function AlbumDetailView({
           className="artist-hero-media"
           ref={metadataMenuRef}
           onContextMenu={(event) => {
+            if (isBackendOfflineMode) {
+              return;
+            }
             event.preventDefault();
             setIsMetadataMenuOpen(true);
           }}
@@ -7424,7 +7587,7 @@ function AlbumDetailView({
               <div className="artist-image-refresh-label">Refreshing metadata…</div>
             </div>
           )}
-          {isMetadataMenuOpen && (
+          {isMetadataMenuOpen && !isBackendOfflineMode && (
             <div className="artist-image-menu-panel" role="menu" aria-label={`Metadata options for ${album}`}>
               <button
                 className="artist-image-menu-option"
@@ -7543,9 +7706,9 @@ function AlbumDetailView({
             <button
               className="album-about-retry"
               onClick={() => void retryAlbumInfo()}
-              disabled={infoRetrying}
+              disabled={infoRetrying || isBackendOfflineMode}
             >
-              {infoRetrying ? 'Retrying…' : 'Retry lookup'}
+              {isBackendOfflineMode ? 'Offline mode' : infoRetrying ? 'Retrying…' : 'Retry lookup'}
             </button>
           </div>
         )}
@@ -7706,6 +7869,7 @@ interface ArtistDetailViewProps {
   onOpenBpmEditor: (track: Track) => void;
   pendingBpmPaths: string[];
   isNeedleBackendMode: boolean;
+  isBackendOfflineMode: boolean;
   onSetBusy: (value: string | null) => void;
   onSetStatus: (value: string) => void;
 }
@@ -7745,6 +7909,7 @@ function ArtistDetailView({
   onOpenBpmEditor,
   pendingBpmPaths,
   isNeedleBackendMode,
+  isBackendOfflineMode,
   onSetBusy,
   onSetStatus,
 }: ArtistDetailViewProps) {
@@ -7757,9 +7922,12 @@ function ArtistDetailView({
     retrying: artistImageRetrying,
     retry: retryArtistImage,
     reload: reloadArtistImage,
-  } = useArtistImage(artist, { autoRefreshOnMiss: true });
+  } = useArtistImage(artist, {
+    autoRefreshOnMiss: !isBackendOfflineMode,
+    cacheOnly: isBackendOfflineMode,
+  });
   const { info, loading: infoLoading, retrying: infoRetrying, retry: retryArtistInfo } = useArtistInfo(artist, {
-    autoRefreshOnMiss: true,
+    autoRefreshOnMiss: !isBackendOfflineMode,
   });
   const artistTracks = useMemo(
     () => tracks.filter((track) => artistNameForTrack(track, mode) === artist),
@@ -7895,6 +8063,7 @@ function ArtistDetailView({
           <ArtistAvatar
             name={artist}
             size="hero"
+            imageMode={isBackendOfflineMode ? 'cache_only' : 'default'}
             urlOverride={artistImageUrl}
             fallbackTrackPath={fallbackArtworkPath}
           />
@@ -7908,7 +8077,7 @@ function ArtistDetailView({
           )}
           {isImageMenuOpen && (
             <div className="artist-image-menu-panel" role="menu" aria-label={`Refresh options for ${artist}`}>
-              {isNeedleBackendMode && (
+              {isNeedleBackendMode && !isBackendOfflineMode && (
                 <button
                   className="artist-image-menu-option"
                   onClick={() => {
@@ -7921,7 +8090,7 @@ function ArtistDetailView({
                   {isArtistPhotoUpdating ? 'Updating photo…' : 'Upload photo…'}
                 </button>
               )}
-              {isNeedleBackendMode && (
+              {isNeedleBackendMode && !isBackendOfflineMode && (
                 <button
                   className="artist-image-menu-option"
                   onClick={() => {
@@ -7940,10 +8109,10 @@ function ArtistDetailView({
                   setIsImageMenuOpen(false);
                   void retryArtistImage();
                 }}
-                disabled={isArtistPhotoActionBusy}
+                disabled={isArtistPhotoActionBusy || isBackendOfflineMode}
                 role="menuitem"
               >
-                {artistImageRetrying ? 'Refreshing photo…' : 'Refresh photo'}
+                {isBackendOfflineMode ? 'Offline mode' : artistImageRetrying ? 'Refreshing photo…' : 'Refresh photo'}
               </button>
               <button
                 className="artist-image-menu-option"
@@ -7951,10 +8120,10 @@ function ArtistDetailView({
                   setIsImageMenuOpen(false);
                   void retryArtistInfo();
                 }}
-                disabled={!canRefreshBio}
+                disabled={!canRefreshBio || isBackendOfflineMode}
                 role="menuitem"
               >
-                {infoRetrying ? 'Refreshing bio…' : 'Refresh bio'}
+                {isBackendOfflineMode ? 'Offline mode' : infoRetrying ? 'Refreshing bio…' : 'Refresh bio'}
               </button>
             </div>
           )}
@@ -8467,6 +8636,7 @@ interface ArtistsViewProps {
   layoutMode: ArtistLayoutMode;
   onLayoutModeChange: (value: ArtistLayoutMode) => void;
   onSelect: (artist: string) => void;
+  isBackendOfflineMode: boolean;
 }
 
 function ArtistsView({
@@ -8480,6 +8650,7 @@ function ArtistsView({
   layoutMode,
   onLayoutModeChange,
   onSelect,
+  isBackendOfflineMode,
 }: ArtistsViewProps) {
   const scopeLabel = browseMode === 'album' ? 'Album artists' : 'All artists';
   const emptyTitle = search.trim() ? 'No matching artists' : `No ${browseMode === 'album' ? 'album artists' : 'artists'}`;
@@ -8577,7 +8748,7 @@ function ArtistsView({
                 name={artist.artist}
                 size="lg"
                 fallbackTrackPath={artist.samplePath}
-                imageMode="deferred"
+                imageMode={isBackendOfflineMode ? 'cache_only' : 'deferred'}
                 lazyLoad
               />
               <div className="artist-tile-name">{artist.artist}</div>
@@ -8593,7 +8764,7 @@ function ArtistsView({
                 name={artist.artist}
                 size="sm"
                 fallbackTrackPath={artist.samplePath}
-                imageMode="deferred"
+                imageMode={isBackendOfflineMode ? 'cache_only' : 'deferred'}
                 lazyLoad
               />
               <div className="list-main">
@@ -10151,6 +10322,8 @@ interface DashboardViewProps {
   onOpenView: (view: View) => void;
   onPlay: (track: Track) => void;
   busy: boolean;
+  isNeedleBackendMode: boolean;
+  isBackendOfflineMode: boolean;
 }
 
 function DashboardView({
@@ -10178,6 +10351,8 @@ function DashboardView({
   onOpenView,
   onPlay,
   busy,
+  isNeedleBackendMode,
+  isBackendOfflineMode,
 }: DashboardViewProps) {
   const currentArtwork = useCoverArt(currentTrack?.path);
   const dashboardBackdrop = currentArtwork ?? dashboardIdleBackdrop;
@@ -10242,26 +10417,40 @@ function DashboardView({
     </section>
   );
 
-  if (isEmpty) {
+  if (isEmpty && !isNeedleBackendMode) {
+    const isBackendOfflineEmptyState = false;
     return (
       <div className="view dashboard">
         <header className="dashboard-hero">
           <div>
             <div className="view-eyebrow">{greeting()}</div>
-            <h1 className="view-title">Welcome to Needle</h1>
+            <h1 className="view-title">
+              {isBackendOfflineEmptyState ? 'Needle backend offline' : 'Welcome to Needle'}
+            </h1>
             <p className="dashboard-lead">
-              Your library is empty. Import a folder of music to get started — FLAC, ALAC, WAV, AIFF, M4A, AAC, MP3,
-              OGG, and Opus are all supported.
+              {isBackendOfflineEmptyState
+                ? "Needle couldn't reach your homeserver, and there are no downloaded tracks on this computer yet."
+                : 'Your library is empty. Import a folder of music to get started — FLAC, ALAC, WAV, AIFF, M4A, AAC, MP3, OGG, and Opus are all supported.'}
             </p>
           </div>
         </header>
         <div className="empty">
           <div className="empty-icon">♪</div>
-          <h2>No music yet</h2>
-          <p>Add a folder to begin scanning. Your audio files are never modified.</p>
-          <button className="primary" onClick={onAddFolder} disabled={busy} style={{ marginTop: 12 }}>
-            + Add folder
-          </button>
+          <h2>{isBackendOfflineEmptyState ? 'No offline downloads available' : 'No music yet'}</h2>
+          <p>
+            {isBackendOfflineEmptyState
+              ? 'Reconnect the backend, or download albums and tracks for offline playback before going offline next time.'
+              : 'Add a folder to begin scanning. Your audio files are never modified.'}
+          </p>
+          {isBackendOfflineEmptyState ? (
+            <button className="ghost-button" onClick={onOpenSettings} style={{ marginTop: 12 }}>
+              Open settings
+            </button>
+          ) : (
+            <button className="primary" onClick={onAddFolder} disabled={busy} style={{ marginTop: 12 }}>
+              + Add folder
+            </button>
+          )}
         </div>
       </div>
     );
@@ -10457,7 +10646,7 @@ function DashboardView({
                   <ArtistAvatar
                     name={a.artist}
                     size="lg"
-                    imageMode="deferred"
+                    imageMode={isBackendOfflineMode ? 'cache_only' : 'deferred'}
                     fallbackTrackPath={a.samplePath}
                     lazyLoad
                   />
