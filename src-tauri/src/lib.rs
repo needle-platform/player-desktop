@@ -1,7 +1,7 @@
-mod backend;
 mod album;
 mod album_metadata;
 mod artist;
+mod backend;
 mod cover;
 mod db;
 mod library;
@@ -9,14 +9,21 @@ mod loudness;
 mod models;
 mod mpv;
 
-use std::{collections::{HashMap, HashSet}, fs, path::{Path, PathBuf}, process::Command, sync::Mutex, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Mutex,
+    time::Instant,
+};
 
 use models::{
-    AlbumMetadataRefreshResult, AlbumMetadataRefreshStatus, AppBootstrapState, AppSettings, BootstrapPayload,
-    LibrarySource, MetadataEditMode, NeedleBackendMigrationReport, NeedleBackendStatus,
-    OfflineDownloadEntry, OfflineDownloadOperation, OfflineDownloadProgress,
+    AlbumMetadataRefreshResult, AlbumMetadataRefreshStatus, AppBootstrapState, AppSettings,
+    BootstrapPayload, LibraryData, LibrarySource, MetadataEditMode, NeedleBackendMigrationReport,
+    NeedleBackendStatus, OfflineDownloadEntry, OfflineDownloadOperation, OfflineDownloadProgress,
     OfflineDownloadProgressStatus, PlaybackSession, PlaybackState, RepeatMode, RuntimeInfo,
-    SavedPlaylist, SavedPlaylistRule, TrackBpmAdjustment, LibraryData, Track,
+    SavedPlaylist, SavedPlaylistRule, Track, TrackBpmAdjustment,
 };
 use mpv::MpvController;
 use tauri::{Emitter, Manager};
@@ -61,21 +68,17 @@ fn volume_leveling_gain_for_path(
     if matches!(settings.library_source, LibrarySource::NeedleBackend)
         && backend::is_backend_track_path(track_path)
     {
-        match tauri::async_runtime::block_on(backend::get_backend_track_gain(
-            &settings,
-            track_path,
-        )) {
+        if let Some(gain) = db::get_backend_track_loudness_gain(db_path, track_path)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(Some(gain));
+        }
+
+        match tauri::async_runtime::block_on(backend::get_backend_track_gain(&settings, track_path))
+        {
             Ok(Some(gain)) => return Ok(Some(gain)),
-            Ok(None) => {
-                return db::get_backend_track_loudness_gain(db_path, track_path)
-                    .map_err(|error| error.to_string())
-            }
+            Ok(None) => return Ok(None),
             Err(error) => {
-                if let Some(gain) = db::get_backend_track_loudness_gain(db_path, track_path)
-                    .map_err(|db_error| db_error.to_string())?
-                {
-                    return Ok(Some(gain));
-                }
                 return Err(error.to_string());
             }
         }
@@ -241,8 +244,16 @@ fn filter_playback_session_for_available_tracks(
     };
     let current_index = current_path
         .as_deref()
-        .and_then(|path| filtered_queue.iter().position(|candidate| candidate == path))
-        .unwrap_or_else(|| session.current_index.min(filtered_queue.len().saturating_sub(1)));
+        .and_then(|path| {
+            filtered_queue
+                .iter()
+                .position(|candidate| candidate == path)
+        })
+        .unwrap_or_else(|| {
+            session
+                .current_index
+                .min(filtered_queue.len().saturating_sub(1))
+        });
 
     PlaybackSession {
         queue_paths: filtered_queue.clone(),
@@ -253,7 +264,11 @@ fn filter_playback_session_for_available_tracks(
         } else {
             session.position_seconds.max(0.0)
         },
-        paused: if filtered_queue.is_empty() { true } else { session.paused },
+        paused: if filtered_queue.is_empty() {
+            true
+        } else {
+            session.paused
+        },
         repeat_mode: session.repeat_mode,
         shuffle_enabled: session.shuffle_enabled,
     }
@@ -304,7 +319,10 @@ fn build_offline_backend_bootstrap(
         }
         playlists = filter_playlists_for_available_tracks(
             cached.playlists,
-            &offline_by_track_path.keys().cloned().collect::<HashSet<_>>(),
+            &offline_by_track_path
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>(),
         );
     }
 
@@ -315,7 +333,10 @@ fn build_offline_backend_bootstrap(
     }
 
     let tracks = offline_tracks.into_values().collect::<Vec<_>>();
-    let available_track_paths = tracks.iter().map(|track| track.path.clone()).collect::<HashSet<_>>();
+    let available_track_paths = tracks
+        .iter()
+        .map(|track| track.path.clone())
+        .collect::<HashSet<_>>();
     let playback_session = filter_playback_session_for_available_tracks(
         db::load_playback_session(db_path).map_err(|error| error.to_string())?,
         &available_track_paths,
@@ -457,7 +478,8 @@ fn backend_stream_urls(
         .map(|entry| (entry.track_path.clone(), entry))
         .collect::<HashMap<_, _>>();
 
-    paths.iter()
+    paths
+        .iter()
         .map(|path| backend_playback_source_for_track(settings, &offline_by_track_path, path))
         .collect()
 }
@@ -537,7 +559,9 @@ async fn migrate_desktop_state_to_needle_backend(
 }
 
 #[tauri::command]
-fn list_offline_downloads(state: tauri::State<'_, AppState>) -> Result<Vec<OfflineDownloadEntry>, String> {
+fn list_offline_downloads(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<OfflineDownloadEntry>, String> {
     prune_and_list_offline_downloads(&state.db_path)
 }
 
@@ -768,7 +792,10 @@ fn scan_library(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Use the Needle backend library scan instead of local folder import in backend mode".to_string());
+        return Err(
+            "Use the Needle backend library scan instead of local folder import in backend mode"
+                .to_string(),
+        );
     }
     if !Path::new(&folder).exists() {
         return Err("Selected folder does not exist".to_string());
@@ -830,7 +857,9 @@ fn play_track(path: String, state: tauri::State<'_, AppState>) -> Result<(), Str
         .lock()
         .map_err(|_| "Unable to acquire player state".to_string())?;
     apply_volume_leveling_to_player(&mut player, &state.db_path, Some(&path))?;
-    player.play(&playback_target).map_err(|error| error.to_string())
+    player
+        .play(&playback_target)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -916,9 +945,11 @@ fn save_playback_session(
     let settings = load_settings_for_current_mode(&state.db_path)?;
     match settings.library_source {
         LibrarySource::NeedleBackend => {
-            let local_session =
-                db::save_playback_session(&state.db_path, &session).map_err(|error| error.to_string())?;
-            match tauri::async_runtime::block_on(backend::save_backend_playback_session(&settings, &session)) {
+            let local_session = db::save_playback_session(&state.db_path, &session)
+                .map_err(|error| error.to_string())?;
+            match tauri::async_runtime::block_on(backend::save_backend_playback_session(
+                &settings, &session,
+            )) {
                 Ok(remote_session) => {
                     db::save_playback_session(&state.db_path, &remote_session)
                         .map_err(|error| error.to_string())?;
@@ -977,7 +1008,11 @@ fn sync_playback_session(
     let playback_session = if matches!(settings.library_source, LibrarySource::NeedleBackend) {
         PlaybackSession {
             queue_paths: backend_stream_urls(&settings, &state.db_path, &normalized.queue_paths)?,
-            base_queue_paths: backend_stream_urls(&settings, &state.db_path, &normalized.base_queue_paths)?,
+            base_queue_paths: backend_stream_urls(
+                &settings,
+                &state.db_path,
+                &normalized.base_queue_paths,
+            )?,
             current_index: normalized.current_index,
             position_seconds: normalized.position_seconds,
             paused: normalized.paused,
@@ -1011,10 +1046,36 @@ fn apply_volume_leveling_for_track(
     path: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let settings = load_settings_for_current_mode(&state.db_path)?;
+    let expected_playback_path = match path.as_deref() {
+        Some(track_path)
+            if matches!(settings.library_source, LibrarySource::NeedleBackend)
+                && backend::is_backend_track_path(track_path) =>
+        {
+            let offline_by_track_path = prune_and_list_offline_downloads(&state.db_path)?
+                .into_iter()
+                .map(|entry| (entry.track_path.clone(), entry))
+                .collect::<HashMap<_, _>>();
+            Some(backend_playback_source_for_track(
+                &settings,
+                &offline_by_track_path,
+                track_path,
+            )?)
+        }
+        Some(track_path) => Some(track_path.to_string()),
+        None => None,
+    };
+
     let mut player = state
         .player
         .lock()
         .map_err(|_| "Unable to acquire player state".to_string())?;
+    if let Some(expected) = expected_playback_path.as_deref() {
+        let current_path = player.current_path().map_err(|error| error.to_string())?;
+        if current_path.as_deref() != Some(expected) {
+            return Ok(());
+        }
+    }
     apply_volume_leveling_to_player(&mut player, &state.db_path, path.as_deref())
 }
 
@@ -1176,7 +1237,9 @@ fn append_tracks_to_playlist(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Editing backend playlists from the desktop app is not implemented yet".to_string());
+        return Err(
+            "Editing backend playlists from the desktop app is not implemented yet".to_string(),
+        );
     }
     db::append_tracks_to_playlist(&state.db_path, &playlist_id, &track_paths)
         .map_err(|error| error.to_string())?;
@@ -1191,7 +1254,9 @@ fn replace_playlist_tracks(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Editing backend playlists from the desktop app is not implemented yet".to_string());
+        return Err(
+            "Editing backend playlists from the desktop app is not implemented yet".to_string(),
+        );
     }
     db::replace_playlist_tracks(&state.db_path, &playlist_id, &track_paths)
         .map_err(|error| error.to_string())?;
@@ -1206,7 +1271,9 @@ fn remove_playlist_track(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Editing backend playlists from the desktop app is not implemented yet".to_string());
+        return Err(
+            "Editing backend playlists from the desktop app is not implemented yet".to_string(),
+        );
     }
     db::remove_playlist_track(&state.db_path, &playlist_id, index)
         .map_err(|error| error.to_string())?;
@@ -1222,7 +1289,9 @@ fn move_playlist_track(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Editing backend playlists from the desktop app is not implemented yet".to_string());
+        return Err(
+            "Editing backend playlists from the desktop app is not implemented yet".to_string(),
+        );
     }
     db::move_playlist_track(&state.db_path, &playlist_id, from_index, to_index)
         .map_err(|error| error.to_string())?;
@@ -1325,14 +1394,15 @@ fn set_track_rating(
     let settings = load_settings_for_current_mode(&state.db_path)?;
     match settings.library_source {
         LibrarySource::NeedleBackend => {
-            let bootstrap = tauri::async_runtime::block_on(
-                backend::set_backend_track_rating(&settings, &path, rating),
-            )
+            let bootstrap = tauri::async_runtime::block_on(backend::set_backend_track_rating(
+                &settings, &path, rating,
+            ))
             .map_err(|error| error.to_string())?;
             finalize_loaded_backend_bootstrap(&state.db_path, bootstrap)
         }
         LibrarySource::LocalFolders => {
-            db::set_track_rating(&state.db_path, &path, rating).map_err(|error| error.to_string())?;
+            db::set_track_rating(&state.db_path, &path, rating)
+                .map_err(|error| error.to_string())?;
             db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
         }
     }
@@ -1347,14 +1417,15 @@ fn set_track_favorite(
     let settings = load_settings_for_current_mode(&state.db_path)?;
     match settings.library_source {
         LibrarySource::NeedleBackend => {
-            let bootstrap = tauri::async_runtime::block_on(
-                backend::set_backend_track_favorite(&settings, &path, favorite),
-            )
+            let bootstrap = tauri::async_runtime::block_on(backend::set_backend_track_favorite(
+                &settings, &path, favorite,
+            ))
             .map_err(|error| error.to_string())?;
             finalize_loaded_backend_bootstrap(&state.db_path, bootstrap)
         }
         LibrarySource::LocalFolders => {
-            db::set_track_favorite(&state.db_path, &path, favorite).map_err(|error| error.to_string())?;
+            db::set_track_favorite(&state.db_path, &path, favorite)
+                .map_err(|error| error.to_string())?;
             db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
         }
     }
@@ -1424,7 +1495,8 @@ fn adjust_track_bpm(
             TrackBpmAdjustment::Half => Some(
                 ((track
                     .bpm
-                    .ok_or_else(|| "No BPM available for this track".to_string())? as f64)
+                    .ok_or_else(|| "No BPM available for this track".to_string())?
+                    as f64)
                     / 2.0)
                     .round()
                     .max(1.0) as i64,
@@ -1497,7 +1569,10 @@ async fn run_maintenance(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Run scans from the Needle backend instead of desktop maintenance in backend mode".to_string());
+        return Err(
+            "Run scans from the Needle backend instead of desktop maintenance in backend mode"
+                .to_string(),
+        );
     }
     let db_path = state.db_path.clone();
     let app_handle = app.clone();
@@ -1675,11 +1750,13 @@ fn remove_library_root(
 fn record_play(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     match settings.library_source {
-        LibrarySource::NeedleBackend => tauri::async_runtime::block_on(
-            backend::record_backend_play(&settings, &path),
-        )
-        .map_err(|error| error.to_string()),
-        LibrarySource::LocalFolders => db::record_play(&state.db_path, &path).map_err(|error| error.to_string()),
+        LibrarySource::NeedleBackend => {
+            tauri::async_runtime::block_on(backend::record_backend_play(&settings, &path))
+                .map_err(|error| error.to_string())
+        }
+        LibrarySource::LocalFolders => {
+            db::record_play(&state.db_path, &path).map_err(|error| error.to_string())
+        }
     }
 }
 
@@ -1854,7 +1931,10 @@ async fn upload_custom_artist_image(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if !matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Custom artist photo uploads are available only in Needle backend mode right now".to_string());
+        return Err(
+            "Custom artist photo uploads are available only in Needle backend mode right now"
+                .to_string(),
+        );
     }
 
     let image = backend::upload_backend_artist_image(&settings, &trimmed, Path::new(&path))
@@ -1880,7 +1960,10 @@ async fn restore_automatic_artist_image(
 
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if !matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Automatic artist photo restore is available only in Needle backend mode right now".to_string());
+        return Err(
+            "Automatic artist photo restore is available only in Needle backend mode right now"
+                .to_string(),
+        );
     }
 
     let image = backend::restore_backend_artist_image(&settings, &trimmed)
@@ -2187,7 +2270,9 @@ async fn refresh_album_info(
                 source_url: info.source_url,
                 source: "cache".into(),
             });
-        match backend::refresh_backend_album_info(&settings, &album_trim, artist_trim.as_deref()).await {
+        match backend::refresh_backend_album_info(&settings, &album_trim, artist_trim.as_deref())
+            .await
+        {
             Ok(Some(info)) => {
                 let cached = db::CachedAlbumInfo {
                     description: info.description.clone(),

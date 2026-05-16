@@ -9,7 +9,7 @@ pub enum ThemeMode {
     Dark,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EqualizerPreset {
     #[default]

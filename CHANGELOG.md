@@ -70,6 +70,8 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Fixed track-row alignment when BPM controls are unavailable for some rows.
 - Fixed BPM-correction toasts so they auto-dismiss like other success confirmations.
 - Fixed vibe playlists so they now follow the actual BPM buckets only, excluding tracks with no BPM and preventing cross-bucket bleed from metadata hints.
+- Fixed album queue handoffs so consecutive tracks can play truly gaplessly instead of inserting a short pause between songs.
+- Fixed backend-mode volume leveling to trust the desktop loudness cache first and ignore stale post-transition gain updates that could make playback sound inconsistent.
 
 ## [0.1.0] - 2026-05-01
 

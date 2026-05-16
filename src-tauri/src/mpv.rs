@@ -104,6 +104,9 @@ impl MpvController {
     }
 
     pub fn set_equalizer(&mut self, preset: EqualizerPreset, bands: [f32; 10]) -> Result<()> {
+        if self.equalizer_preset == preset && self.equalizer_bands == bands {
+            return Ok(());
+        }
         self.equalizer_preset = preset;
         self.equalizer_bands = bands;
         self.refresh_child_state()?;
@@ -118,7 +121,11 @@ impl MpvController {
     }
 
     pub fn set_track_gain_db(&mut self, gain_db: Option<f32>) -> Result<()> {
-        self.track_gain_db = normalize_track_gain(gain_db);
+        let normalized_gain = normalize_track_gain(gain_db);
+        if self.track_gain_db == normalized_gain {
+            return Ok(());
+        }
+        self.track_gain_db = normalized_gain;
         self.refresh_child_state()?;
 
         if !self.socket_path.exists() {
@@ -128,6 +135,19 @@ impl MpvController {
         let mut stream = UnixStream::connect(&self.socket_path)
             .context("Unable to connect to mpv IPC socket")?;
         self.apply_audio_filters(&mut stream)
+    }
+
+    pub fn current_path(&mut self) -> Result<Option<String>> {
+        self.refresh_child_state()?;
+
+        if !self.socket_path.exists() {
+            return Ok(None);
+        }
+
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .context("Unable to connect to mpv IPC socket")?;
+        self.start_listener();
+        self.property::<Option<String>>(&mut stream, "path")
     }
 
     pub fn play(&mut self, path: &str) -> Result<()> {
@@ -503,6 +523,11 @@ impl MpvController {
             .arg("--idle=yes")
             .arg("--force-window=no")
             .arg("--no-video")
+            // Albums and live recordings need real continuous handoffs between
+            // playlist entries, so opt into full gapless mode and warm the next
+            // entry before the current one ends.
+            .arg("--gapless-audio=yes")
+            .arg("--prefetch-playlist=yes")
             .arg(format!("--volume={DEFAULT_VOLUME_PERCENT}"))
             .arg(format!("--input-ipc-server={}", self.socket_path.display()))
             .stdout(Stdio::null())
