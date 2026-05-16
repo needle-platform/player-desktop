@@ -278,7 +278,9 @@ struct RawNeedlePlaybackSession {
 #[serde(untagged)]
 enum RawNeedlePlaybackSessionResponse {
     Direct(RawNeedlePlaybackSession),
-    SnakeWrapped { playback_session: RawNeedlePlaybackSession },
+    SnakeWrapped {
+        playback_session: RawNeedlePlaybackSession,
+    },
     CamelWrapped {
         #[serde(rename = "playbackSession")]
         playback_session: RawNeedlePlaybackSession,
@@ -304,13 +306,17 @@ pub fn is_backend_track_path(path: &str) -> bool {
 }
 
 pub fn backend_track_id_from_path(path: &str) -> Option<&str> {
-    path.strip_prefix(TRACK_TOKEN_PREFIX).filter(|value| !value.trim().is_empty())
+    path.strip_prefix(TRACK_TOKEN_PREFIX)
+        .filter(|value| !value.trim().is_empty())
 }
 
 pub fn backend_mode_url(settings: &AppSettings) -> Option<String> {
-    matches!(settings.library_source, crate::models::LibrarySource::NeedleBackend)
-        .then(|| settings.needle_backend_url.clone())
-        .flatten()
+    matches!(
+        settings.library_source,
+        crate::models::LibrarySource::NeedleBackend
+    )
+    .then(|| settings.needle_backend_url.clone())
+    .flatten()
 }
 
 pub async fn fetch_backend_status(
@@ -319,9 +325,10 @@ pub async fn fetch_backend_status(
 ) -> Result<NeedleBackendStatus> {
     let url = backend_url_from_settings(settings, raw_url_override)?;
     let client = http_client()?;
-    let payload = get_json::<RawNeedleStatusResponse>(&client, settings, &url, "/api/needle/status")
-        .await
-        .with_context(|| format!("Unable to reach Needle backend at {url}"))?;
+    let payload =
+        get_json::<RawNeedleStatusResponse>(&client, settings, &url, "/api/needle/status")
+            .await
+            .with_context(|| format!("Unable to reach Needle backend at {url}"))?;
 
     Ok(NeedleBackendStatus {
         url,
@@ -340,14 +347,21 @@ pub async fn fetch_backend_status(
 }
 
 pub async fn load_backend_bootstrap(settings: AppSettings) -> Result<BootstrapPayload> {
-    let url = backend_mode_url(&settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(&settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let status = fetch_backend_status(&settings, Some(&url)).await?;
     if !status.enabled {
         bail!("The configured Needle backend is not enabled for local library mode");
     }
 
     let client = http_client()?;
-    let mut payload = get_json::<RawDesktopBootstrap>(&client, &settings, &status.url, "/api/needle/desktop/bootstrap").await?;
+    let mut payload = get_json::<RawDesktopBootstrap>(
+        &client,
+        &settings,
+        &status.url,
+        "/api/needle/desktop/bootstrap",
+    )
+    .await?;
     normalize_backend_bootstrap(&mut payload);
 
     Ok(BootstrapPayload {
@@ -368,7 +382,8 @@ pub async fn migrate_desktop_state_to_backend(
         bail!("The configured Needle backend is not enabled for local library mode");
     }
 
-    let root_mappings = infer_root_mappings(&db::list_library_roots(db_path)?, &status.configured_roots);
+    let root_mappings =
+        infer_root_mappings(&db::list_library_roots(db_path)?, &status.configured_roots);
     let local_roots = db::list_library_roots(db_path)?;
     let unmapped_roots = local_roots
         .into_iter()
@@ -382,12 +397,14 @@ pub async fn migrate_desktop_state_to_backend(
     let payload = build_import_payload(db_path, &root_mappings)?;
     let client = http_client()?;
     let response = backend_request(
-        client.post(format!("{}/api/needle/import/desktop-state", status.url)).json(&payload),
+        client
+            .post(format!("{}/api/needle/import/desktop-state", status.url))
+            .json(&payload),
         settings,
     )?
-        .send()
-        .await
-        .with_context(|| format!("Unable to send desktop state to {}", status.url))?;
+    .send()
+    .await
+    .with_context(|| format!("Unable to send desktop state to {}", status.url))?;
 
     if !response.status().is_success() {
         let status_code = response.status();
@@ -437,7 +454,8 @@ pub async fn save_backend_playback_session(
     settings: &AppSettings,
     session: &PlaybackSession,
 ) -> Result<PlaybackSession> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     let update = RawNeedlePlaybackSessionUpdate {
         id: "shared".to_string(),
@@ -505,10 +523,22 @@ pub async fn set_backend_track_favorite(
     track_path: &str,
     favorite: bool,
 ) -> Result<BootstrapPayload> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
-    let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let track_id = backend_track_id_from_path(track_path)
+        .ok_or_else(|| anyhow!("Invalid backend track reference"))?;
     let client = http_client()?;
-    post_json_expect_empty(&client, settings, &url, "/api/tracks/favorite", &RawFavoritePayload { id: track_id, starred: favorite }).await?;
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/tracks/favorite",
+        &RawFavoritePayload {
+            id: track_id,
+            starred: favorite,
+        },
+    )
+    .await?;
     load_backend_bootstrap(settings.clone()).await
 }
 
@@ -517,11 +547,23 @@ pub async fn set_backend_track_rating(
     track_path: &str,
     rating: Option<i64>,
 ) -> Result<BootstrapPayload> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
-    let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let track_id = backend_track_id_from_path(track_path)
+        .ok_or_else(|| anyhow!("Invalid backend track reference"))?;
     let client = http_client()?;
     let normalized_rating = rating.unwrap_or(0).clamp(0, 5);
-    post_json_expect_empty(&client, settings, &url, "/api/tracks/rating", &RawRatingPayload { id: track_id, rating: normalized_rating }).await?;
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/tracks/rating",
+        &RawRatingPayload {
+            id: track_id,
+            rating: normalized_rating,
+        },
+    )
+    .await?;
     load_backend_bootstrap(settings.clone()).await
 }
 
@@ -531,8 +573,10 @@ pub async fn save_backend_track_bpm(
     bpm: Option<i64>,
     mode: MetadataEditMode,
 ) -> Result<BootstrapPayload> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
-    let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let track_id = backend_track_id_from_path(track_path)
+        .ok_or_else(|| anyhow!("Invalid backend track reference"))?;
     let client = http_client()?;
     let mode_name = match mode {
         MetadataEditMode::NeedleOnly => "needle_only",
@@ -558,40 +602,78 @@ pub async fn create_backend_playlist(
     name: &str,
     track_paths: &[String],
 ) -> Result<BootstrapPayload> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     let song_ids = track_paths
         .iter()
         .filter_map(|path| backend_track_id_from_path(path).map(str::to_string))
         .collect::<Vec<_>>();
-    post_json::<Vec<serde_json::Value>, _>(&client, settings, &url, "/api/playlists", &RawCreatePlaylistPayload { name, song_ids: &song_ids }).await?;
+    post_json::<Vec<serde_json::Value>, _>(
+        &client,
+        settings,
+        &url,
+        "/api/playlists",
+        &RawCreatePlaylistPayload {
+            name,
+            song_ids: &song_ids,
+        },
+    )
+    .await?;
     load_backend_bootstrap(settings.clone()).await
 }
 
 pub async fn record_backend_play(settings: &AppSettings, track_path: &str) -> Result<()> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
-    let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let track_id = backend_track_id_from_path(track_path)
+        .ok_or_else(|| anyhow!("Invalid backend track reference"))?;
     let client = http_client()?;
-    post_json_expect_empty(&client, settings, &url, "/api/scrobble", &RawScrobblePayload { id: track_id }).await
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/scrobble",
+        &RawScrobblePayload { id: track_id },
+    )
+    .await
 }
 
-pub async fn get_backend_track_gain(settings: &AppSettings, track_path: &str) -> Result<Option<f32>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
-    let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
+pub async fn get_backend_track_gain(
+    settings: &AppSettings,
+    track_path: &str,
+) -> Result<Option<f32>> {
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let track_id = backend_track_id_from_path(track_path)
+        .ok_or_else(|| anyhow!("Invalid backend track reference"))?;
     let client = http_client()?;
-    get_json_optional::<RawTrackGain>(&client, settings, &url, &format!("/api/needle/desktop/track-gain/{track_id}"))
-        .await
-        .map(|payload| payload.map(|value| value.gain_db))
+    get_json_optional::<RawTrackGain>(
+        &client,
+        settings,
+        &url,
+        &format!("/api/needle/desktop/track-gain/{track_id}"),
+    )
+    .await
+    .map(|payload| payload.map(|value| value.gain_db))
 }
 
-pub async fn get_backend_cover_art(settings: &AppSettings, track_path: &str) -> Result<Option<cover::CoverArt>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
-    let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
+pub async fn get_backend_cover_art(
+    settings: &AppSettings,
+    track_path: &str,
+) -> Result<Option<cover::CoverArt>> {
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let track_id = backend_track_id_from_path(track_path)
+        .ok_or_else(|| anyhow!("Invalid backend track reference"))?;
     let client = http_client()?;
-    let response = backend_request(client.get(format!("{url}/api/cover-art/{track_id}")), settings)?
-        .send()
-        .await
-        .with_context(|| format!("Unable to load cover art from {url}"))?;
+    let response = backend_request(
+        client.get(format!("{url}/api/cover-art/{track_id}")),
+        settings,
+    )?
+    .send()
+    .await
+    .with_context(|| format!("Unable to load cover art from {url}"))?;
 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
@@ -617,7 +699,10 @@ pub async fn get_backend_cover_art(settings: &AppSettings, track_path: &str) -> 
         .and_then(|value| value.to_str().ok())
         .unwrap_or("image/jpeg")
         .to_string();
-    let bytes = response.bytes().await.context("Unable to read cover-art bytes")?;
+    let bytes = response
+        .bytes()
+        .await
+        .context("Unable to read cover-art bytes")?;
     Ok(Some(cover::CoverArt {
         data_url: format!("data:{};base64,{}", mime, BASE64.encode(bytes)),
         source: "backend".into(),
@@ -628,9 +713,11 @@ pub async fn get_backend_artist_image(
     settings: &AppSettings,
     name: &str,
 ) -> Result<Option<artist::ArtistImage>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
-    let artists = get_json::<Vec<RawSubsonicArtist>>(&client, settings, &url, "/api/artists").await?;
+    let artists =
+        get_json::<Vec<RawSubsonicArtist>>(&client, settings, &url, "/api/artists").await?;
     let Some(artist) = artists
         .into_iter()
         .find(|artist| artist.name.trim().eq_ignore_ascii_case(name.trim()))
@@ -641,14 +728,20 @@ pub async fn get_backend_artist_image(
     let raw_image_url = if let Some(image_url) = artist.artist_image_url {
         Some(image_url)
     } else {
-        let detail =
-            get_json_optional::<RawArtistDetailPayload>(&client, settings, &url, &format!("/api/artist/{}", artist.id))
-                .await?;
+        let detail = get_json_optional::<RawArtistDetailPayload>(
+            &client,
+            settings,
+            &url,
+            &format!("/api/artist/{}", artist.id),
+        )
+        .await?;
         detail.and_then(|payload| {
-            payload
-                .artist
-                .artist_image_url
-                .or_else(|| payload.info.as_ref().and_then(|info| info.medium_image_url.clone()))
+            payload.artist.artist_image_url.or_else(|| {
+                payload
+                    .info
+                    .as_ref()
+                    .and_then(|info| info.medium_image_url.clone())
+            })
         })
     };
 
@@ -688,15 +781,24 @@ pub async fn get_backend_album_info(
     album_name: &str,
     artist_name: Option<&str>,
 ) -> Result<Option<album::AlbumInfo>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     let albums = get_json::<Vec<RawSubsonicAlbum>>(&client, settings, &url, "/api/albums").await?;
-    let target = albums.into_iter().find(|album| album_matches(album, album_name, artist_name));
+    let target = albums
+        .into_iter()
+        .find(|album| album_matches(album, album_name, artist_name));
     let Some(album_summary) = target else {
         return Ok(None);
     };
 
-    let detail = get_json::<RawAlbumDetailPayload>(&client, settings, &url, &format!("/api/album/{}", album_summary.id)).await?;
+    let detail = get_json::<RawAlbumDetailPayload>(
+        &client,
+        settings,
+        &url,
+        &format!("/api/album/{}", album_summary.id),
+    )
+    .await?;
     Ok(detail.info.map(|info| album::AlbumInfo {
         description: info.notes,
         source_url: info.source_url,
@@ -709,7 +811,8 @@ pub async fn load_backend_album_tracks(
     album_name: &str,
     artist_name: Option<&str>,
 ) -> Result<Vec<Track>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     let albums = get_json::<Vec<RawSubsonicAlbum>>(&client, settings, &url, "/api/albums").await?;
     let target = albums
@@ -717,7 +820,13 @@ pub async fn load_backend_album_tracks(
         .find(|album| album_matches(album, album_name, artist_name))
         .ok_or_else(|| anyhow!("Album not found in Needle backend"))?;
 
-    let detail = get_json::<RawAlbumDetailPayload>(&client, settings, &url, &format!("/api/album/{}", target.id)).await?;
+    let detail = get_json::<RawAlbumDetailPayload>(
+        &client,
+        settings,
+        &url,
+        &format!("/api/album/{}", target.id),
+    )
+    .await?;
     Ok(detail
         .album
         .song
@@ -760,7 +869,8 @@ pub async fn apply_backend_metadata_refresh(
     settings: &AppSettings,
     overrides: &[TrackMetadataOverride],
 ) -> Result<BootstrapPayload> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     let payload = RawMetadataRefreshPayload {
         overrides: overrides
@@ -768,7 +878,9 @@ pub async fn apply_backend_metadata_refresh(
             .map(|item| {
                 Ok(RawMetadataRefreshOverride {
                     id: backend_track_id_from_path(&item.track_path)
-                        .ok_or_else(|| anyhow!("Invalid backend track reference in metadata refresh"))?
+                        .ok_or_else(|| {
+                            anyhow!("Invalid backend track reference in metadata refresh")
+                        })?
                         .to_string(),
                     title: item.title.clone(),
                     artist: item.artist.clone(),
@@ -805,7 +917,8 @@ pub async fn refresh_backend_artist_image(
     settings: &AppSettings,
     name: &str,
 ) -> Result<Option<artist::ArtistImage>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     post_json_expect_empty(
         &client,
@@ -831,7 +944,8 @@ pub async fn upload_backend_artist_image(
     name: &str,
     image_path: &Path,
 ) -> Result<Option<artist::ArtistImage>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let bytes = std::fs::read(image_path)
         .with_context(|| format!("Unable to read artist image from {}", image_path.display()))?;
     if bytes.is_empty() {
@@ -865,7 +979,8 @@ pub async fn restore_backend_artist_image(
     settings: &AppSettings,
     name: &str,
 ) -> Result<Option<artist::ArtistImage>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     post_json_expect_empty(
         &client,
@@ -890,7 +1005,8 @@ pub async fn refresh_backend_artist_info(
     settings: &AppSettings,
     name: &str,
 ) -> Result<Option<artist::ArtistInfo>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     post_json_expect_empty(
         &client,
@@ -914,7 +1030,8 @@ pub async fn refresh_backend_album_info(
     album_name: &str,
     artist_name: Option<&str>,
 ) -> Result<Option<album::AlbumInfo>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     post_json_expect_empty(
         &client,
@@ -940,7 +1057,8 @@ pub async fn save_backend_album_genre(
     genre: Option<&str>,
     mode: MetadataEditMode,
 ) -> Result<BootstrapPayload> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
     let albums = get_json::<Vec<RawSubsonicAlbum>>(&client, settings, &url, "/api/albums").await?;
     let target = albums
@@ -970,8 +1088,10 @@ pub async fn save_backend_album_genre(
 }
 
 pub fn backend_stream_url(settings: &AppSettings, track_path: &str) -> Result<String> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
-    let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let track_id = backend_track_id_from_path(track_path)
+        .ok_or_else(|| anyhow!("Invalid backend track reference"))?;
     Ok(format!("{url}/api/stream/{track_id}?format=raw"))
 }
 
@@ -980,12 +1100,12 @@ pub fn backend_analysis_stream_url(settings: &AppSettings, track_path: &str) -> 
     let (username, password) = backend_credentials(settings)?;
     let mut parsed = reqwest::Url::parse(&stream_url)
         .with_context(|| format!("Invalid Needle backend stream URL: {stream_url}"))?;
-    parsed
-        .set_username(username)
-        .map_err(|_| anyhow!("Needle backend username contains characters that cannot be used in a stream URL"))?;
-    parsed
-        .set_password(Some(password))
-        .map_err(|_| anyhow!("Needle backend password contains characters that cannot be used in a stream URL"))?;
+    parsed.set_username(username).map_err(|_| {
+        anyhow!("Needle backend username contains characters that cannot be used in a stream URL")
+    })?;
+    parsed.set_password(Some(password)).map_err(|_| {
+        anyhow!("Needle backend password contains characters that cannot be used in a stream URL")
+    })?;
     Ok(parsed.to_string())
 }
 
@@ -995,13 +1115,18 @@ pub async fn download_backend_track(
     destination_dir: &Path,
     mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<OfflineDownloadEntry> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
-    let track_id = backend_track_id_from_path(track_path).ok_or_else(|| anyhow!("Invalid backend track reference"))?;
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let track_id = backend_track_id_from_path(track_path)
+        .ok_or_else(|| anyhow!("Invalid backend track reference"))?;
     let client = stream_http_client()?;
-    let response = backend_request(client.get(format!("{url}/api/stream/{track_id}?format=raw")), settings)?
-        .send()
-        .await
-        .with_context(|| format!("Unable to download track data from {url}"))?;
+    let response = backend_request(
+        client.get(format!("{url}/api/stream/{track_id}?format=raw")),
+        settings,
+    )?
+    .send()
+    .await
+    .with_context(|| format!("Unable to download track data from {url}"))?;
 
     if !response.status().is_success() {
         let status_code = response.status();
@@ -1079,7 +1204,10 @@ pub async fn download_backend_track(
     })
 }
 
-fn build_import_payload(db_path: &Path, root_mappings: &[RootPathMapping]) -> Result<DesktopStateImportPayload> {
+fn build_import_payload(
+    db_path: &Path,
+    root_mappings: &[RootPathMapping],
+) -> Result<DesktopStateImportPayload> {
     Ok(DesktopStateImportPayload {
         source_database_path: Some(db_path.display().to_string()),
         root_mappings: root_mappings.to_vec(),
@@ -1136,7 +1264,10 @@ fn match_backend_root(local_root: &str, backend_roots: &[String]) -> Option<Stri
         return Some(exact.clone());
     }
 
-    let local_name = Path::new(local_root).file_name()?.to_string_lossy().to_string();
+    let local_name = Path::new(local_root)
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
     let mut candidates = backend_roots
         .iter()
         .filter(|candidate| {
@@ -1241,7 +1372,10 @@ async fn fetch_asset_as_data_url(
     Ok(format!("data:{mime};base64,{}", BASE64.encode(bytes)))
 }
 
-fn backend_url_from_settings(settings: &AppSettings, raw_url_override: Option<&str>) -> Result<String> {
+fn backend_url_from_settings(
+    settings: &AppSettings,
+    raw_url_override: Option<&str>,
+) -> Result<String> {
     match raw_url_override
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -1294,7 +1428,12 @@ fn stream_http_client() -> Result<Client> {
         .map_err(|error| anyhow!("Unable to create Needle backend streaming HTTP client: {error}"))
 }
 
-async fn get_json<T: DeserializeOwned>(client: &Client, settings: &AppSettings, base_url: &str, route: &str) -> Result<T> {
+async fn get_json<T: DeserializeOwned>(
+    client: &Client,
+    settings: &AppSettings,
+    base_url: &str,
+    route: &str,
+) -> Result<T> {
     let response = backend_request(client.get(format!("{base_url}{route}")), settings)?
         .send()
         .await
@@ -1303,7 +1442,12 @@ async fn get_json<T: DeserializeOwned>(client: &Client, settings: &AppSettings, 
     decode_json_response(response, route).await
 }
 
-async fn get_json_optional<T: DeserializeOwned>(client: &Client, settings: &AppSettings, base_url: &str, route: &str) -> Result<Option<T>> {
+async fn get_json_optional<T: DeserializeOwned>(
+    client: &Client,
+    settings: &AppSettings,
+    base_url: &str,
+    route: &str,
+) -> Result<Option<T>> {
     let response = backend_request(client.get(format!("{base_url}{route}")), settings)?
         .send()
         .await
@@ -1323,10 +1467,13 @@ async fn post_json<T: DeserializeOwned, B: Serialize>(
     route: &str,
     body: &B,
 ) -> Result<T> {
-    let response = backend_request(client.post(format!("{base_url}{route}")).json(body), settings)?
-        .send()
-        .await
-        .with_context(|| format!("Unable to reach Needle backend route {route}"))?;
+    let response = backend_request(
+        client.post(format!("{base_url}{route}")).json(body),
+        settings,
+    )?
+    .send()
+    .await
+    .with_context(|| format!("Unable to reach Needle backend route {route}"))?;
 
     decode_json_response(response, route).await
 }
@@ -1338,10 +1485,13 @@ async fn post_json_expect_empty<B: Serialize>(
     route: &str,
     body: &B,
 ) -> Result<()> {
-    let response = backend_request(client.post(format!("{base_url}{route}")).json(body), settings)?
-        .send()
-        .await
-        .with_context(|| format!("Unable to reach Needle backend route {route}"))?;
+    let response = backend_request(
+        client.post(format!("{base_url}{route}")).json(body),
+        settings,
+    )?
+    .send()
+    .await
+    .with_context(|| format!("Unable to reach Needle backend route {route}"))?;
 
     if !response.status().is_success() {
         let status_code = response.status();
@@ -1360,7 +1510,10 @@ async fn post_json_expect_empty<B: Serialize>(
     Ok(())
 }
 
-async fn decode_json_response<T: DeserializeOwned>(response: reqwest::Response, route: &str) -> Result<T> {
+async fn decode_json_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+    route: &str,
+) -> Result<T> {
     if !response.status().is_success() {
         let status_code = response.status();
         let message = response.text().await.unwrap_or_default();
@@ -1381,10 +1534,15 @@ async fn decode_json_response<T: DeserializeOwned>(response: reqwest::Response, 
         .with_context(|| format!("Needle backend returned unreadable JSON for {route}"))
 }
 
-async fn find_backend_artist_detail(settings: &AppSettings, name: &str) -> Result<Option<RawArtistDetailPayload>> {
-    let url = backend_mode_url(settings).ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+async fn find_backend_artist_detail(
+    settings: &AppSettings,
+    name: &str,
+) -> Result<Option<RawArtistDetailPayload>> {
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
-    let artists = get_json::<Vec<RawSubsonicArtist>>(&client, settings, &url, "/api/artists").await?;
+    let artists =
+        get_json::<Vec<RawSubsonicArtist>>(&client, settings, &url, "/api/artists").await?;
     let Some(artist) = artists
         .into_iter()
         .find(|artist| artist.name.trim().eq_ignore_ascii_case(name.trim()))
@@ -1392,11 +1550,20 @@ async fn find_backend_artist_detail(settings: &AppSettings, name: &str) -> Resul
         return Ok(None);
     };
 
-    get_json_optional::<RawArtistDetailPayload>(&client, settings, &url, &format!("/api/artist/{}", artist.id)).await
+    get_json_optional::<RawArtistDetailPayload>(
+        &client,
+        settings,
+        &url,
+        &format!("/api/artist/{}", artist.id),
+    )
+    .await
 }
 
 fn normalize_backend_bootstrap(payload: &mut RawDesktopBootstrap) {
-    payload.library.tracks.sort_by(|left, right| left.path.cmp(&right.path));
+    payload
+        .library
+        .tracks
+        .sort_by(|left, right| left.path.cmp(&right.path));
     payload.playback_session = normalize_backend_playback_session(&payload.playback_session);
 }
 
@@ -1408,7 +1575,9 @@ fn normalize_backend_playback_session(session: &PlaybackSession) -> PlaybackSess
         } else {
             session.base_queue_paths.clone()
         },
-        current_index: session.current_index.min(session.queue_paths.len().saturating_sub(1)),
+        current_index: session
+            .current_index
+            .min(session.queue_paths.len().saturating_sub(1)),
         position_seconds: session.position_seconds.max(0.0),
         paused: session.paused,
         repeat_mode: session.repeat_mode.clone(),
@@ -1462,7 +1631,11 @@ fn map_remote_playback_session(session: RawNeedlePlaybackSession) -> PlaybackSes
     })
 }
 
-fn album_matches(album: &RawSubsonicAlbum, target_album: &str, target_artist: Option<&str>) -> bool {
+fn album_matches(
+    album: &RawSubsonicAlbum,
+    target_album: &str,
+    target_artist: Option<&str>,
+) -> bool {
     let name = album
         .name
         .as_deref()
@@ -1474,7 +1647,10 @@ fn album_matches(album: &RawSubsonicAlbum, target_album: &str, target_artist: Op
         return false;
     }
 
-    match target_artist.map(str::trim).filter(|value| !value.is_empty()) {
+    match target_artist
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(artist_name) => album
             .artist
             .as_deref()

@@ -535,7 +535,10 @@ pub fn save_settings(db_path: &Path, settings: &AppSettings) -> Result<AppSettin
             params!["needle_backend_username", username],
         )?;
     } else {
-        connection.execute("DELETE FROM settings WHERE key = 'needle_backend_username'", [])?;
+        connection.execute(
+            "DELETE FROM settings WHERE key = 'needle_backend_username'",
+            [],
+        )?;
     }
 
     if let Some(password) = settings
@@ -549,7 +552,10 @@ pub fn save_settings(db_path: &Path, settings: &AppSettings) -> Result<AppSettin
             params!["needle_backend_password", password],
         )?;
     } else {
-        connection.execute("DELETE FROM settings WHERE key = 'needle_backend_password'", [])?;
+        connection.execute(
+            "DELETE FROM settings WHERE key = 'needle_backend_password'",
+            [],
+        )?;
     }
 
     connection.execute(
@@ -1455,7 +1461,9 @@ pub fn list_offline_downloads(db_path: &Path) -> Result<Vec<OfflineDownloadEntry
                 track_path: row.get::<_, String>(0)?,
                 local_path: row.get::<_, String>(1)?,
                 content_type: row.get::<_, Option<String>>(2)?,
-                file_size: row.get::<_, Option<i64>>(3)?.map(|value| value.max(0) as u64),
+                file_size: row
+                    .get::<_, Option<i64>>(3)?
+                    .map(|value| value.max(0) as u64),
                 downloaded_at: row.get::<_, String>(4)?,
             })
         })?
@@ -1465,7 +1473,10 @@ pub fn list_offline_downloads(db_path: &Path) -> Result<Vec<OfflineDownloadEntry
     Ok(downloads)
 }
 
-pub fn get_offline_download(db_path: &Path, track_path: &str) -> Result<Option<OfflineDownloadEntry>> {
+pub fn get_offline_download(
+    db_path: &Path,
+    track_path: &str,
+) -> Result<Option<OfflineDownloadEntry>> {
     let connection = Connection::open(db_path)?;
     connection
         .query_row(
@@ -1480,7 +1491,9 @@ pub fn get_offline_download(db_path: &Path, track_path: &str) -> Result<Option<O
                     track_path: row.get::<_, String>(0)?,
                     local_path: row.get::<_, String>(1)?,
                     content_type: row.get::<_, Option<String>>(2)?,
-                    file_size: row.get::<_, Option<i64>>(3)?.map(|value| value.max(0) as u64),
+                    file_size: row
+                        .get::<_, Option<i64>>(3)?
+                        .map(|value| value.max(0) as u64),
                     downloaded_at: row.get::<_, String>(4)?,
                 })
             },
@@ -1529,11 +1542,9 @@ pub fn remove_offline_download(db_path: &Path, track_path: &str) -> Result<()> {
 pub fn current_timestamp(db_path: &Path) -> Result<String> {
     let connection = Connection::open(db_path)?;
     connection
-        .query_row(
-            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
-            [],
-            |row| row.get::<_, String>(0),
-        )
+        .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(Into::into)
 }
 
@@ -1561,9 +1572,8 @@ pub fn export_playlists_for_backend(db_path: &Path) -> Result<Vec<ImportedDeskto
 
 pub fn list_artist_images_for_backend(db_path: &Path) -> Result<Vec<ImportedArtistImage>> {
     let connection = Connection::open(db_path)?;
-    let mut stmt = connection.prepare(
-        "SELECT name, url, fetched_at FROM artist_images ORDER BY lower(name), name",
-    )?;
+    let mut stmt = connection
+        .prepare("SELECT name, url, fetched_at FROM artist_images ORDER BY lower(name), name")?;
 
     let rows = stmt.query_map([], |row| {
         Ok(ImportedArtistImage {
@@ -1573,7 +1583,8 @@ pub fn list_artist_images_for_backend(db_path: &Path) -> Result<Vec<ImportedArti
         })
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn list_artist_info_for_backend(db_path: &Path) -> Result<Vec<ImportedArtistInfo>> {
@@ -1594,7 +1605,8 @@ pub fn list_artist_info_for_backend(db_path: &Path) -> Result<Vec<ImportedArtist
         })
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn list_album_info_for_backend(db_path: &Path) -> Result<Vec<ImportedAlbumInfo>> {
@@ -1614,7 +1626,8 @@ pub fn list_album_info_for_backend(db_path: &Path) -> Result<Vec<ImportedAlbumIn
         })
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn list_album_primary_genres_for_backend(
@@ -1636,7 +1649,8 @@ pub fn list_album_primary_genres_for_backend(
         })
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn list_track_metadata_overrides_for_backend(
@@ -1675,7 +1689,8 @@ pub fn list_track_metadata_overrides_for_backend(
         })
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn list_track_loudness_for_backend(db_path: &Path) -> Result<Vec<ImportedTrackLoudness>> {
@@ -1702,7 +1717,8 @@ pub fn list_track_loudness_for_backend(db_path: &Path) -> Result<Vec<ImportedTra
         })
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn list_track_app_state_for_backend(db_path: &Path) -> Result<Vec<ImportedTrackAppState>> {
@@ -1726,7 +1742,8 @@ pub fn list_track_app_state_for_backend(db_path: &Path) -> Result<Vec<ImportedTr
         })
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn load_playlists(db_path: &Path) -> Result<Vec<SavedPlaylist>> {
@@ -1821,7 +1838,11 @@ pub fn create_playlist(
     load_playlists(db_path)
 }
 
-pub fn rename_playlist(db_path: &Path, playlist_id: &str, name: &str) -> Result<Vec<SavedPlaylist>> {
+pub fn rename_playlist(
+    db_path: &Path,
+    playlist_id: &str,
+    name: &str,
+) -> Result<Vec<SavedPlaylist>> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         bail!("Playlist name cannot be empty");
