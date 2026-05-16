@@ -49,6 +49,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Safe relaunch behavior** restores the last session in a stopped state, never surprise-autoplays on app launch
 - **Backend offline mode** now switches automatically when the homeserver becomes unreachable, keeps the regular dashboard UI, hides online-only actions, and shows only downloaded tracks for offline playback until the backend comes back
 - **Automatic backend reconnect** checks run quietly in the background, so backend mode can move between online and offline without needing a manual Settings health check
+- **Wake-from-sleep backend recovery** now re-checks the homeserver as soon as the app becomes visible or focused again, so backend mode is less likely to stay stuck offline after a laptop suspend
 - **Backend offline download feedback** now shows per-track progress directly on track numbers and marks albums as fully or partially downloaded with the same badge language used on Android
 - **Remote backend offline downloads** now use streaming-friendly timeouts, so public homeserver downloads do not trip the same short request deadline used for heartbeat checks
 - **Repeat modes**: off · one · all

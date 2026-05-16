@@ -19,6 +19,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 
 ### Fixed
 - Fixed desktop backend mode so homeserver outages no longer hang the app indefinitely, and the app now switches itself into a downloaded-only offline mode with a calm in-app notice instead of freezing or waiting for a manual backend check.
+- Fixed backend-mode reconnects after laptop sleep so wake, focus, and visibility changes now force a fresh backend check instead of leaving the app stranded in offline mode until restart.
 - Fixed backend-mode artist pages so a missing shared photo or biography now auto-triggers a one-shot backend refresh and re-renders when the homeserver finishes enrichment.
 - Fixed backend-mode custom artist photo updates so replacing an existing portrait now repaints immediately on the current artist page instead of waiting for navigation.
 - Fixed backend-mode album pages so missing shared album notes now auto-trigger a one-shot backend refresh and re-render when the homeserver finishes enrichment.

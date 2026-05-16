@@ -1635,7 +1635,10 @@ function App() {
   const miniQueueResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const notificationIdRef = useRef(0);
   const backendOfflineRecoveryRef = useRef(false);
+  const backendOfflineRecoveryStartedAtRef = useRef<number | null>(null);
   const backendHeartbeatInFlightRef = useRef(false);
+  const backendHeartbeatStartedAtRef = useRef<number | null>(null);
+  const backendWakeHeartbeatAtRef = useRef(0);
   const offlineDownloadsSyncProgressRef = useRef<string | null>(null);
   const offlineCompletedTracksRef = useRef(0);
 
@@ -2178,6 +2181,7 @@ function App() {
       }
 
       backendOfflineRecoveryRef.current = true;
+      backendOfflineRecoveryStartedAtRef.current = Date.now();
       void (async () => {
         try {
           const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
@@ -2195,6 +2199,7 @@ function App() {
           setStatus(detail?.message ?? (error instanceof Error ? error.message : String(error)));
         } finally {
           backendOfflineRecoveryRef.current = false;
+          backendOfflineRecoveryStartedAtRef.current = null;
         }
       })();
     };
@@ -2215,9 +2220,33 @@ function App() {
 
     let cancelled = false;
     const heartbeatIntervalMs = 3000;
+    const staleGuardAfterMs = 15000;
+    const wakeHeartbeatThrottleMs = 1200;
     const offlineTransferRunning =
       offlineDownloadProgress?.status === 'running' &&
       (offlineDownloadProgress.operation === 'download' || offlineDownloadProgress.operation === 'remove');
+
+    const releaseStaleGuards = () => {
+      const now = Date.now();
+
+      if (
+        backendHeartbeatInFlightRef.current &&
+        backendHeartbeatStartedAtRef.current != null &&
+        now - backendHeartbeatStartedAtRef.current >= staleGuardAfterMs
+      ) {
+        backendHeartbeatInFlightRef.current = false;
+        backendHeartbeatStartedAtRef.current = null;
+      }
+
+      if (
+        backendOfflineRecoveryRef.current &&
+        backendOfflineRecoveryStartedAtRef.current != null &&
+        now - backendOfflineRecoveryStartedAtRef.current >= staleGuardAfterMs
+      ) {
+        backendOfflineRecoveryRef.current = false;
+        backendOfflineRecoveryStartedAtRef.current = null;
+      }
+    };
 
     const triggerOfflineRecovery = (message?: string) => {
       window.dispatchEvent(
@@ -2232,11 +2261,14 @@ function App() {
     };
 
     const runHeartbeat = async (options?: { restoreIfOnline?: boolean }) => {
+      releaseStaleGuards();
+
       if (offlineTransferRunning || backendHeartbeatInFlightRef.current || backendOfflineRecoveryRef.current) {
         return;
       }
 
       backendHeartbeatInFlightRef.current = true;
+      backendHeartbeatStartedAtRef.current = Date.now();
       try {
         await getNeedleBackendStatus(data.settings.needle_backend_url);
         if (cancelled || !options?.restoreIfOnline || !isBackendOfflineMode) {
@@ -2265,6 +2297,7 @@ function App() {
         triggerOfflineRecovery(message);
       } finally {
         backendHeartbeatInFlightRef.current = false;
+        backendHeartbeatStartedAtRef.current = null;
       }
     };
 
@@ -2280,8 +2313,33 @@ function App() {
       void runHeartbeat({ restoreIfOnline: true });
     };
 
+    const handleWakeLikeEvent = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+
+      const now = Date.now();
+      if (now - backendWakeHeartbeatAtRef.current < wakeHeartbeatThrottleMs) {
+        return;
+      }
+
+      backendWakeHeartbeatAtRef.current = now;
+      void runHeartbeat({ restoreIfOnline: true });
+    };
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        handleWakeLikeEvent();
+      }
+    };
+
     window.addEventListener('offline', handleBrowserOffline);
     window.addEventListener('online', handleBrowserOnline);
+    window.addEventListener('focus', handleWakeLikeEvent);
+    window.addEventListener('pageshow', handleWakeLikeEvent);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
     void runHeartbeat({ restoreIfOnline: true });
 
     return () => {
@@ -2289,6 +2347,11 @@ function App() {
       window.clearInterval(intervalId);
       window.removeEventListener('offline', handleBrowserOffline);
       window.removeEventListener('online', handleBrowserOnline);
+      window.removeEventListener('focus', handleWakeLikeEvent);
+      window.removeEventListener('pageshow', handleWakeLikeEvent);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
     };
   }, [data?.settings.needle_backend_url, isBackendOfflineMode, isNeedleBackendMode, offlineDownloadProgress]);
 
