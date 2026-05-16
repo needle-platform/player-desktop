@@ -2689,6 +2689,9 @@ function App() {
     if (!data) {
       return;
     }
+    if (!data.settings.volume_leveling_enabled) {
+      return;
+    }
 
     let cancelled = false;
     void (async () => {

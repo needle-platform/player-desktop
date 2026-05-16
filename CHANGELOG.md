@@ -72,6 +72,8 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Fixed vibe playlists so they now follow the actual BPM buckets only, excluding tracks with no BPM and preventing cross-bucket bleed from metadata hints.
 - Fixed album queue handoffs so consecutive tracks can play truly gaplessly instead of inserting a short pause between songs.
 - Fixed backend-mode volume leveling to trust the desktop loudness cache first and ignore stale post-transition gain updates that could make playback sound inconsistent.
+- Fixed the remaining post-transition dip by updating mpv's gain stage in place instead of rebuilding the full audio filter chain after each seamless track change.
+- Fixed backend loudness-analysis cache matching so changing backend URLs or toggling between streamed and offline backend sources no longer makes the whole library look unanalyzed again.
 
 ## [0.1.0] - 2026-05-01
 

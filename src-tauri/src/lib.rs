@@ -92,9 +92,10 @@ fn apply_volume_leveling_to_player(
     db_path: &Path,
     path: Option<&str>,
 ) -> Result<(), String> {
+    let settings = db::load_settings(db_path).map_err(|error| error.to_string())?;
     let gain = volume_leveling_gain_for_path(db_path, path)?;
     player
-        .set_track_gain_db(gain)
+        .set_track_gain_db(gain, settings.volume_leveling_enabled)
         .map_err(|error| error.to_string())
 }
 
@@ -1096,7 +1097,7 @@ fn play_queue_index(index: usize, state: tauri::State<'_, AppState>) -> Result<(
         )?;
     } else {
         player
-            .set_track_gain_db(None)
+            .set_track_gain_db(None, false)
             .map_err(|error| error.to_string())?;
     }
     player

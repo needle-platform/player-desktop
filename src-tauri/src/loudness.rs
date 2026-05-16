@@ -386,7 +386,9 @@ where
 
     if total_tracks == 0 {
         db::record_loudness_analysis_run(db_path)?;
-        emit_log("No backend tracks are available yet, so there was nothing to analyze.".to_string());
+        emit_log(
+            "No backend tracks are available yet, so there was nothing to analyze.".to_string(),
+        );
         return Ok(LoudnessAnalysisSummary::default());
     }
 
@@ -446,7 +448,11 @@ where
                     emit_log(format!(
                         "Analyzed {} backend track{} so far. Last: {} ({:+.1} dB).",
                         summary.analyzed_tracks,
-                        if summary.analyzed_tracks == 1 { "" } else { "s" },
+                        if summary.analyzed_tracks == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         title,
                         record.target_gain_db
                     ));
@@ -531,7 +537,11 @@ fn summarize_backend_cache_state(
                 state.cached_tracks += 1;
                 if version != LOUDNESS_ANALYSIS_VERSION {
                     state.stale_version_tracks += 1;
-                } else if candidate.cached_source_fingerprint.as_deref()
+                } else if candidate
+                    .cached_source_fingerprint
+                    .as_deref()
+                    .map(|value| normalize_backend_source_fingerprint(&candidate.track_path, value))
+                    .as_deref()
                     != Some(candidate.source_fingerprint.as_str())
                 {
                     state.missing_cache_tracks += 1;
@@ -580,25 +590,24 @@ fn build_backend_candidates(
                             .unwrap_or_default();
                         (
                             download.local_path.clone(),
-                            format!(
-                                "offline:{}:{}:{}",
+                            canonical_offline_source_fingerprint(
+                                &track.path,
                                 metadata.len(),
                                 file_modified_at,
-                                download.local_path
                             ),
                         )
                     } else {
                         let stream_url = backend::backend_stream_url(settings, &track.path)?;
                         (
                             backend::backend_analysis_stream_url(settings, &track.path)?,
-                            format!("stream:{stream_url}"),
+                            canonical_stream_source_fingerprint(&track.path, Some(&stream_url)),
                         )
                     }
                 } else {
                     let stream_url = backend::backend_stream_url(settings, &track.path)?;
                     (
                         backend::backend_analysis_stream_url(settings, &track.path)?,
-                        format!("stream:{stream_url}"),
+                        canonical_stream_source_fingerprint(&track.path, Some(&stream_url)),
                     )
                 };
 
@@ -609,7 +618,8 @@ fn build_backend_candidates(
                 title: track.title.clone(),
                 analysis_input,
                 source_fingerprint,
-                cached_source_fingerprint: cache_entry.map(|entry| entry.source_fingerprint.clone()),
+                cached_source_fingerprint: cache_entry
+                    .map(|entry| entry.source_fingerprint.clone()),
                 cached_analysis_version: cache_entry.map(|entry| entry.analysis_version),
             })
         })
@@ -682,8 +692,11 @@ fn analyze_track(
     file_size: i64,
     file_modified_at: i64,
 ) -> Result<TrackLoudnessAnalysisRecord> {
-    let (integrated_lufs, true_peak_db, target_gain_db) =
-        analyze_audio_source(ffmpeg_binary, &path.to_string_lossy(), &path.display().to_string())?;
+    let (integrated_lufs, true_peak_db, target_gain_db) = analyze_audio_source(
+        ffmpeg_binary,
+        &path.to_string_lossy(),
+        &path.display().to_string(),
+    )?;
 
     Ok(TrackLoudnessAnalysisRecord {
         path: path.to_string_lossy().to_string(),
@@ -745,8 +758,11 @@ fn analyze_backend_candidate(
     ffmpeg_binary: &Path,
     candidate: &BackendTrackLoudnessAnalysisCandidate,
 ) -> BackendCandidateAnalysisResult {
-    let is_unchanged = candidate.cached_source_fingerprint.as_deref()
-        == Some(candidate.source_fingerprint.as_str())
+    let is_unchanged = candidate
+        .cached_source_fingerprint
+        .as_deref()
+        .map(|value| normalize_backend_source_fingerprint(&candidate.track_path, value))
+        == Some(candidate.source_fingerprint.clone())
         && candidate.cached_analysis_version == Some(LOUDNESS_ANALYSIS_VERSION);
     if is_unchanged {
         return BackendCandidateAnalysisResult::Unchanged;
@@ -816,6 +832,72 @@ fn summarize_analysis_error(error: &str) -> String {
             (!trimmed.is_empty()).then(|| trimmed.to_string())
         })
         .unwrap_or_else(|| "FFmpeg analysis failed.".to_string())
+}
+
+fn canonical_stream_source_fingerprint(track_path: &str, stream_url: Option<&str>) -> String {
+    if let Some(track_id) = backend::backend_track_id_from_path(track_path) {
+        return format!("stream|needle-track:{track_id}");
+    }
+
+    if let Some(track_id) = stream_url.and_then(extract_track_id_from_stream_url) {
+        return format!("stream|needle-track:{track_id}");
+    }
+
+    format!("stream|{track_path}")
+}
+
+fn canonical_offline_source_fingerprint(
+    track_path: &str,
+    file_size: u64,
+    file_modified_at: i64,
+) -> String {
+    format!("offline|{track_path}|{file_size}|{file_modified_at}")
+}
+
+fn normalize_backend_source_fingerprint(track_path: &str, fingerprint: &str) -> String {
+    if let Some(track_id) = fingerprint
+        .strip_prefix("stream:")
+        .and_then(extract_track_id_from_stream_url)
+    {
+        return format!("stream|needle-track:{track_id}");
+    }
+
+    if let Some(track_id) = fingerprint.strip_prefix("stream|needle-track:") {
+        return format!("stream|needle-track:{}", track_id.trim());
+    }
+
+    if let Some(track_id) = fingerprint
+        .strip_prefix("stream:")
+        .filter(|value| value.starts_with("needle-track:"))
+    {
+        return format!("stream|{}", track_id.trim());
+    }
+
+    if let Some(rest) = fingerprint.strip_prefix("offline:") {
+        let parts = rest.splitn(3, ':').collect::<Vec<_>>();
+        if parts.len() == 3
+            && parts[0].chars().all(|ch| ch.is_ascii_digit())
+            && parts[1].chars().all(|ch| ch == '-' || ch.is_ascii_digit())
+        {
+            return format!("offline|{track_path}|{}|{}", parts[0], parts[1]);
+        }
+    }
+
+    if let Some(rest) = fingerprint.strip_prefix("offline|") {
+        let parts = rest.rsplitn(3, '|').collect::<Vec<_>>();
+        if parts.len() == 3 {
+            return format!("offline|{}|{}|{}", parts[2], parts[1], parts[0]);
+        }
+    }
+
+    fingerprint.to_string()
+}
+
+fn extract_track_id_from_stream_url(value: &str) -> Option<&str> {
+    let marker = "/api/stream/";
+    let (_, tail) = value.split_once(marker)?;
+    let track_id = tail.split('?').next()?.trim();
+    (!track_id.is_empty()).then_some(track_id)
 }
 
 fn resolve_ffmpeg_binary() -> Option<PathBuf> {

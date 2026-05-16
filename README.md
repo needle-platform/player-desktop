@@ -60,6 +60,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Per-track favourites** saved locally with a heart toggle, separate from star ratings
 - **Per-track user star ratings** saved locally and reusable across the app
 - **Opt-in volume leveling** based on local FFmpeg loudness analysis, with gentler per-track gain applied through mpv while leaving your main listening volume untouched
+- **Volume leveling stays fully out of the way when disabled**, so track changes no longer trigger per-track gain updates unless you explicitly turn leveling on
 - **True gapless album playback** for consecutive queue entries, with mpv playlist prefetching tuned so live albums and continuous records keep their intended flow
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
 - **Safer startup volume** defaults to 80% to reduce surprise-blast playback on first launch
@@ -267,6 +268,7 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 - **Optional loudness analysis** stores LUFS / peak-derived gain data locally so Needle can level mixed queues when you enable volume leveling
 - **Backend-mode loudness analysis** can scan either cached offline downloads or authenticated backend streams, so volume leveling still works while the library itself lives on Needle backend
 - **Backend-mode volume leveling now prefers the desktop loudness cache first**, reducing late gain flips and keeping track-to-track leveling more consistent during backend playback
+- **Backend loudness cache fingerprints are stable across backend URLs**, so switching between local and remote backend addresses no longer forces a full-library reanalysis
 - **Two-worker loudness scans** make the first analysis pass much more practical on modern Macs without overcommitting the whole machine
 - **Version-aware loudness refresh messaging** calls out when a full-library rerun is expected because Needle upgraded its loudness-analysis method
 - **Playlist-local genre focus** lets smart playlists keep their generated order while narrowing the current mix to one or more genres already represented in that playlist

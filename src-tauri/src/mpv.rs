@@ -75,6 +75,7 @@ pub struct MpvController {
     equalizer_preset: EqualizerPreset,
     equalizer_bands: [f32; 10],
     track_gain_db: Option<f32>,
+    keep_gain_filter: bool,
     #[allow(dead_code)]
     app_handle: Option<AppHandle>,
     #[allow(dead_code)]
@@ -94,6 +95,7 @@ impl MpvController {
             equalizer_preset,
             equalizer_bands,
             track_gain_db: None,
+            keep_gain_filter: false,
             app_handle: None,
             listener_active: Arc::new(AtomicBool::new(false)),
         }
@@ -120,12 +122,19 @@ impl MpvController {
         self.apply_audio_filters(&mut stream)
     }
 
-    pub fn set_track_gain_db(&mut self, gain_db: Option<f32>) -> Result<()> {
+    pub fn set_track_gain_db(
+        &mut self,
+        gain_db: Option<f32>,
+        keep_gain_filter: bool,
+    ) -> Result<()> {
         let normalized_gain = normalize_track_gain(gain_db);
-        if self.track_gain_db == normalized_gain {
+        let gain_changed = self.track_gain_db != normalized_gain;
+        let keep_changed = self.keep_gain_filter != keep_gain_filter;
+        if !gain_changed && !keep_changed {
             return Ok(());
         }
         self.track_gain_db = normalized_gain;
+        self.keep_gain_filter = keep_gain_filter;
         self.refresh_child_state()?;
 
         if !self.socket_path.exists() {
@@ -134,6 +143,10 @@ impl MpvController {
 
         let mut stream = UnixStream::connect(&self.socket_path)
             .context("Unable to connect to mpv IPC socket")?;
+        if gain_changed && !keep_changed && self.try_update_gain_filter(&mut stream).is_ok() {
+            return Ok(());
+        }
+
         self.apply_audio_filters(&mut stream)
     }
 
@@ -425,6 +438,7 @@ impl MpvController {
     fn apply_audio_filters(&self, stream: &mut UnixStream) -> Result<()> {
         let command = match audio_filter_value(
             self.track_gain_db,
+            self.keep_gain_filter,
             &self.equalizer_preset,
             &self.equalizer_bands,
         ) {
@@ -432,6 +446,26 @@ impl MpvController {
             None => json!({ "command": ["set_property", "af", []] }),
         };
         self.request(stream, command).map(|_| ())
+    }
+
+    fn try_update_gain_filter(&self, stream: &mut UnixStream) -> Result<()> {
+        let gain_expression = match self.track_gain_db {
+            Some(gain_db) => format!("{gain_db:.2}dB"),
+            None => "0.00dB".to_string(),
+        };
+        self.request(
+            stream,
+            json!({
+                "command": [
+                    "af-command",
+                    "needle_filters",
+                    "volume",
+                    gain_expression,
+                    "volume@needle_gain"
+                ]
+            }),
+        )
+        .map(|_| ())
     }
 
     fn send(&self, stream: &mut UnixStream, payload: serde_json::Value) -> Result<()> {
@@ -714,12 +748,16 @@ fn resolve_mpv_binary() -> Option<PathBuf> {
 
 fn audio_filter_value(
     track_gain_db: Option<f32>,
+    keep_gain_filter: bool,
     preset: &EqualizerPreset,
     manual_bands: &[f32; 10],
 ) -> Option<String> {
-    let mut filters = Vec::new();
-    if let Some(gain_db) = normalize_track_gain(track_gain_db) {
-        filters.push(format!("volume={gain_db:.2}dB"));
+    let mut filters = vec![];
+    if keep_gain_filter || normalize_track_gain(track_gain_db).is_some() {
+        let gain_db = normalize_track_gain(track_gain_db).unwrap_or(0.0);
+        filters.push(format!(
+            "volume@needle_gain=volume={gain_db:.2}dB:precision=float:eval=once"
+        ));
     }
     if let Some(graph) = equalizer_filter_value(preset, manual_bands) {
         filters.push(graph);
