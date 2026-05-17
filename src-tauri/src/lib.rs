@@ -8,6 +8,7 @@ mod library;
 mod loudness;
 mod models;
 mod mpv;
+mod now_playing;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -26,6 +27,7 @@ use models::{
     SavedPlaylist, SavedPlaylistRule, Track, TrackBpmAdjustment,
 };
 use mpv::MpvController;
+use now_playing::{NowPlayingMetadata, NowPlayingPlayback};
 use tauri::{Emitter, Manager};
 
 #[derive(Default)]
@@ -2589,6 +2591,50 @@ async fn get_cover_art(
     cover::find_cover_for(path).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn update_now_playing_metadata(
+    metadata: NowPlayingMetadata,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let title = metadata.title.clone();
+    let preserve_artwork = metadata.preserve_artwork;
+    let artwork = metadata
+        .artwork_data_url
+        .as_deref()
+        .and_then(now_playing::artwork_bytes_from_data_url);
+    now_playing::update_metadata(metadata).map_err(|error| error.to_string())?;
+
+    if preserve_artwork {
+        return Ok(());
+    }
+
+    let mut player = state
+        .player
+        .lock()
+        .map_err(|_| "Unable to acquire player state".to_string())?;
+    player
+        .set_now_playing_artwork(
+            &title,
+            artwork
+                .as_ref()
+                .map(|(bytes, extension)| (bytes.as_slice(), *extension)),
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn update_now_playing_playback(playback: NowPlayingPlayback) {
+    now_playing::update_playback(playback);
+}
+
+#[tauri::command]
+fn clear_now_playing_metadata(state: tauri::State<'_, AppState>) {
+    now_playing::clear();
+    if let Ok(mut player) = state.player.lock() {
+        let _ = player.clear_now_playing_artwork();
+    }
+}
+
 pub fn run() {
     // Catch SIGINT / SIGTERM / SIGHUP so we always reap mpv child processes,
     // even when the OS bypasses Drop / RunEvent::Exit (Cmd-Q on macOS, Ctrl-C
@@ -2687,6 +2733,9 @@ pub fn run() {
             run_loudness_analysis,
             remove_library_root,
             get_cover_art,
+            update_now_playing_metadata,
+            update_now_playing_playback,
+            clear_now_playing_metadata,
             record_play,
             get_artist_image,
             peek_artist_image,

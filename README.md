@@ -63,6 +63,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Volume leveling stays fully out of the way when disabled**, so track changes no longer trigger per-track gain updates unless you explicitly turn leveling on
 - **True gapless album playback** for consecutive queue entries, with mpv playlist prefetching tuned so live albums and continuous records keep their intended flow
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
+- **AirPlay now-playing artwork** publishes the active track's cover art through mpv's selected album-art track and macOS Now Playing metadata, so iPhone and Apple TV receivers can show album covers while desktop playback is streaming
 - **Safer startup volume** defaults to 80% to reduce surprise-blast playback on first launch
 - **Animated current-track indicator** in both the main track list and the album track list
 - **Robust shutdown**: mpv is killed whenever the app exits via Drop, Tauri's exit event, *and* a SIGINT/SIGTERM/SIGHUP handler — with a `pkill` fallback so playback can never outlive the app

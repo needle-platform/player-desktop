@@ -68,37 +68,38 @@ export function useCoverArt(
   const cacheOnly = options?.cacheOnly === true;
   const defer = options?.defer === true;
   const enabled = options?.enabled !== false;
-  const [url, setUrl] = useState<string | null>(() =>
-    trackPath ? cache.get(trackPath) ?? null : null,
-  );
+  const [coverState, setCoverState] = useState<{ trackPath: string | null; url: string | null }>(() => ({
+    trackPath: trackPath ?? null,
+    url: trackPath ? cache.get(trackPath) ?? null : null,
+  }));
 
   useEffect(() => {
     if (!trackPath) {
-      setUrl(null);
+      setCoverState({ trackPath: null, url: null });
       return;
     }
 
     let cancelled = false;
     const cached = cache.get(trackPath);
     if (cached !== undefined) {
-      setUrl(cached);
+      setCoverState({ trackPath, url: cached });
       return;
     }
 
     if (!enabled) {
-      setUrl(null);
+      setCoverState({ trackPath, url: null });
       return;
     }
 
     if (cacheOnly) {
-      setUrl(null);
+      setCoverState({ trackPath, url: null });
       return;
     }
 
-    setUrl(null);
+    setCoverState({ trackPath, url: null });
     const runFetch = () => {
       void fetchCover(trackPath).then((value) => {
-        if (!cancelled) setUrl(value);
+        if (!cancelled) setCoverState({ trackPath, url: value });
       });
     };
 
@@ -125,5 +126,5 @@ export function useCoverArt(
     };
   }, [cacheOnly, defer, enabled, trackPath]);
 
-  return url;
+  return coverState.trackPath === (trackPath ?? null) ? coverState.url : null;
 }

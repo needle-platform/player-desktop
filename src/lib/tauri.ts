@@ -218,6 +218,32 @@ export interface CoverArt {
 export const getCoverArt = (trackPath: string) =>
   invokeMonitored<CoverArt | null>('get_cover_art', { trackPath });
 
+export interface NowPlayingMetadata {
+  title: string;
+  artist: string | null;
+  album: string | null;
+  durationSeconds: number | null;
+  elapsedSeconds: number | null;
+  playing: boolean;
+  artworkDataUrl: string | null;
+  preserveArtwork: boolean;
+}
+
+export interface NowPlayingPlayback {
+  durationSeconds: number | null;
+  elapsedSeconds: number | null;
+  playing: boolean;
+}
+
+export const updateNowPlayingMetadata = (metadata: NowPlayingMetadata) =>
+  invokeMonitored<void>('update_now_playing_metadata', { metadata });
+
+export const updateNowPlayingPlayback = (playback: NowPlayingPlayback) =>
+  invokeMonitored<void>('update_now_playing_playback', { playback });
+
+export const clearNowPlayingMetadata = () =>
+  invokeMonitored<void>('clear_now_playing_metadata');
+
 export const recordPlay = (path: string) => invokeMonitored<void>('record_play', { path });
 
 export interface ArtistImage {

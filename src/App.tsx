@@ -14,6 +14,7 @@ import {
   createPlaylist,
   downloadOfflineTracks,
   getNeedleBackendStatus,
+  clearNowPlayingMetadata,
   deletePlaylist,
   getPlaybackState,
   getRuntimeInfo,
@@ -54,6 +55,8 @@ import {
   stopPlayback,
   syncPlaybackSession,
   uploadCustomArtistImage,
+  updateNowPlayingMetadata,
+  updateNowPlayingPlayback,
 } from './lib/tauri';
 import type {
   AudioDevice,
@@ -3411,6 +3414,9 @@ function App() {
     () => (currentPath ? trackByPath.get(currentPath) ?? null : currentQueueTrack),
     [currentPath, currentQueueTrack, trackByPath],
   );
+  const currentTrackArtwork = useCoverArt(currentTrack?.path, {
+    enabled: Boolean(currentTrack),
+  });
   const currentBpmAuditReviewPath =
     currentTrack && bpmAuditTrackPathSet.has(currentTrack.path) ? currentTrack.path : null;
   const currentTrackFavoritePending = currentTrack ? pendingTrackFavorites.includes(currentTrack.path) : false;
@@ -3574,6 +3580,43 @@ function App() {
   const progressStyle = {
     background: `linear-gradient(to right, var(--accent) 0%, var(--accent) ${progressPercent}%, var(--border) ${progressPercent}%, var(--border) 100%)`,
   };
+  const nowPlayingElapsedSecond = Math.floor(clampedPosition);
+
+  useEffect(() => {
+    if (!currentTrack) {
+      void clearNowPlayingMetadata().catch(() => {});
+      return;
+    }
+
+    void updateNowPlayingMetadata({
+      title: currentTrack.title,
+      artist: currentTrack.artist,
+      album: currentTrack.album,
+      durationSeconds: effectiveDuration > 0 ? effectiveDuration : null,
+      elapsedSeconds: null,
+      playing: isPlaying,
+      artworkDataUrl: currentTrackArtwork,
+      preserveArtwork: currentTrackArtwork == null,
+    }).catch(() => {});
+  }, [
+    currentTrack?.path,
+    currentTrack?.title,
+    currentTrack?.artist,
+    currentTrack?.album,
+    currentTrackArtwork,
+    effectiveDuration,
+    isPlaying,
+  ]);
+
+  useEffect(() => {
+    if (!currentTrack) return;
+
+    void updateNowPlayingPlayback({
+      durationSeconds: effectiveDuration > 0 ? effectiveDuration : null,
+      elapsedSeconds: clampedPosition,
+      playing: isPlaying,
+    }).catch(() => {});
+  }, [currentTrack?.path, effectiveDuration, isPlaying, nowPlayingElapsedSecond]);
 
   const commitSeek = async (position: number | null) => {
     const next = position == null ? null : Math.max(0, Math.min(position, progressMax));
