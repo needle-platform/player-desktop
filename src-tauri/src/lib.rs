@@ -14,7 +14,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Instant,
 };
 
@@ -28,9 +28,16 @@ use models::{
 use mpv::MpvController;
 use tauri::{Emitter, Manager};
 
+#[derive(Default)]
+struct PlaybackSessionSyncState {
+    in_flight: bool,
+    pending: Option<PlaybackSession>,
+}
+
 struct AppState {
     db_path: std::path::PathBuf,
     player: Mutex<MpvController>,
+    playback_session_sync: Arc<Mutex<PlaybackSessionSyncState>>,
 }
 
 const DB_FILENAME: &str = "library.sqlite";
@@ -137,6 +144,72 @@ fn finalize_loaded_backend_bootstrap(
 
 fn load_bootstrap_for_current_mode(db_path: &Path) -> Result<BootstrapPayload, String> {
     load_bootstrap_state_for_current_mode(db_path).map(|state| state.bootstrap)
+}
+
+fn schedule_backend_playback_session_sync(
+    db_path: PathBuf,
+    sync_state: Arc<Mutex<PlaybackSessionSyncState>>,
+    session: PlaybackSession,
+) {
+    let should_spawn = {
+        let Ok(mut state) = sync_state.lock() else {
+            return;
+        };
+        state.pending = Some(session);
+        if state.in_flight {
+            false
+        } else {
+            state.in_flight = true;
+            true
+        }
+    };
+
+    if !should_spawn {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let next_session = {
+                let Ok(mut state) = sync_state.lock() else {
+                    return;
+                };
+                match state.pending.take() {
+                    Some(session) => session,
+                    None => {
+                        state.in_flight = false;
+                        return;
+                    }
+                }
+            };
+
+            let settings = match db::load_settings(&db_path) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    eprintln!("Failed to load settings for backend playback-session sync: {error}");
+                    continue;
+                }
+            };
+
+            if !matches!(settings.library_source, LibrarySource::NeedleBackend) {
+                continue;
+            }
+
+            match backend::save_backend_playback_session(&settings, &next_session).await {
+                Ok(remote_session) => {
+                    if let Err(error) = db::save_playback_session(&db_path, &remote_session) {
+                        eprintln!(
+                            "Failed to store synced backend playback session locally: {error}"
+                        );
+                    }
+                }
+                Err(error) if backend_connectivity_error(&error.to_string()) => {}
+                Err(error) => {
+                    eprintln!("Failed to sync playback session to Needle backend: {error}");
+                }
+            }
+        }
+    });
 }
 
 fn backend_connectivity_error(error: &str) -> bool {
@@ -948,17 +1021,12 @@ fn save_playback_session(
         LibrarySource::NeedleBackend => {
             let local_session = db::save_playback_session(&state.db_path, &session)
                 .map_err(|error| error.to_string())?;
-            match tauri::async_runtime::block_on(backend::save_backend_playback_session(
-                &settings, &session,
-            )) {
-                Ok(remote_session) => {
-                    db::save_playback_session(&state.db_path, &remote_session)
-                        .map_err(|error| error.to_string())?;
-                    Ok(remote_session)
-                }
-                Err(error) if backend_connectivity_error(&error.to_string()) => Ok(local_session),
-                Err(error) => Err(error.to_string()),
-            }
+            schedule_backend_playback_session_sync(
+                state.db_path.clone(),
+                state.playback_session_sync.clone(),
+                session,
+            );
+            Ok(local_session)
         }
         LibrarySource::LocalFolders => {
             db::save_playback_session(&state.db_path, &session).map_err(|error| error.to_string())
@@ -1191,10 +1259,15 @@ fn create_playlist(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     match settings.library_source {
-        LibrarySource::NeedleBackend => tauri::async_runtime::block_on(
-            backend::create_backend_playlist(&settings, &name, &track_paths),
-        )
-        .map_err(|error| error.to_string()),
+        LibrarySource::NeedleBackend => {
+            let bootstrap = tauri::async_runtime::block_on(backend::create_backend_playlist(
+                &settings,
+                &name,
+                &track_paths,
+            ))
+            .map_err(|error| error.to_string())?;
+            finalize_loaded_backend_bootstrap(&state.db_path, bootstrap)
+        }
         LibrarySource::LocalFolders => {
             db::create_playlist(&state.db_path, &name, &track_paths, rule.as_ref())
                 .map_err(|error| error.to_string())?;
@@ -1211,7 +1284,13 @@ fn rename_playlist(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Playlist renaming in Needle backend mode is not implemented yet".to_string());
+        let bootstrap = tauri::async_runtime::block_on(backend::rename_backend_playlist(
+            &settings,
+            &playlist_id,
+            &name,
+        ))
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
     db::rename_playlist(&state.db_path, &playlist_id, &name).map_err(|error| error.to_string())?;
     db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
@@ -1224,7 +1303,12 @@ fn delete_playlist(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err("Playlist deletion in Needle backend mode is not implemented yet".to_string());
+        let bootstrap = tauri::async_runtime::block_on(backend::delete_backend_playlist(
+            &settings,
+            &playlist_id,
+        ))
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
     db::delete_playlist(&state.db_path, &playlist_id).map_err(|error| error.to_string())?;
     db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
@@ -1238,9 +1322,13 @@ fn append_tracks_to_playlist(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err(
-            "Editing backend playlists from the desktop app is not implemented yet".to_string(),
-        );
+        let bootstrap = tauri::async_runtime::block_on(backend::append_tracks_to_backend_playlist(
+            &settings,
+            &playlist_id,
+            &track_paths,
+        ))
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
     db::append_tracks_to_playlist(&state.db_path, &playlist_id, &track_paths)
         .map_err(|error| error.to_string())?;
@@ -1255,9 +1343,13 @@ fn replace_playlist_tracks(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err(
-            "Editing backend playlists from the desktop app is not implemented yet".to_string(),
-        );
+        let bootstrap = tauri::async_runtime::block_on(backend::replace_backend_playlist_tracks(
+            &settings,
+            &playlist_id,
+            &track_paths,
+        ))
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
     db::replace_playlist_tracks(&state.db_path, &playlist_id, &track_paths)
         .map_err(|error| error.to_string())?;
@@ -1272,9 +1364,13 @@ fn remove_playlist_track(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err(
-            "Editing backend playlists from the desktop app is not implemented yet".to_string(),
-        );
+        let bootstrap = tauri::async_runtime::block_on(backend::remove_backend_playlist_track(
+            &settings,
+            &playlist_id,
+            index,
+        ))
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
     db::remove_playlist_track(&state.db_path, &playlist_id, index)
         .map_err(|error| error.to_string())?;
@@ -1290,9 +1386,14 @@ fn move_playlist_track(
 ) -> Result<BootstrapPayload, String> {
     let settings = load_settings_for_current_mode(&state.db_path)?;
     if matches!(settings.library_source, LibrarySource::NeedleBackend) {
-        return Err(
-            "Editing backend playlists from the desktop app is not implemented yet".to_string(),
-        );
+        let bootstrap = tauri::async_runtime::block_on(backend::move_backend_playlist_track(
+            &settings,
+            &playlist_id,
+            from_index,
+            to_index,
+        ))
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
     }
     db::move_playlist_track(&state.db_path, &playlist_id, from_index, to_index)
         .map_err(|error| error.to_string())?;
@@ -2532,6 +2633,7 @@ pub fn run() {
             app.manage(AppState {
                 db_path,
                 player: Mutex::new(player),
+                playback_session_sync: Arc::new(Mutex::new(PlaybackSessionSyncState::default())),
             });
             Ok(())
         })

@@ -146,6 +146,7 @@ export interface SavedPlaylistRule {
   search: string | null;
   artist: string | null;
   genre: string | null;
+  vibe: string | null;
   year_from: number | null;
   year_to: number | null;
 }

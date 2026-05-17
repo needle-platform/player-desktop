@@ -91,7 +91,7 @@ import {
   splitTrackGenres,
 } from './lib/genres';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
-import { formatBpm, vibeKeyForTrack, vibeLabelForTrack } from './lib/vibes';
+import { formatBpm, VIBE_BUCKETS, vibeKeyForTrack, vibeLabelForTrack } from './lib/vibes';
 import dashboardIdleBackdrop from './assets/bg.jpg';
 import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
@@ -669,6 +669,7 @@ const formatPlaylistRuleSummary = (rule: SavedPlaylistRule) => {
       rule.search ? `Search: ${rule.search}` : null,
       rule.artist,
       rule.genre ? genreLabelFromKey(normalizeGenreKey(rule.genre) ?? rule.genre) : null,
+      rule.vibe ? VIBE_BUCKETS.find((bucket) => bucket.key === rule.vibe)?.label ?? rule.vibe : null,
       formatTrackYearRange(
         rule.year_from != null ? String(rule.year_from) : allTrackFilterValue,
         rule.year_to != null ? String(rule.year_to) : allTrackFilterValue,
@@ -1486,6 +1487,7 @@ function App() {
   const [trackSort, setTrackSort] = useState<TrackSortOption>('title');
   const [trackArtistFilter, setTrackArtistFilter] = useState(allTrackFilterValue);
   const [trackGenreFilter, setTrackGenreFilter] = useState(allTrackFilterValue);
+  const [trackVibeFilter, setTrackVibeFilter] = useState(allTrackFilterValue);
   const [trackYearFromFilter, setTrackYearFromFilter] = useState<TrackYearBoundaryFilter>(allTrackFilterValue);
   const [trackYearToFilter, setTrackYearToFilter] = useState<TrackYearBoundaryFilter>(allTrackFilterValue);
   const [albumSort, setAlbumSort] = useState<AlbumSortOption>('album');
@@ -1641,6 +1643,7 @@ function App() {
   const backendWakeHeartbeatAtRef = useRef(0);
   const offlineDownloadsSyncProgressRef = useRef<string | null>(null);
   const offlineCompletedTracksRef = useRef(0);
+  const playbackSessionRef = useRef<PlaybackSession | null>(null);
 
   const applyBootstrapState = (nextState: AppBootstrapState) => {
     setData(nextState.bootstrap);
@@ -1727,6 +1730,7 @@ function App() {
   const clearTrackFilters = () => {
     setTrackArtistFilter(allTrackFilterValue);
     setTrackGenreFilter(allTrackFilterValue);
+    setTrackVibeFilter(allTrackFilterValue);
     setTrackYearFromFilter(allTrackFilterValue);
     setTrackYearToFilter(allTrackFilterValue);
   };
@@ -2994,14 +2998,52 @@ function App() {
   );
 
   useEffect(() => {
+    playbackSessionRef.current = playbackSession;
+  }, [playbackSession]);
+
+  useEffect(() => {
     if (!sessionHydratedRef.current) return;
 
+    if (isNeedleBackendMode && isPlaying) {
+      return;
+    }
+
+    const persistDelayMs = currentPath ? 900 : 150;
     const timeout = window.setTimeout(() => {
       void persistSession(playbackSession);
-    }, currentPath ? 900 : 150);
+    }, persistDelayMs);
 
     return () => window.clearTimeout(timeout);
-  }, [currentPath, playbackSession]);
+  }, [currentPath, isNeedleBackendMode, isPlaying, playbackSession]);
+
+  useEffect(() => {
+    if (!isNeedleBackendMode || typeof window === 'undefined') {
+      return;
+    }
+
+    const persistBeforeUnload = () => {
+      if (!sessionHydratedRef.current) {
+        return;
+      }
+
+      const latestSession = playbackSessionRef.current;
+      if (!latestSession) {
+        return;
+      }
+
+      void savePlaybackSession({
+        ...latestSession,
+        paused: true,
+      }).catch(() => {});
+    };
+
+    window.addEventListener('pagehide', persistBeforeUnload);
+    window.addEventListener('beforeunload', persistBeforeUnload);
+    return () => {
+      window.removeEventListener('pagehide', persistBeforeUnload);
+      window.removeEventListener('beforeunload', persistBeforeUnload);
+    };
+  }, [isNeedleBackendMode]);
 
   const smartPlaylists = useMemo(
     () => generateAutoPlaylists(allTracks),
@@ -3112,6 +3154,10 @@ function App() {
     () => uniqueSorted(scopedTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
     [scopedTracks],
   );
+  const trackVibeOptions = useMemo(() => {
+    const presentVibes = new Set(scopedTracks.map((track) => vibeKeyForTrack(track)).filter(Boolean));
+    return VIBE_BUCKETS.filter((bucket) => presentVibes.has(bucket.key));
+  }, [scopedTracks]);
   const trackYearOptions = useMemo(
     () =>
       Array.from(new Set(scopedTracks.map((track) => track.year).filter((year): year is number => year != null)))
@@ -3135,6 +3181,9 @@ function App() {
       list = list.filter((track) =>
         expectedTrackGenre ? splitTrackGenreKeys(effectiveTrackGenre(track)).includes(expectedTrackGenre) : true,
       );
+    }
+    if (!playlistMode && trackVibeFilter !== allTrackFilterValue) {
+      list = list.filter((track) => vibeKeyForTrack(track) === trackVibeFilter);
     }
     const startYear = playlistMode ? null : yearFilterNumber(trackYearFromFilter);
     const endYear = playlistMode ? null : yearFilterNumber(trackYearToFilter);
@@ -3161,6 +3210,7 @@ function App() {
     scopedTracks,
     trackArtistFilter,
     trackGenreFilter,
+    trackVibeFilter,
     trackYearFromFilter,
     trackYearToFilter,
     search,
@@ -3418,10 +3468,14 @@ function App() {
   const hasTrackFilters =
     (!playlistMode && trackArtistFilter !== allTrackFilterValue) ||
     (!playlistMode && trackGenreFilter !== allTrackFilterValue) ||
+    (!playlistMode && trackVibeFilter !== allTrackFilterValue) ||
     yearFilterSummary !== null;
   const activeTrackFilterSummary = [
     !playlistMode && trackArtistFilter !== allTrackFilterValue ? trackArtistFilter : null,
     !playlistMode && trackGenreFilter !== allTrackFilterValue ? trackGenreFilter : null,
+    !playlistMode && trackVibeFilter !== allTrackFilterValue
+      ? VIBE_BUCKETS.find((bucket) => bucket.key === trackVibeFilter)?.label ?? trackVibeFilter
+      : null,
     yearFilterSummary,
   ]
     .filter(Boolean)
@@ -3451,6 +3505,7 @@ function App() {
     trackSort,
     trackArtistFilter,
     trackGenreFilter,
+    trackVibeFilter,
     trackYearFromFilter,
     trackYearToFilter,
     selectedAlbum,
@@ -3894,9 +3949,10 @@ function App() {
                   ? selectedArtist
                   : null;
             const genreValue = trackGenreFilter !== allTrackFilterValue ? trackGenreFilter : null;
+            const vibeValue = trackVibeFilter !== allTrackFilterValue ? trackVibeFilter : null;
             const yearFromValue = yearFilterNumber(trackYearFromFilter);
             const yearToValue = yearFilterNumber(trackYearToFilter);
-            if (!searchValue && !artistValue && !genreValue && yearFromValue == null && yearToValue == null) {
+            if (!searchValue && !artistValue && !genreValue && !vibeValue && yearFromValue == null && yearToValue == null) {
               return null;
             }
             return {
@@ -3904,6 +3960,7 @@ function App() {
               search: searchValue,
               artist: artistValue,
               genre: genreValue,
+              vibe: vibeValue,
               year_from: yearFromValue,
               year_to: yearToValue,
             };
@@ -3989,6 +4046,7 @@ function App() {
     selectedPlaylistData,
     trackArtistFilter,
     trackGenreFilter,
+    trackVibeFilter,
     trackYearFromFilter,
     trackYearToFilter,
     view,
@@ -4972,18 +5030,18 @@ function App() {
   const tracksEmptyMessage = !hasLibraryTracks
     ? 'Add a folder from the sidebar to import FLAC, ALAC, WAV, MP3, OGG, M4A, and more.'
     : !selectedSmartPlaylist && search.trim()
-        ? `Try a different search than “${search.trim()}”.`
+      ? `Try a different search than “${search.trim()}”.`
       : smartPlaylistHasGenreFocus
         ? 'Try a different genre combination or clear the mix focus.'
-      : hasTrackFilters
-        ? 'Try widening the artist, genre, or year range filters.'
-      : selectedManualPlaylist
-        ? 'This saved playlist is empty right now.'
-      : selectedArtist
-          ? `No imported tracks are currently linked to ${selectedArtist}.`
-          : selectedPlaylistData
-            ? 'This playlist does not have any tracks available right now.'
-            : 'There is nothing to show in this view yet.';
+        : hasTrackFilters
+          ? 'Try widening the artist, genre, vibe, or year range filters.'
+          : selectedManualPlaylist
+            ? 'This saved playlist is empty right now.'
+            : selectedArtist
+              ? `No imported tracks are currently linked to ${selectedArtist}.`
+              : selectedPlaylistData
+                ? 'This playlist does not have any tracks available right now.'
+                : 'There is nothing to show in this view yet.';
 
   if (loading) {
     return <div className="fullscreen-message">Loading…</div>;
@@ -5239,6 +5297,9 @@ function App() {
             genreFilterValue={trackGenreFilter}
             onGenreFilterChange={setTrackGenreFilter}
             genreFilterOptions={trackGenreOptions}
+            vibeFilterValue={trackVibeFilter}
+            onVibeFilterChange={setTrackVibeFilter}
+            vibeFilterOptions={trackVibeOptions}
             yearFilterFromValue={trackYearFromFilter}
             onYearFilterFromChange={updateTrackYearFromFilter}
             yearFilterToValue={trackYearToFilter}
@@ -7062,6 +7123,9 @@ interface TracksViewProps {
   genreFilterValue: string;
   onGenreFilterChange: (value: string) => void;
   genreFilterOptions: string[];
+  vibeFilterValue: string;
+  onVibeFilterChange: (value: string) => void;
+  vibeFilterOptions: typeof VIBE_BUCKETS;
   yearFilterFromValue: TrackYearBoundaryFilter;
   onYearFilterFromChange: (value: TrackYearBoundaryFilter) => void;
   yearFilterToValue: TrackYearBoundaryFilter;
@@ -7138,6 +7202,9 @@ function TracksView({
   genreFilterValue,
   onGenreFilterChange,
   genreFilterOptions,
+  vibeFilterValue,
+  onVibeFilterChange,
+  vibeFilterOptions,
   yearFilterFromValue,
   onYearFilterFromChange,
   yearFilterToValue,
@@ -7383,6 +7450,21 @@ function TracksView({
                     {genreFilterOptions.map((genre) => (
                       <option key={genre} value={genre}>
                         {genre}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="tracks-filter-card">
+                  <span className="view-select-label">Vibe</span>
+                  <select
+                    className="view-select tracks-select"
+                    value={vibeFilterValue}
+                    onChange={(event) => onVibeFilterChange(event.currentTarget.value)}
+                  >
+                    <option value={allTrackFilterValue}>All vibes</option>
+                    {vibeFilterOptions.map((vibe) => (
+                      <option key={vibe.key} value={vibe.key}>
+                        {vibe.label}
                       </option>
                     ))}
                   </select>

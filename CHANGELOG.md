@@ -18,6 +18,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Backend-mode info toasts now dismiss themselves automatically after a short delay instead of lingering until manually closed.
 
 ### Fixed
+- Fixed backend-mode playlist management so desktop rename, delete, add, remove, and reorder actions call homeserver playlist APIs instead of being blocked by leftover backend-mode guards.
 - Fixed desktop backend mode so homeserver outages no longer hang the app indefinitely, and the app now switches itself into a downloaded-only offline mode with a calm in-app notice instead of freezing or waiting for a manual backend check.
 - Fixed backend-mode reconnects after laptop sleep so wake, focus, and visibility changes now force a fresh backend check instead of leaving the app stranded in offline mode until restart.
 - Fixed backend-mode artist pages so a missing shared photo or biography now auto-triggers a one-shot backend refresh and re-renders when the homeserver finishes enrichment.

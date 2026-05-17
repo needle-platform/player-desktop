@@ -260,6 +260,7 @@ pub enum SavedPlaylistRule {
         search: Option<String>,
         artist: Option<String>,
         genre: Option<String>,
+        vibe: Option<String>,
         year_from: Option<i64>,
         year_to: Option<i64>,
     },

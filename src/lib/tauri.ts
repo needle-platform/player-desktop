@@ -167,22 +167,22 @@ export const createPlaylist = (
 ) => invokeMonitored<BootstrapPayload>('create_playlist', { name, trackPaths, rule: rule ?? null });
 
 export const renamePlaylist = (playlistId: string, name: string) =>
-  invoke<BootstrapPayload>('rename_playlist', { playlistId, name });
+  invokeMonitored<BootstrapPayload>('rename_playlist', { playlistId, name });
 
 export const deletePlaylist = (playlistId: string) =>
-  invoke<BootstrapPayload>('delete_playlist', { playlistId });
+  invokeMonitored<BootstrapPayload>('delete_playlist', { playlistId });
 
 export const appendTracksToPlaylist = (playlistId: string, trackPaths: string[]) =>
-  invoke<BootstrapPayload>('append_tracks_to_playlist', { playlistId, trackPaths });
+  invokeMonitored<BootstrapPayload>('append_tracks_to_playlist', { playlistId, trackPaths });
 
 export const replacePlaylistTracks = (playlistId: string, trackPaths: string[]) =>
-  invoke<BootstrapPayload>('replace_playlist_tracks', { playlistId, trackPaths });
+  invokeMonitored<BootstrapPayload>('replace_playlist_tracks', { playlistId, trackPaths });
 
 export const removePlaylistTrack = (playlistId: string, index: number) =>
-  invoke<BootstrapPayload>('remove_playlist_track', { playlistId, index });
+  invokeMonitored<BootstrapPayload>('remove_playlist_track', { playlistId, index });
 
 export const movePlaylistTrack = (playlistId: string, fromIndex: number, toIndex: number) =>
-  invoke<BootstrapPayload>('move_playlist_track', { playlistId, fromIndex, toIndex });
+  invokeMonitored<BootstrapPayload>('move_playlist_track', { playlistId, fromIndex, toIndex });
 
 export const setAlbumPrimaryGenre = (
   album: string,

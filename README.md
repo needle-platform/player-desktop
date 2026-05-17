@@ -227,6 +227,7 @@ What works today:
 - backend-backed library bootstrap in the Tauri app
 - offline-safe backend startup that falls back to cached library data or downloaded tracks instead of failing on a blank screen when the homeserver is unavailable
 - authenticated backend API access for bootstrap, playlists, metadata/state sync, and maintenance calls
+- backend-mode playlist management, including rename, delete, add tracks, remove tracks, and reorder tracks against the shared homeserver playlists
 - backend-backed playback while still keeping native `mpv` playback on desktop
 - backend-mode loudness analysis from the desktop app, reusing offline downloads when present and falling back to backend streams when needed
 - backend-mode album genre editing, including `Needle only` saves and backend file write-back when the server allows it

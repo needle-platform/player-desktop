@@ -2273,6 +2273,7 @@ fn validate_playlist_rule(rule: &SavedPlaylistRule) -> Result<()> {
             search,
             artist,
             genre,
+            vibe,
             year_from,
             year_to,
         } => {
@@ -2288,8 +2289,12 @@ fn validate_playlist_rule(rule: &SavedPlaylistRule) -> Result<()> {
                 .as_deref()
                 .map(str::trim)
                 .is_some_and(|value| !value.is_empty());
+            let has_vibe = vibe
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
             let has_year = year_from.is_some() || year_to.is_some();
-            if !has_search && !has_artist && !has_genre && !has_year {
+            if !has_search && !has_artist && !has_genre && !has_vibe && !has_year {
                 bail!("Auto-updating playlists need at least one filter");
             }
             if let (Some(start), Some(end)) = (year_from, year_to) {
@@ -2348,6 +2353,18 @@ fn split_track_genres(genre: &str) -> impl Iterator<Item = String> + '_ {
         .filter_map(normalize_genre_key)
 }
 
+fn vibe_key_for_bpm(bpm: i64) -> Option<&'static str> {
+    match bpm {
+        value if value <= 0 => None,
+        value if value < 90 => Some("slowdown"),
+        value if value < 110 => Some("cruise"),
+        value if value < 120 => Some("groove"),
+        value if value < 130 => Some("lift"),
+        value if value < 145 => Some("energy"),
+        _ => Some("chaos"),
+    }
+}
+
 fn track_paths_for_playlist_rule(
     connection: &Connection,
     rule: &SavedPlaylistRule,
@@ -2360,7 +2377,8 @@ fn track_paths_for_playlist_rule(
                COALESCE(tmo.album, t.album) AS album,
                COALESCE(tmo.genre, t.genre) AS genre,
                apg.primary_genre,
-               COALESCE(tmo.year, t.year) AS year
+               COALESCE(tmo.year, t.year) AS year,
+               CAST(ROUND(COALESCE(tmo.bpm, t.bpm)) AS INTEGER) AS bpm
         FROM tracks t
         LEFT JOIN track_metadata_overrides tmo ON tmo.track_path = t.path
         LEFT JOIN album_primary_genres apg
@@ -2386,6 +2404,7 @@ fn track_paths_for_playlist_rule(
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2394,11 +2413,13 @@ fn track_paths_for_playlist_rule(
                         artist_value: Option<&str>,
                         album: Option<&str>,
                         genre_value: Option<&str>,
+                        bpm: Option<i64>,
                         year_value: Option<i64>| match rule {
         SavedPlaylistRule::FilteredLibrary {
             search,
             artist,
             genre,
+            vibe,
             year_from,
             year_to,
         } => {
@@ -2436,6 +2457,16 @@ fn track_paths_for_playlist_rule(
                 }
             }
 
+            if let Some(expected_vibe) = vibe
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if bpm.and_then(vibe_key_for_bpm) != Some(expected_vibe) {
+                    return false;
+                }
+            }
+
             if year_from.is_some() || year_to.is_some() {
                 let Some(year) = year_value else {
                     return false;
@@ -2458,16 +2489,19 @@ fn track_paths_for_playlist_rule(
 
     Ok(rows
         .into_iter()
-        .filter(|(_, title, artist, album, genre, primary_genre, year)| {
-            matches_rule(
-                title.as_deref(),
-                artist.as_deref(),
-                album.as_deref(),
-                effective_genre(primary_genre.as_deref(), genre.as_deref()),
-                *year,
-            )
-        })
-        .map(|(path, _, _, _, _, _, _)| path)
+        .filter(
+            |(_, title, artist, album, genre, primary_genre, year, bpm)| {
+                matches_rule(
+                    title.as_deref(),
+                    artist.as_deref(),
+                    album.as_deref(),
+                    effective_genre(primary_genre.as_deref(), genre.as_deref()),
+                    *bpm,
+                    *year,
+                )
+            },
+        )
+        .map(|(path, _, _, _, _, _, _, _)| path)
         .collect())
 }
 

@@ -252,6 +252,15 @@ struct RawCreatePlaylistPayload<'a> {
     song_ids: &'a [String],
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RawUpdatePlaylistPayload<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    song_ids: Option<&'a [String]>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct RawNeedlePlaybackSession {
     #[serde(default, alias = "queueTrackIds")]
@@ -621,6 +630,112 @@ pub async fn create_backend_playlist(
     )
     .await?;
     load_backend_bootstrap(settings.clone()).await
+}
+
+pub async fn rename_backend_playlist(
+    settings: &AppSettings,
+    playlist_id: &str,
+    name: &str,
+) -> Result<BootstrapPayload> {
+    let route = backend_playlist_route(playlist_id);
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    patch_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        &route,
+        &RawUpdatePlaylistPayload {
+            name: Some(name),
+            song_ids: None,
+        },
+    )
+    .await?;
+    load_backend_bootstrap(settings.clone()).await
+}
+
+pub async fn delete_backend_playlist(
+    settings: &AppSettings,
+    playlist_id: &str,
+) -> Result<BootstrapPayload> {
+    let route = backend_playlist_route(playlist_id);
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    delete_expect_empty(&client, settings, &url, &route).await?;
+    load_backend_bootstrap(settings.clone()).await
+}
+
+pub async fn append_tracks_to_backend_playlist(
+    settings: &AppSettings,
+    playlist_id: &str,
+    track_paths: &[String],
+) -> Result<BootstrapPayload> {
+    let mut playlist_paths = load_backend_playlist_track_paths(settings, playlist_id).await?;
+    for path in track_paths {
+        if !playlist_paths.iter().any(|existing| existing == path) {
+            playlist_paths.push(path.clone());
+        }
+    }
+    replace_backend_playlist_tracks(settings, playlist_id, &playlist_paths).await
+}
+
+pub async fn replace_backend_playlist_tracks(
+    settings: &AppSettings,
+    playlist_id: &str,
+    track_paths: &[String],
+) -> Result<BootstrapPayload> {
+    let route = backend_playlist_route(playlist_id);
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    let song_ids = track_paths
+        .iter()
+        .filter_map(|path| backend_track_id_from_path(path).map(str::to_string))
+        .collect::<Vec<_>>();
+    patch_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        &route,
+        &RawUpdatePlaylistPayload {
+            name: None,
+            song_ids: Some(&song_ids),
+        },
+    )
+    .await?;
+    load_backend_bootstrap(settings.clone()).await
+}
+
+pub async fn remove_backend_playlist_track(
+    settings: &AppSettings,
+    playlist_id: &str,
+    index: usize,
+) -> Result<BootstrapPayload> {
+    let mut playlist_paths = load_backend_playlist_track_paths(settings, playlist_id).await?;
+    if index >= playlist_paths.len() {
+        bail!("Playlist track index is out of range");
+    }
+    playlist_paths.remove(index);
+    replace_backend_playlist_tracks(settings, playlist_id, &playlist_paths).await
+}
+
+pub async fn move_backend_playlist_track(
+    settings: &AppSettings,
+    playlist_id: &str,
+    from_index: usize,
+    to_index: usize,
+) -> Result<BootstrapPayload> {
+    let mut playlist_paths = load_backend_playlist_track_paths(settings, playlist_id).await?;
+    if from_index >= playlist_paths.len() || to_index >= playlist_paths.len() {
+        bail!("Playlist track index is out of range");
+    }
+    if from_index != to_index {
+        let track_path = playlist_paths.remove(from_index);
+        playlist_paths.insert(to_index, track_path);
+    }
+    replace_backend_playlist_tracks(settings, playlist_id, &playlist_paths).await
 }
 
 pub async fn record_backend_play(settings: &AppSettings, track_path: &str) -> Result<()> {
@@ -1510,6 +1625,70 @@ async fn post_json_expect_empty<B: Serialize>(
     Ok(())
 }
 
+async fn patch_json_expect_empty<B: Serialize>(
+    client: &Client,
+    settings: &AppSettings,
+    base_url: &str,
+    route: &str,
+    body: &B,
+) -> Result<()> {
+    let response = backend_request(
+        client.patch(format!("{base_url}{route}")).json(body),
+        settings,
+    )?
+    .send()
+    .await
+    .with_context(|| format!("Unable to reach Needle backend route {route}"))?;
+
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::METHOD_NOT_ALLOWED | reqwest::StatusCode::NOT_FOUND
+    ) {
+        let response = backend_request(
+            client.put(format!("{base_url}{route}")).json(body),
+            settings,
+        )?
+        .send()
+        .await
+        .with_context(|| format!("Unable to reach Needle backend route {route}"))?;
+        return expect_empty_success(response, route).await;
+    }
+
+    expect_empty_success(response, route).await
+}
+
+async fn delete_expect_empty(
+    client: &Client,
+    settings: &AppSettings,
+    base_url: &str,
+    route: &str,
+) -> Result<()> {
+    let response = backend_request(client.delete(format!("{base_url}{route}")), settings)?
+        .send()
+        .await
+        .with_context(|| format!("Unable to reach Needle backend route {route}"))?;
+
+    expect_empty_success(response, route).await
+}
+
+async fn expect_empty_success(response: reqwest::Response, route: &str) -> Result<()> {
+    if !response.status().is_success() {
+        let status_code = response.status();
+        let message = response.text().await.unwrap_or_default();
+        bail!(
+            "Needle backend request to {route} failed with {}{}",
+            status_code,
+            if message.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", message.trim())
+            }
+        );
+    }
+
+    Ok(())
+}
+
 async fn decode_json_response<T: DeserializeOwned>(
     response: reqwest::Response,
     route: &str,
@@ -1532,6 +1711,23 @@ async fn decode_json_response<T: DeserializeOwned>(
         .json::<T>()
         .await
         .with_context(|| format!("Needle backend returned unreadable JSON for {route}"))
+}
+
+async fn load_backend_playlist_track_paths(
+    settings: &AppSettings,
+    playlist_id: &str,
+) -> Result<Vec<String>> {
+    let bootstrap = load_backend_bootstrap(settings.clone()).await?;
+    bootstrap
+        .playlists
+        .into_iter()
+        .find(|playlist| playlist.id == playlist_id)
+        .map(|playlist| playlist.track_paths)
+        .ok_or_else(|| anyhow!("Playlist not found in Needle backend"))
+}
+
+fn backend_playlist_route(playlist_id: &str) -> String {
+    format!("/api/playlists/{}", urlencoding::encode(playlist_id))
 }
 
 async fn find_backend_artist_detail(
