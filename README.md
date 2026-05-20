@@ -1,10 +1,24 @@
 # Needle
 
-A local-first, hi-fi music player for macOS built with **Tauri**, **React + TypeScript**, and **Rust**. Audio playback is handled by **mpv** through its JSON IPC, so lossless formats (FLAC, ALAC, WAV, AIFF) sound exactly the way they should.
+A personal, hi-fi music player for macOS built with **Tauri**, **React + TypeScript**, and **Rust**. Audio playback is handled by **mpv** through its JSON IPC, so lossless formats (FLAC, ALAC, WAV, AIFF) sound exactly the way they should.
 
-> Status: actively usable local-first player — library, queue, saved playlists, playback persistence, equalizer, and richer library curation tools are all in place, with smarter playlisting and metadata refinement continuing to grow.
+> Status: actively usable personal desktop player. Local-folder mode is the most mature path; Needle backend mode is real and useful, but still being shaken down across desktop / homeserver workflows. Expect sharp opinions, moving edges, and changes driven by how I actually use the app.
 
 ![Needle App](needle-app.png)
+
+## Project stance
+
+Needle is a personal project built around how I want to experience and manage music.
+
+The source code is available for transparency, experimentation, and learning purposes. Support is not guaranteed. Feature requests may be ignored. Pull requests may be ignored.
+
+This software reflects my preferences, workflow, and design decisions. If Needle does not fit yours, you are encouraged to adapt it, fork it, or build upon it.
+
+I want Needle to remain enjoyable to build and evolve, rather than turning into an obligation driven by endless feature requests, expectations, or community pressure. Keeping the project opinionated and personal is a deliberate choice.
+
+Use it. Break it. Improve it. Make it your own.
+
+Just don’t expect democracy.
 
 ## Features
 
@@ -291,14 +305,15 @@ Needle already makes use of embedded BPM when your files provide it. A future op
 
 ## Roadmap
 
-- BPM + key analysis as an opt-in background step, with cached `audio_features` table
+- More backend-mode confidence testing before treating the desktop cache as fully optional
+- Better backend offline-download progress, including true byte-stream progress instead of batch-oriented feedback
+- Continued desktop / backend tag-contract alignment
+- BPM + key analysis as an opt-in background step for files with missing or suspicious metadata
 - EQ follow-ups such as per-album remembered curves and user-defined genre-to-preset suggestions/mappings, favoring opt-in guidance over unreliable auto-application
-- Gapless playback hand-off
 - Watch folders with incremental rescans
 - Custom smart-playlist rules and editor
 - Artist radio built from local genre/style context plus MusicBrainz artist enrichment
 - Smarter sidecar handling (hidden FLAC metadata files, `.cue` sheets)
-- Proper macOS / Windows / Linux icon set
 
 ## License
 
