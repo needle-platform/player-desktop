@@ -9,7 +9,7 @@ pub enum ThemeMode {
     Dark,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EqualizerPreset {
     #[default]
@@ -39,9 +39,17 @@ pub enum MetadataEditMode {
     WriteToFiles,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LibrarySource {
+    #[default]
+    LocalFolders,
+    NeedleBackend,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
-    pub id: i64,
+    pub id: String,
     pub path: String,
     pub title: String,
     pub artist: Option<String>,
@@ -64,6 +72,8 @@ pub struct Track {
     pub added_at: Option<String>,
     pub play_count: i64,
     pub last_played_at: Option<String>,
+    #[serde(default)]
+    pub is_favorite: bool,
     pub rating: Option<i64>,
 }
 
@@ -114,6 +124,14 @@ pub struct AppSettings {
     pub volume_leveling_enabled: bool,
     #[serde(default)]
     pub metadata_edit_mode: MetadataEditMode,
+    #[serde(default)]
+    pub library_source: LibrarySource,
+    #[serde(default)]
+    pub needle_backend_url: Option<String>,
+    #[serde(default)]
+    pub needle_backend_username: Option<String>,
+    #[serde(default)]
+    pub needle_backend_password: Option<String>,
     #[serde(default = "default_tracks_page_size")]
     pub tracks_page_size: u32,
     #[serde(default)]
@@ -137,6 +155,19 @@ pub struct BootstrapPayload {
     pub library: LibraryData,
     pub playlists: Vec<SavedPlaylist>,
     pub playback_session: PlaybackSession,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppBootstrapState {
+    pub bootstrap: BootstrapPayload,
+    pub startup_notice: Option<String>,
+    pub offline_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInfo {
+    pub app_version: String,
+    pub loudness_analysis_version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,8 +207,44 @@ fn default_paused() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfflineDownloadEntry {
+    pub track_path: String,
+    pub local_path: String,
+    pub content_type: Option<String>,
+    pub file_size: Option<u64>,
+    pub downloaded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OfflineDownloadOperation {
+    Download,
+    Remove,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OfflineDownloadProgressStatus {
+    Running,
+    Completed,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfflineDownloadProgress {
+    pub operation: OfflineDownloadOperation,
+    pub status: OfflineDownloadProgressStatus,
+    pub total_tracks: usize,
+    pub completed_tracks: usize,
+    pub current_track_path: Option<String>,
+    pub current_track_downloaded_bytes: Option<u64>,
+    pub current_track_total_bytes: Option<u64>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPlaylist {
-    pub id: i64,
+    pub id: String,
     pub name: String,
     pub track_paths: Vec<String>,
     #[serde(default)]
@@ -193,6 +260,7 @@ pub enum SavedPlaylistRule {
         search: Option<String>,
         artist: Option<String>,
         genre: Option<String>,
+        vibe: Option<String>,
         year_from: Option<i64>,
         year_to: Option<i64>,
     },
@@ -219,4 +287,178 @@ pub struct AlbumMetadataRefreshResult {
     pub source_url: Option<String>,
     pub message: String,
     pub bootstrap: BootstrapPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RootPathMapping {
+    pub source_prefix: String,
+    pub target_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedDesktopPlaylist {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub track_paths: Vec<String>,
+    #[serde(default)]
+    pub rule_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedArtistImage {
+    pub name: String,
+    pub url: Option<String>,
+    pub fetched_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedArtistInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub source_url: Option<String>,
+    pub gender: Option<String>,
+    pub fetched_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedAlbumInfo {
+    pub key: String,
+    pub description: Option<String>,
+    pub source_url: Option<String>,
+    pub fetched_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedAlbumPrimaryGenre {
+    pub album: String,
+    pub album_artist: String,
+    pub primary_genre: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedTrackMetadataOverride {
+    pub track_path: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub disc_number: Option<i64>,
+    pub track_number: Option<i64>,
+    pub bpm: Option<i64>,
+    pub genre: Option<String>,
+    pub year: Option<i64>,
+    pub recording_mbid: Option<String>,
+    pub release_track_mbid: Option<String>,
+    pub release_mbid: Option<String>,
+    pub release_group_mbid: Option<String>,
+    pub confidence: Option<f64>,
+    pub source: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedTrackLoudness {
+    pub track_path: String,
+    pub integrated_lufs: f32,
+    pub true_peak_db: f32,
+    pub target_gain_db: f32,
+    pub file_size: i64,
+    pub file_modified_at: i64,
+    pub analysis_version: i64,
+    pub analyzed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedTrackAppState {
+    pub track_path: String,
+    pub favorite: bool,
+    pub rating: Option<i64>,
+    pub play_count: i64,
+    pub last_played_at: Option<String>,
+    pub date_added: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedDesktopPlaybackSession {
+    pub queue_paths: Vec<String>,
+    pub base_queue_paths: Vec<String>,
+    pub current_index: usize,
+    pub position_seconds: f64,
+    pub paused: bool,
+    pub repeat_mode: RepeatMode,
+    pub shuffle_enabled: bool,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopStateImportPayload {
+    pub source_database_path: Option<String>,
+    pub root_mappings: Vec<RootPathMapping>,
+    pub playlists: Vec<ImportedDesktopPlaylist>,
+    pub artist_images: Vec<ImportedArtistImage>,
+    pub artist_infos: Vec<ImportedArtistInfo>,
+    pub album_infos: Vec<ImportedAlbumInfo>,
+    pub album_primary_genres: Vec<ImportedAlbumPrimaryGenre>,
+    pub track_metadata_overrides: Vec<ImportedTrackMetadataOverride>,
+    pub track_loudness: Vec<ImportedTrackLoudness>,
+    pub track_app_state: Vec<ImportedTrackAppState>,
+    pub playback_session: Option<ImportedDesktopPlaybackSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeedleBackendStatus {
+    pub url: String,
+    pub reachable: bool,
+    pub enabled: bool,
+    pub mode: Option<String>,
+    pub scanning: bool,
+    pub roots_configured: usize,
+    pub configured_roots: Vec<String>,
+    pub track_count: Option<usize>,
+    pub album_count: Option<usize>,
+    pub artist_count: Option<usize>,
+    pub last_scan_status: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeedleBackendImportSummary {
+    pub source_database_path: Option<String>,
+    pub playlists_imported: usize,
+    pub playlist_tracks_imported: usize,
+    pub playlist_tracks_missing: usize,
+    pub artist_images_imported: usize,
+    pub artist_infos_imported: usize,
+    pub album_infos_imported: usize,
+    pub album_primary_genres_imported: usize,
+    pub track_metadata_overrides_imported: usize,
+    pub track_metadata_overrides_missing: usize,
+    pub track_loudness_imported: usize,
+    pub track_loudness_missing: usize,
+    pub track_app_state_imported: usize,
+    pub track_app_state_missing: usize,
+    pub playback_session_imported: bool,
+    pub playback_session_tracks_missing: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeedleBackendMigrationReport {
+    pub backend_status: NeedleBackendStatus,
+    pub root_mappings: Vec<RootPathMapping>,
+    pub unmapped_roots: Vec<String>,
+    pub import_summary: NeedleBackendImportSummary,
 }

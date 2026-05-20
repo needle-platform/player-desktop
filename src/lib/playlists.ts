@@ -1,6 +1,6 @@
 import type { Track } from '../types';
-import { genreLabelFromKey, normalizeGenreKey, splitTrackGenreKeys } from './genres';
-import { vibeKeyForTrack, type VibeKey } from './vibes';
+import { genreLabelFromKey, splitTrackGenreKeys } from './genres';
+import { scoreTrackForVibePlaylist } from './vibes';
 
 export interface AutoPlaylist {
   id: string;
@@ -26,75 +26,25 @@ const accent = (n: number) => ACCENTS[n % ACCENTS.length];
 const effectiveGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
 const normalizedGenres = (track: Pick<Track, 'primary_genre' | 'genre'>) =>
   splitTrackGenreKeys(effectiveGenre(track));
-const normalizeHint = (value: string) => normalizeGenreKey(value) ?? value.toLocaleLowerCase();
+const hasGenreKey = (track: Pick<Track, 'primary_genre' | 'genre'>, key: string) => normalizedGenres(track).includes(key);
+const HOLIDAY_HINTS = ['christmas', 'xmas', 'holiday', 'noel', 'yuletide', 'mistletoe', 'santa'];
+const isHolidayTrack = (track: Pick<Track, 'title' | 'album' | 'primary_genre' | 'genre'>) => {
+  if (hasGenreKey(track, 'christmas') || hasGenreKey(track, 'holiday')) return true;
+  const searchable = `${track.title ?? ''} ${track.album ?? ''} ${effectiveGenre(track) ?? ''}`.toLocaleLowerCase();
+  return HOLIDAY_HINTS.some((hint) => searchable.includes(hint));
+};
+const uniqueBy = <T,>(items: readonly T[], keyOf: (item: T) => string) => {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = keyOf(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
 
 const REDISCOVER_AFTER_DAYS = 30;
 const dayMs = 24 * 60 * 60 * 1000;
-const CHILL_HINTS = [
-  'ambient',
-  'downtempo',
-  'chill',
-  'chillout',
-  'lounge',
-  'jazz',
-  'soul',
-  'neo soul',
-  'r&b',
-  'blues',
-  'acoustic',
-  'folk',
-  'trip-hop',
-  'trip hop',
-  'bossa',
-  'singer-songwriter',
-  'singer songwriter',
-] as const;
-const DANCE_HINTS = [
-  'dance',
-  'disco',
-  'house',
-  'techno',
-  'electronic',
-  'electro',
-  'synthpop',
-  'synth-pop',
-  'funk',
-  'pop',
-  'hip hop',
-  'hip-hop',
-  'rap',
-  'latin',
-  'reggaeton',
-  'club',
-] as const;
-const GROOVE_HINTS = [
-  'soul',
-  'neo soul',
-  'r&b',
-  'funk',
-  'jazz',
-  'lounge',
-  'pop',
-  'electronic',
-  'house',
-  'downtempo',
-] as const;
-const UPLIFT_HINTS = [
-  'pop',
-  'dance',
-  'disco',
-  'funk',
-  'house',
-  'electronic',
-  'electro',
-  'synthpop',
-  'indie pop',
-  'rock',
-] as const;
-const NORMALIZED_CHILL_HINTS = CHILL_HINTS.map(normalizeHint);
-const NORMALIZED_DANCE_HINTS = DANCE_HINTS.map(normalizeHint);
-const NORMALIZED_GROOVE_HINTS = GROOVE_HINTS.map(normalizeHint);
-const NORMALIZED_UPLIFT_HINTS = UPLIFT_HINTS.map(normalizeHint);
 
 const timestampOf = (value: string | null | undefined): number => {
   if (!value) return Number.NaN;
@@ -129,34 +79,182 @@ const sample = <T,>(arr: T[], n: number): T[] => {
   return copy.slice(0, n);
 };
 
-const countGenreHints = (genres: string[], hints: readonly string[]) =>
-  genres.reduce(
-    (count, genre) =>
-      count +
-      (hints.some((hint) => genre === hint || genre.includes(hint) || hint.includes(genre)) ? 1 : 0),
-    0,
+const decadeOf = (year: number | null | undefined): number | null => {
+  if (year == null || year < 1000 || year > 2999) return null;
+  return Math.floor(year / 10) * 10;
+};
+
+const formatDecadeLabel = (decade: number) => `${decade}s`;
+
+type SignatureCandidate = {
+  id: string;
+  genreKey: string;
+  decade: number;
+  label: string;
+  description: string;
+  tracks: Track[];
+  score: number;
+};
+
+const minSignatureTracks = 12;
+const minSignatureArtists = 4;
+const minSignatureAlbums = 3;
+const maxSignaturePlaylists = 4;
+const maxSignatureTracks = 50;
+
+const signatureAlbumKey = (track: Track) => {
+  const album = track.album?.trim();
+  const albumArtist = track.album_artist?.trim() ?? track.artist?.trim() ?? '';
+  if (album) return `${album}\u001f${albumArtist}`;
+  return `track:${track.path}`;
+};
+
+const roundRobinAlbumSelection = (tracks: Track[], limit: number) => {
+  const groups = new Map<string, Track[]>();
+  const order: string[] = [];
+
+  for (const track of tracks) {
+    const key = signatureAlbumKey(track);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(track);
+      continue;
+    }
+    groups.set(key, [track]);
+    order.push(key);
+  }
+
+  const selected: Track[] = [];
+  let offset = 0;
+
+  while (selected.length < limit) {
+    let addedThisPass = false;
+    for (const key of order) {
+      const group = groups.get(key);
+      if (!group || offset >= group.length) continue;
+      selected.push(group[offset]);
+      addedThisPass = true;
+      if (selected.length >= limit) break;
+    }
+    if (!addedThisPass) break;
+    offset += 1;
+  }
+
+  return selected;
+};
+
+const buildLibrarySignaturePlaylists = (tracks: Track[], accentIndexStart: number) => {
+  const buckets = new Map<string, Track[]>();
+
+  for (const track of tracks) {
+    const decade = decadeOf(track.year);
+    if (decade == null) continue;
+
+    const genres = normalizedGenres(track);
+    if (genres.length === 0) continue;
+
+    const uniqueGenres = Array.from(new Set(genres));
+    for (const genreKey of uniqueGenres) {
+      const bucketKey = `${decade}:${genreKey}`;
+      const existing = buckets.get(bucketKey);
+      if (existing) existing.push(track);
+      else buckets.set(bucketKey, [track]);
+    }
+  }
+
+  const candidates: SignatureCandidate[] = [];
+  for (const [bucketKey, bucketTracks] of buckets.entries()) {
+    const [decadeText, genreKey] = bucketKey.split(':');
+    const decade = Number.parseInt(decadeText, 10);
+    if (!Number.isFinite(decade)) continue;
+
+    const uniqueArtists = new Set(
+      bucketTracks.map((track) => track.artist?.trim()).filter((value): value is string => Boolean(value)),
+    );
+    const uniqueAlbums = new Set(
+      bucketTracks
+        .map((track) => `${track.album ?? ''}\u001f${track.album_artist ?? track.artist ?? ''}`)
+        .filter((value) => value !== '\u001f'),
+    );
+
+    if (
+      bucketTracks.length < minSignatureTracks ||
+      uniqueArtists.size < minSignatureArtists ||
+      uniqueAlbums.size < minSignatureAlbums
+    ) {
+      continue;
+    }
+
+    const rankedTracks = uniqueBy(
+      bucketTracks
+        .slice()
+        .sort(
+          (a, b) =>
+            (b.rating ?? 0) - (a.rating ?? 0) ||
+            Number(b.is_favorite) - Number(a.is_favorite) ||
+            (b.play_count ?? 0) - (a.play_count ?? 0) ||
+            compareTimestamps(a.last_played_at, b.last_played_at, 'desc') ||
+            a.title.localeCompare(b.title),
+        ),
+      (track) => track.path,
+    );
+    const playlistTracks = roundRobinAlbumSelection(rankedTracks, maxSignatureTracks);
+
+    const score =
+      rankedTracks.length +
+      uniqueArtists.size * 2.4 +
+      uniqueAlbums.size * 1.4 +
+      rankedTracks.filter((track) => track.is_favorite).length * 0.8 +
+      rankedTracks.filter((track) => (track.rating ?? 0) >= 4).length * 0.6;
+
+    candidates.push({
+      id: `signature:${decade}:${genreKey}`,
+      genreKey,
+      decade,
+      label: `${formatDecadeLabel(decade)} ${genreLabelFromKey(genreKey)}`,
+      description: `${rankedTracks.length} matching tracks · ${uniqueArtists.size} artists · ${uniqueAlbums.size} albums`,
+      tracks: playlistTracks,
+      score,
+    });
+  }
+
+  candidates.sort(
+    (a, b) =>
+      b.score - a.score ||
+      b.tracks.length - a.tracks.length ||
+      a.label.localeCompare(b.label),
   );
 
-const scoreTrackForVibeMix = (
-  track: Track,
-  preferredVibes: readonly VibeKey[],
-  supportingVibes: readonly VibeKey[],
-  hints: readonly string[],
-) => {
-  const vibe = vibeKeyForTrack(track);
-  const genres = normalizedGenres(track);
-  const hintMatches = countGenreHints(genres, hints);
+  const selected: SignatureCandidate[] = [];
+  const usedGenres = new Set<string>();
+  const usedDecades = new Set<number>();
 
-  let score = 0;
-  if (vibe && preferredVibes.includes(vibe)) score += 4;
-  else if (vibe && supportingVibes.includes(vibe)) score += 2;
+  const tryAddCandidates = (allowRepeatedDecades: boolean, allowRepeatedGenres: boolean) => {
+    for (const candidate of candidates) {
+      if (selected.some((entry) => entry.id === candidate.id)) continue;
+      if (!allowRepeatedGenres && usedGenres.has(candidate.genreKey)) continue;
+      if (!allowRepeatedDecades && usedDecades.has(candidate.decade)) continue;
+      selected.push(candidate);
+      usedGenres.add(candidate.genreKey);
+      usedDecades.add(candidate.decade);
+      if (selected.length >= maxSignaturePlaylists) break;
+    }
+  };
 
-  score += hintMatches * 2;
+  tryAddCandidates(false, false);
+  if (selected.length < maxSignaturePlaylists) tryAddCandidates(true, false);
+  if (selected.length < maxSignaturePlaylists) tryAddCandidates(true, true);
 
-  if ((track.rating ?? 0) >= 4) score += 1;
-  if ((track.play_count ?? 0) >= 5) score += 1;
-
-  return { score, vibe, hintMatches };
+  return {
+    playlists: selected.slice(0, maxSignaturePlaylists).map((candidate, index) => ({
+      id: candidate.id,
+      name: candidate.label,
+      description: candidate.description,
+      accent: accent(accentIndexStart + index),
+      tracks: candidate.tracks,
+    })),
+    nextAccentIndex: accentIndexStart + Math.min(selected.length, maxSignaturePlaylists),
+  };
 };
 
 export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
@@ -165,6 +263,7 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
   const playlists: AutoPlaylist[] = [];
   let accentIndex = 0;
   const now = Date.now();
+  const vibeEligibleTracks = tracks.filter((track) => !isHolidayTrack(track));
 
   const ratedTracks = tracks
     .filter((track) => (track.rating ?? 0) > 0)
@@ -189,6 +288,26 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
           : 'Tracks ordered by the stars you gave them',
       accent: accent(accentIndex++),
       tracks: playlistTracks,
+    });
+  }
+
+  const favoriteTracks = tracks
+    .filter((track) => track.is_favorite)
+    .slice()
+    .sort(
+      (a, b) =>
+        (b.rating ?? 0) - (a.rating ?? 0) ||
+        (b.play_count ?? 0) - (a.play_count ?? 0) ||
+        compareTimestamps(a.last_played_at, b.last_played_at, 'desc') ||
+        a.title.localeCompare(b.title),
+    );
+  if (favoriteTracks.length > 0) {
+    playlists.push({
+      id: 'library:favorites',
+      name: 'Favourites',
+      description: 'Tracks you marked with a heart',
+      accent: accent(accentIndex++),
+      tracks: favoriteTracks,
     });
   }
 
@@ -232,35 +351,16 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
     });
   }
 
-  // One top-genre mix, placed early so it stays on the first dashboard row.
-  const genreBuckets = new Map<string, Track[]>();
-  for (const t of tracks) {
-    for (const key of normalizedGenres(t)) {
-      const existing = genreBuckets.get(key);
-      if (existing) existing.push(t);
-      else genreBuckets.set(key, [t]);
-    }
-  }
-  const topGenre = Array.from(genreBuckets.entries())
-    .filter(([, list]) => list.length >= 5)
-    .sort((a, b) => b[1].length - a[1].length)[0];
-  if (topGenre) {
-    const [genre, list] = topGenre;
-    playlists.push({
-      id: `genre:${genre}`,
-      name: 'From your top genre',
-      description: `${genreLabelFromKey(genre)} · ${list.length} tracks across your library`,
-      accent: accent(accentIndex++),
-      tracks: sample(list, 60),
-    });
-  }
+  const signaturePlaylists = buildLibrarySignaturePlaylists(tracks, accentIndex);
+  playlists.push(...signaturePlaylists.playlists);
+  accentIndex = signaturePlaylists.nextAccentIndex;
 
-  const windDown = tracks
+  const windDown = vibeEligibleTracks
     .map((track) => ({
       track,
-      ...scoreTrackForVibeMix(track, ['slowdown'], [], NORMALIZED_CHILL_HINTS),
+      ...scoreTrackForVibePlaylist(track, 'wind_down'),
     }))
-    .filter(({ vibe }) => vibe === 'slowdown')
+    .filter(({ eligible }) => eligible)
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -279,12 +379,12 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
     });
   }
 
-  const cruiseAndGroove = tracks
+  const cruiseAndGroove = vibeEligibleTracks
     .map((track) => ({
       track,
-      ...scoreTrackForVibeMix(track, ['cruise', 'groove'], ['slowdown'], NORMALIZED_GROOVE_HINTS),
+      ...scoreTrackForVibePlaylist(track, 'cruise_and_groove'),
     }))
-    .filter(({ vibe }) => vibe === 'cruise' || vibe === 'groove')
+    .filter(({ eligible }) => eligible)
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -303,12 +403,12 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
     });
   }
 
-  const liftAndEnergy = tracks
+  const liftAndEnergy = vibeEligibleTracks
     .map((track) => ({
       track,
-      ...scoreTrackForVibeMix(track, ['lift', 'energy'], ['groove'], NORMALIZED_UPLIFT_HINTS),
+      ...scoreTrackForVibePlaylist(track, 'lift_and_energy'),
     }))
-    .filter(({ vibe }) => vibe === 'lift' || vibe === 'energy')
+    .filter(({ eligible }) => eligible)
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -327,12 +427,12 @@ export function generateAutoPlaylists(tracks: Track[]): AutoPlaylist[] {
     });
   }
 
-  const getOnYourFeet = tracks
+  const getOnYourFeet = vibeEligibleTracks
     .map((track) => ({
       track,
-      ...scoreTrackForVibeMix(track, ['energy', 'chaos'], ['lift'], NORMALIZED_DANCE_HINTS),
+      ...scoreTrackForVibePlaylist(track, 'get_on_your_feet'),
     }))
-    .filter(({ vibe }) => vibe === 'energy' || vibe === 'chaos')
+    .filter(({ eligible }) => eligible)
     .sort(
       (a, b) =>
         b.score - a.score ||

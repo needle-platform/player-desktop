@@ -2,17 +2,22 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
 import { LogicalSize, PhysicalSize } from '@tauri-apps/api/dpi';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { CSSProperties, RefObject } from 'react';
+import type { CSSProperties, ReactNode, RefObject } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   adjustTrackBpm as persistTrackBpmAdjustment,
   applyVolumeLevelingForTrack,
   appendTracksToPlaylist,
   appendQueue,
-  bootstrapApp,
+  backendConnectivityEventName,
+  bootstrapAppState,
   createPlaylist,
+  downloadOfflineTracks,
+  getNeedleBackendStatus,
+  clearNowPlayingMetadata,
   deletePlaylist,
   getPlaybackState,
+  getRuntimeInfo,
   getMissingLibraryRoots,
   insertQueueAt,
   moveQueueIndex as tauriMoveQueueIndex,
@@ -23,6 +28,7 @@ import {
   playQueue as tauriPlayQueue,
   playTrack,
   recordPlay,
+  restoreAutomaticArtistImage as restoreAutomaticBackendArtistImage,
   removePlaylistTrack,
   removeQueueIndex as tauriRemoveQueueIndex,
   removeLibraryRoot,
@@ -30,31 +36,45 @@ import {
   refreshAlbumMetadataFromMusicBrainz,
   resumePlayback,
   runMaintenance,
+  migrateDesktopStateToNeedleBackend,
+  listOfflineDownloads,
   setAudioDevice as setPlaybackAudioDevice,
   saveAlbumGenre as persistAlbumGenre,
   saveTrackBpm as persistTrackBpmValue,
+  setTrackFavorite as persistTrackFavorite,
   setTrackRating as persistTrackRating,
   setPlaybackMuted,
   setPlaybackVolume as setPlaybackVolumeLevel,
   setRepeatMode as tauriSetRepeatMode,
   saveSettings,
   savePlaybackSession,
+  removeOfflineTracks,
   runLoudnessAnalysis,
   scanLibrary,
   seekPlayback,
   stopPlayback,
   syncPlaybackSession,
+  uploadCustomArtistImage,
+  updateNowPlayingMetadata,
+  updateNowPlayingPlayback,
 } from './lib/tauri';
 import type {
   AudioDevice,
+  AppBootstrapState,
   AppSettings,
   BootstrapPayload,
   EqualizerPreset,
+  LibrarySource,
   LoudnessAnalysisFailure,
   LoudnessAnalysisProgress,
   MetadataEditMode,
+  NeedleBackendMigrationReport,
+  NeedleBackendStatus,
+  OfflineDownloadEntry,
+  OfflineDownloadProgress,
   PlaybackSession,
   RepeatMode,
+  RuntimeInfo,
   SavedPlaylist,
   SavedPlaylistRule,
   ThemeMode,
@@ -65,6 +85,7 @@ import { useCoverArt } from './lib/cover';
 import { useArtistImage } from './lib/artistImage';
 import { useArtistInfo } from './lib/artistInfo';
 import { useAlbumInfo } from './lib/albumInfo';
+import { findSuspiciousBpmTracks, type BpmAuditItem } from './lib/bpmAudit';
 import {
   genreLabelFromKey,
   normalizeGenreKey,
@@ -73,14 +94,14 @@ import {
   splitTrackGenres,
 } from './lib/genres';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
-import { formatBpm, vibeKeyForTrack, vibeLabelForTrack } from './lib/vibes';
+import { formatBpm, VIBE_BUCKETS, vibeKeyForTrack, vibeLabelForTrack } from './lib/vibes';
 import dashboardIdleBackdrop from './assets/bg.jpg';
 import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
 import vinylRipBadgeIcon from './assets/vinyl-rip-badge.svg';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'artist' | 'settings';
-type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: number };
+type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: string };
 type TrackSortOption = 'title' | 'artist' | 'album' | 'recent' | 'plays' | 'rating' | 'duration';
 type AlbumSortOption = 'album' | 'artist' | 'recent' | 'tracks';
 type ArtistSortOption = 'artist' | 'tracks' | 'recent';
@@ -129,6 +150,7 @@ type AlbumGenreEditorState = {
 };
 type TrackBpmEditorState = {
   track: Track;
+  dismissFromAudit?: boolean;
 };
 type ResolvedPlaylist = {
   id: string;
@@ -138,6 +160,12 @@ type ResolvedPlaylist = {
   tracks: Track[];
   saved?: SavedPlaylist;
 };
+type DashboardPlaylistSection = {
+  id: string;
+  title: string;
+  playlists: AutoPlaylist[];
+};
+type OfflineAvailability = 'none' | 'partial' | 'full';
 type AlbumSummary = {
   key: string;
   album: string;
@@ -147,6 +175,7 @@ type AlbumSummary = {
   samplePath: string;
   is_vinyl_rip: boolean;
   addedAt: string | null;
+  offlineAvailability: OfflineAvailability;
 };
 type ArtistSummary = {
   artist: string;
@@ -164,10 +193,22 @@ type WindowRestoreState = {
   resizable: boolean;
 };
 type NotificationTone = 'info' | 'success' | 'warning' | 'error';
+type SettingsTab = 'appearance' | 'playback' | 'library';
+
+const isBackendOfflineStatusMessage = (message: string): boolean => {
+  const normalized = message.trim().toLowerCase();
+  return (
+    normalized.includes('offline mode active') ||
+    normalized.includes('needle backend offline') ||
+    normalized.includes("couldn't reach the configured homeserver") ||
+    (normalized.includes('using ') && normalized.includes('offline track'))
+  );
+};
 
 const inferNotificationTone = (message: string): NotificationTone => {
   const normalized = message.trim().toLowerCase();
   if (!normalized) return 'info';
+  if (isBackendOfflineStatusMessage(normalized)) return 'info';
 
   if (
     normalized.includes('failed') ||
@@ -235,6 +276,53 @@ const notificationToneIcon = (tone: NotificationTone): string => {
   return 'i';
 };
 
+const normalizeNeedleBackendPlaybackPath = (
+  value: string | null,
+  settings: AppSettings | null | undefined,
+  offlinePathMap?: Map<string, string>,
+) => {
+  if (!value) {
+    return null;
+  }
+
+  if (value.startsWith('needle-track:')) {
+    return value;
+  }
+
+  if (settings?.library_source !== 'needle_backend') {
+    return value;
+  }
+
+  const offlineTrackPath = offlinePathMap?.get(value);
+  if (offlineTrackPath) {
+    return offlineTrackPath;
+  }
+
+  const backendUrl = settings.needle_backend_url?.trim().replace(/\/+$/, '');
+  if (!backendUrl) {
+    return value;
+  }
+
+  try {
+    const sourceUrl = new URL(value);
+    const backendBase = new URL(backendUrl);
+    const backendPathPrefix = `${backendBase.pathname.replace(/\/+$/, '')}/api/stream/`.replace(/\/{2,}/g, '/');
+
+    if (sourceUrl.origin !== backendBase.origin || !sourceUrl.pathname.startsWith(backendPathPrefix)) {
+      return value;
+    }
+
+    const encodedId = sourceUrl.pathname.slice(backendPathPrefix.length);
+    if (!encodedId) {
+      return value;
+    }
+
+    return `needle-track:${decodeURIComponent(encodedId)}`;
+  } catch {
+    return value;
+  }
+};
+
 const isPlaybackStatusMessage = (message: string): boolean => {
   const normalized = message.trim().toLowerCase();
   if (!normalized) {
@@ -280,6 +368,23 @@ const formatMaintenanceTimestamp = (value: string | null | undefined): string | 
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(date);
+};
+
+const formatFileSize = (value: number | null | undefined): string => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return '—';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const decimals = size >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${size.toFixed(decimals)} ${units[unitIndex]}`;
 };
 
 const greeting = (): string => {
@@ -364,6 +469,22 @@ const metadataEditModeOptions: Array<{
     hint: 'Update the embedded genre and BPM tags so other apps see the same edits too.',
   },
 ];
+const librarySourceOptions: Array<{
+  value: LibrarySource;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: 'local_folders',
+    label: 'Local folders',
+    hint: 'Use Needle’s local SQLite library and direct folder scanning on this machine.',
+  },
+  {
+    value: 'needle_backend',
+    label: 'Needle backend',
+    hint: 'Prepare the desktop app to read shared library state from your Needle backend.',
+  },
+];
 const trackSortOptions: Array<{ value: TrackSortOption; label: string }> = [
   { value: 'title', label: 'Title (A-Z)' },
   { value: 'artist', label: 'Artist (A-Z)' },
@@ -394,6 +515,9 @@ const allTrackFilterValue = 'all';
 const defaultVolumePercent = 80;
 const maxTrackRating = 5;
 const miniPlayerPinnedStorageKey = 'needle-mini-player-pinned';
+const bpmAuditDismissedStorageKey = 'needle-bpm-audit-dismissed';
+const bpmAuditDismissedPathStorageKey = 'needle-bpm-audit-dismissed-paths';
+const bpmAuditReviewedStorageKey = 'needle-bpm-audit-reviewed';
 const miniPlayerBaseSize = { width: 380, height: 420 };
 const miniPlayerExpandedHeightDefault = 772;
 const miniPlayerExpandedHeightMin = 720;
@@ -407,6 +531,7 @@ const formatDuration = (seconds: number | null | undefined) => {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 const formatTrackRatingLabel = (rating: number) => `${rating} star${rating === 1 ? '' : 's'}`;
+const bpmAuditDismissalKey = (track: Pick<Track, 'path' | 'bpm'>) => `${track.path}\u0000${track.bpm ?? ''}`;
 const filteredPlaylistName = (artist: string, genre: string) => {
   const parts = [artist, genre].filter(Boolean);
   return parts.length > 0 ? `${parts.join(' · ')} mix` : 'Filtered mix';
@@ -414,6 +539,16 @@ const filteredPlaylistName = (artist: string, genre: string) => {
 const effectiveTrackGenre = (track: Pick<Track, 'primary_genre' | 'genre'>) => track.primary_genre ?? track.genre;
 const uniqueSorted = (values: string[]) =>
   Array.from(new Set(values.filter(Boolean))).sort((a, b) => compareText(a, b));
+const uniqueInOrder = (values: string[]) => {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+};
 const dedupeTracksByPath = (tracks: Track[]) => Array.from(new Map(tracks.map((track) => [track.path, track])).values());
 const yearFilterNumber = (value: TrackYearBoundaryFilter) => {
   if (value === allTrackFilterValue) return null;
@@ -516,6 +651,17 @@ const albumKey = (album: string | null | undefined, albumArtist: string | null |
 const trackAlbumKey = (track: Pick<Track, 'album' | 'album_artist' | 'artist'>) =>
   track.album ? albumKey(track.album, albumArtistForTrack(track)) : null;
 const albumTitleFromKey = (key: string) => key.split(albumIdentitySeparator)[0] ?? key;
+const offlineAvailabilityFromCounts = (downloadedCount: number, totalCount: number): OfflineAvailability => {
+  if (downloadedCount <= 0 || totalCount <= 0) return 'none';
+  return downloadedCount < totalCount ? 'partial' : 'full';
+};
+const offlineDownloadIndicatorState = (
+  trackPath: string,
+  activeTrackPath: string | null,
+): 'idle' | 'active' => {
+  if (activeTrackPath === trackPath) return 'active';
+  return 'idle';
+};
 const normalizePlaylistRuleText = (value: string | null | undefined) => {
   const trimmed = value?.trim() ?? '';
   return trimmed ? trimmed : null;
@@ -526,6 +672,7 @@ const formatPlaylistRuleSummary = (rule: SavedPlaylistRule) => {
       rule.search ? `Search: ${rule.search}` : null,
       rule.artist,
       rule.genre ? genreLabelFromKey(normalizeGenreKey(rule.genre) ?? rule.genre) : null,
+      rule.vibe ? VIBE_BUCKETS.find((bucket) => bucket.key === rule.vibe)?.label ?? rule.vibe : null,
       formatTrackYearRange(
         rule.year_from != null ? String(rule.year_from) : allTrackFilterValue,
         rule.year_to != null ? String(rule.year_to) : allTrackFilterValue,
@@ -944,6 +1091,129 @@ function StarIcon({ filled }: { filled: boolean }) {
   );
 }
 
+function HeartIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M12 20.6 4.7 13.9a4.9 4.9 0 0 1 0-7 4.7 4.7 0 0 1 6.8 0L12 7.4l.5-.5a4.7 4.7 0 0 1 6.8 0 4.9 4.9 0 0 1 0 7L12 20.6Z"
+        fill={filled ? 'currentColor' : 'none'}
+      />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 4v10" />
+      <path d="m8 10 4 4 4-4" />
+      <path d="M5 19h14" />
+    </svg>
+  );
+}
+
+function DownloadDoneIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 4v8" />
+      <path d="m8.5 8.5 3.5 3.5 3.5-3.5" />
+      <path d="M5 18h7" />
+      <path d="m14 17 2 2 4-4" />
+    </svg>
+  );
+}
+
+function OfflineAvailableBadge({
+  availability,
+  size,
+}: {
+  availability: OfflineAvailability;
+  size: CoverProps['size'];
+}) {
+  if (availability === 'none') return null;
+
+  const label = availability === 'full' ? 'Available offline' : 'Partially available offline';
+  return (
+    <span
+      className={`offline-available-badge offline-available-badge-${size} ${
+        availability === 'full' ? 'is-full' : 'is-partial'
+      }`}
+      title={label}
+      aria-label={label}
+    >
+      {availability === 'full' ? <DownloadDoneIcon /> : <DownloadIcon />}
+    </span>
+  );
+}
+
+function TrackNumberIndicator({
+  value,
+  isCurrent,
+  downloadState,
+  progressRatio,
+}: {
+  value: ReactNode;
+  isCurrent: boolean;
+  downloadState: 'idle' | 'active';
+  progressRatio?: number | null;
+}) {
+  const clampedProgress =
+    typeof progressRatio === 'number' && Number.isFinite(progressRatio)
+      ? Math.max(0, Math.min(progressRatio, 1))
+      : null;
+  const ringCircumference = 75.39822368615503;
+  return (
+    <span className={`track-number-indicator ${downloadState === 'active' ? 'is-active' : ''}`}>
+      {!isCurrent && downloadState === 'active' && (
+        <svg className={`track-number-indicator-ring ${clampedProgress == null ? 'is-indeterminate' : ''}`} viewBox="0 0 28 28" aria-hidden="true">
+          <circle className="track-number-indicator-ring-track" cx="14" cy="14" r="12" />
+          {clampedProgress == null ? (
+            <circle className="track-number-indicator-ring-progress is-spinning" cx="14" cy="14" r="12" />
+          ) : (
+            <circle
+              className="track-number-indicator-ring-progress"
+              cx="14"
+              cy="14"
+              r="12"
+              strokeDasharray={`${ringCircumference} ${ringCircumference}`}
+              strokeDashoffset={ringCircumference * (1 - clampedProgress)}
+            />
+          )}
+        </svg>
+      )}
+      <span className="track-number-indicator-value">{isCurrent ? <PlayingIndicator /> : value}</span>
+    </span>
+  );
+}
+
+function TrackFavoriteControl({
+  track,
+  disabled,
+  onToggleFavorite,
+}: {
+  track: Track;
+  disabled?: boolean;
+  onToggleFavorite: (track: Track, favorite: boolean) => void;
+}) {
+  const nextFavorite = !track.is_favorite;
+
+  return (
+    <button
+      className={`row-icon-button track-favorite ${track.is_favorite ? 'is-active' : ''}`}
+      type="button"
+      disabled={disabled}
+      title={nextFavorite ? `Mark ${track.title} as favourite` : `Remove ${track.title} from favourites`}
+      aria-label={nextFavorite ? `Mark ${track.title} as favourite` : `Remove ${track.title} from favourites`}
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggleFavorite(track, nextFavorite);
+      }}
+    >
+      <HeartIcon filled={track.is_favorite} />
+    </button>
+  );
+}
+
 function TrackRatingControl({
   track,
   disabled,
@@ -987,6 +1257,43 @@ function TrackRatingControl({
   );
 }
 
+function TrackOfflineControl({
+  track,
+  downloaded,
+  disabled,
+  onToggleOffline,
+}: {
+  track: Track;
+  downloaded: boolean;
+  disabled?: boolean;
+  onToggleOffline: (track: Track, shouldDownload: boolean) => void;
+}) {
+  const nextDownloadState = !downloaded;
+  return (
+    <button
+      className={`row-icon-button track-offline ${downloaded ? 'is-active' : ''}`}
+      type="button"
+      disabled={disabled}
+      title={
+        nextDownloadState
+          ? `Download ${track.title} for offline playback`
+          : `Remove offline copy of ${track.title}`
+      }
+      aria-label={
+        nextDownloadState
+          ? `Download ${track.title} for offline playback`
+          : `Remove offline copy of ${track.title}`
+      }
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggleOffline(track, nextDownloadState);
+      }}
+    >
+      <DownloadIcon />
+    </button>
+  );
+}
+
 function TrackBpmControl({
   track,
   metadataEditMode,
@@ -1002,6 +1309,9 @@ function TrackBpmControl({
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const chipRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [menuDirection, setMenuDirection] = useState<'down' | 'up'>('down');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -1027,6 +1337,36 @@ function TrackBpmControl({
     };
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) {
+      setMenuDirection('down');
+      return;
+    }
+
+    const updateDirection = () => {
+      const chipRect = chipRef.current?.getBoundingClientRect();
+      if (!chipRect) {
+        return;
+      }
+
+      const panelHeight = panelRef.current?.offsetHeight ?? 220;
+      const spaceBelow = window.innerHeight - chipRect.bottom;
+      const spaceAbove = chipRect.top;
+      setMenuDirection(spaceBelow >= panelHeight + 16 || spaceBelow >= spaceAbove ? 'down' : 'up');
+    };
+
+    updateDirection();
+    const rafId = window.requestAnimationFrame(updateDirection);
+    window.addEventListener('resize', updateDirection);
+    window.addEventListener('scroll', updateDirection, true);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', updateDirection);
+      window.removeEventListener('scroll', updateDirection, true);
+    };
+  }, [isOpen]);
+
   const bpmLabel = formatBpm(track.bpm);
   const vibeLabel = vibeLabelForTrack(track);
   const halfBpm = track.bpm != null ? Math.max(1, Math.round(track.bpm / 2)) : null;
@@ -1043,6 +1383,7 @@ function TrackBpmControl({
       aria-label={`BPM correction for ${track.title}`}
     >
       <button
+        ref={chipRef}
         className={`track-bpm-chip ${isOpen ? 'is-open' : ''}`}
         type="button"
         disabled={disabled}
@@ -1069,7 +1410,12 @@ function TrackBpmControl({
       </button>
 
       {isOpen && (
-        <div className="track-bpm-menu-panel" role="menu" aria-label={`BPM options for ${track.title}`}>
+        <div
+          ref={panelRef}
+          className={`track-bpm-menu-panel ${menuDirection === 'up' ? 'is-upward' : ''}`}
+          role="menu"
+          aria-label={`BPM options for ${track.title}`}
+        >
           <div className="track-bpm-menu-title">
             {bpmLabel ? `${bpmLabel} BPM` : 'BPM'}
             {vibeLabel ? ` · ${vibeLabel}` : ''}
@@ -1137,12 +1483,14 @@ function TrackBpmControl({
 
 function App() {
   const [data, setData] = useState<BootstrapPayload | null>(null);
+  const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null);
   const [view, setView] = useState<View>('dashboard');
   const [featuredSeed, setFeaturedSeed] = useState(0);
   const [search, setSearch] = useState('');
   const [trackSort, setTrackSort] = useState<TrackSortOption>('title');
   const [trackArtistFilter, setTrackArtistFilter] = useState(allTrackFilterValue);
   const [trackGenreFilter, setTrackGenreFilter] = useState(allTrackFilterValue);
+  const [trackVibeFilter, setTrackVibeFilter] = useState(allTrackFilterValue);
   const [trackYearFromFilter, setTrackYearFromFilter] = useState<TrackYearBoundaryFilter>(allTrackFilterValue);
   const [trackYearToFilter, setTrackYearToFilter] = useState<TrackYearBoundaryFilter>(allTrackFilterValue);
   const [albumSort, setAlbumSort] = useState<AlbumSortOption>('album');
@@ -1172,6 +1520,36 @@ function App() {
     if (typeof window === 'undefined') return false;
     return window.localStorage.getItem(miniPlayerPinnedStorageKey) === 'true';
   });
+  const [dismissedBpmAuditKeys, setDismissedBpmAuditKeys] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem(bpmAuditDismissedStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+  const [dismissedBpmAuditPaths, setDismissedBpmAuditPaths] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem(bpmAuditDismissedPathStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+  const [reviewedBpmAuditKeys, setReviewedBpmAuditKeys] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem(bpmAuditReviewedStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
   const [isMiniQueueExpanded, setIsMiniQueueExpanded] = useState(false);
   const [miniPlayerExpandedHeight, setMiniPlayerExpandedHeight] = useState(miniPlayerExpandedHeightDefault);
   const [isBackendPlaybackLoaded, setIsBackendPlaybackLoaded] = useState(false);
@@ -1186,6 +1564,7 @@ function App() {
   const [isDeviceMenuOpen, setIsDeviceMenuOpen] = useState(false);
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pendingTrackFavorites, setPendingTrackFavorites] = useState<string[]>([]);
   const [pendingTrackRatings, setPendingTrackRatings] = useState<string[]>([]);
   const [pendingTrackBpms, setPendingTrackBpms] = useState<string[]>([]);
   const [selectedSmartPlaylistGenres, setSelectedSmartPlaylistGenres] = useState<string[]>([]);
@@ -1196,8 +1575,24 @@ function App() {
   const [loudnessAnalysisProgress, setLoudnessAnalysisProgress] = useState<LoudnessAnalysisProgress | null>(null);
   const [loudnessAnalysisFailures, setLoudnessAnalysisFailures] = useState<LoudnessAnalysisFailure[]>([]);
   const [missingLibraryRoots, setMissingLibraryRoots] = useState<string[]>([]);
+  const [needleBackendStatus, setNeedleBackendStatus] = useState<NeedleBackendStatus | null>(null);
+  const [needleBackendMigrationReport, setNeedleBackendMigrationReport] =
+    useState<NeedleBackendMigrationReport | null>(null);
+  const [offlineDownloads, setOfflineDownloads] = useState<OfflineDownloadEntry[]>([]);
+  const [offlineDownloadProgress, setOfflineDownloadProgress] = useState<OfflineDownloadProgress | null>(null);
+  const [pendingOfflinePaths, setPendingOfflinePaths] = useState<string[]>([]);
+  const [optimisticOfflinePaths, setOptimisticOfflinePaths] = useState<string[]>([]);
+  const [needleBackendFeedback, setNeedleBackendFeedback] = useState<{
+    tone: 'info' | 'success' | 'warning' | 'error';
+    message: string;
+  } | null>(null);
+  const [backendModeNotice, setBackendModeNotice] = useState<string | null>(null);
+  const [isBackendOfflineMode, setIsBackendOfflineMode] = useState(false);
+  const [isNeedleBackendStatusLoading, setIsNeedleBackendStatusLoading] = useState(false);
+  const [isNeedleBackendMigrationRunning, setIsNeedleBackendMigrationRunning] = useState(false);
   const [metadataRefreshAlbumKey, setMetadataRefreshAlbumKey] = useState<string | null>(null);
   const [status, setStatus] = useState('');
+  const [startupError, setStartupError] = useState<string | null>(null);
   const [notification, setNotification] = useState<{
     id: number;
     message: string;
@@ -1208,12 +1603,28 @@ function App() {
   const effectiveTheme: 'light' | 'dark' = isMiniPlayer ? 'dark' : resolvedTheme;
   const customAccentColor = useMemo(() => normalizeAccentColor(data?.settings.accent_color ?? null), [data?.settings.accent_color]);
   const metadataEditMode: MetadataEditMode = data?.settings.metadata_edit_mode ?? 'needle_only';
+  const isNeedleBackendMode = data?.settings.library_source === 'needle_backend';
   const accentTheme = useMemo(
     () => (customAccentColor ? deriveAccentTheme(customAccentColor, effectiveTheme) : null),
     [customAccentColor, effectiveTheme],
   );
+  const offlineDownloadByTrackPath = useMemo(
+    () => new Map(offlineDownloads.map((entry) => [entry.track_path, entry])),
+    [offlineDownloads],
+  );
+  const offlineAvailableTrackPathSet = useMemo(
+    () => new Set(offlineDownloads.map((entry) => entry.track_path).concat(optimisticOfflinePaths)),
+    [offlineDownloads, optimisticOfflinePaths],
+  );
+  const offlineDownloadByLocalPath = useMemo(
+    () => new Map(offlineDownloads.map((entry) => [entry.local_path, entry.track_path])),
+    [offlineDownloads],
+  );
   const currentAccentColor = accentTheme?.accent ?? defaultAccentForTheme(effectiveTheme);
   const currentTracksPageSize = normalizeTracksPageSize(data?.settings.tracks_page_size);
+  const dismissedBpmAuditKeySet = useMemo(() => new Set(dismissedBpmAuditKeys), [dismissedBpmAuditKeys]);
+  const dismissedBpmAuditPathSet = useMemo(() => new Set(dismissedBpmAuditPaths), [dismissedBpmAuditPaths]);
+  const reviewedBpmAuditKeySet = useMemo(() => new Set(reviewedBpmAuditKeys), [reviewedBpmAuditKeys]);
   const lastRecordedPath = useRef<string | null>(null);
   const suppressRecordPathRef = useRef<string | null>(null);
   const sessionHydratedRef = useRef(false);
@@ -1228,6 +1639,21 @@ function App() {
   const windowRestoreStateRef = useRef<WindowRestoreState | null>(null);
   const miniQueueResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const notificationIdRef = useRef(0);
+  const backendOfflineRecoveryRef = useRef(false);
+  const backendOfflineRecoveryStartedAtRef = useRef<number | null>(null);
+  const backendHeartbeatInFlightRef = useRef(false);
+  const backendHeartbeatStartedAtRef = useRef<number | null>(null);
+  const backendWakeHeartbeatAtRef = useRef(0);
+  const offlineDownloadsSyncProgressRef = useRef<string | null>(null);
+  const offlineCompletedTracksRef = useRef(0);
+  const playbackSessionRef = useRef<PlaybackSession | null>(null);
+
+  const applyBootstrapState = (nextState: AppBootstrapState) => {
+    setData(nextState.bootstrap);
+    setIsBackendOfflineMode(nextState.offline_mode);
+    setBackendModeNotice(nextState.offline_mode ? nextState.startup_notice ?? null : null);
+    setStartupError(null);
+  };
 
   useEffect(() => {
     const message = status.trim();
@@ -1240,6 +1666,12 @@ function App() {
       return;
     }
 
+    if (isBackendOfflineStatusMessage(message)) {
+      setNotification(null);
+      setStatus((current) => (current === message ? '' : current));
+      return;
+    }
+
     const tone = inferNotificationTone(message);
     const id = notificationIdRef.current + 1;
     notificationIdRef.current = id;
@@ -1248,14 +1680,14 @@ function App() {
   }, [status]);
 
   useEffect(() => {
-    if (!notification || notification.tone !== 'success') {
+    if (!notification || (notification.tone !== 'success' && notification.tone !== 'info')) {
       return;
     }
 
-    const dismissTimer =
-      window.setTimeout(() => {
-        setNotification((current) => (current?.id === notification.id ? null : current));
-      }, 4200);
+    const dismissAfterMs = notification.tone === 'info' ? 3200 : 4200;
+    const dismissTimer = window.setTimeout(() => {
+      setNotification((current) => (current?.id === notification.id ? null : current));
+    }, dismissAfterMs);
 
     return () => {
       window.clearTimeout(dismissTimer);
@@ -1301,8 +1733,51 @@ function App() {
   const clearTrackFilters = () => {
     setTrackArtistFilter(allTrackFilterValue);
     setTrackGenreFilter(allTrackFilterValue);
+    setTrackVibeFilter(allTrackFilterValue);
     setTrackYearFromFilter(allTrackFilterValue);
     setTrackYearToFilter(allTrackFilterValue);
+  };
+  const updateTrackFavorite = async (track: Track, favorite: boolean) => {
+    const previousFavorite = track.is_favorite;
+    setPendingTrackFavorites((current) =>
+      current.includes(track.path) ? current : current.concat(track.path),
+    );
+    setData((prev) =>
+      prev
+        ? {
+            ...prev,
+            library: {
+              ...prev.library,
+              tracks: prev.library.tracks.map((entry) =>
+                entry.path === track.path ? { ...entry, is_favorite: favorite } : entry,
+              ),
+            },
+          }
+        : prev,
+    );
+
+    try {
+      const next = await persistTrackFavorite(track.path, favorite);
+      setData(next);
+      setStatus(`${favorite ? 'Added favourite' : 'Removed favourite'} · ${track.title}`);
+    } catch (error) {
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              library: {
+                ...prev.library,
+                tracks: prev.library.tracks.map((entry) =>
+                  entry.path === track.path ? { ...entry, is_favorite: previousFavorite } : entry,
+                ),
+              },
+            }
+          : prev,
+      );
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingTrackFavorites((current) => current.filter((path) => path !== track.path));
+    }
   };
   const updateTrackRating = async (track: Track, rating: number | null) => {
     const previousRating = track.rating ?? null;
@@ -1350,6 +1825,42 @@ function App() {
       setPendingTrackRatings((current) => current.filter((path) => path !== track.path));
     }
   };
+  const setOfflineCopiesByPaths = async (trackPaths: string[], shouldDownload: boolean, label: string) => {
+    const normalizedPaths = uniqueInOrder(trackPaths.filter(Boolean));
+    if (normalizedPaths.length === 0) {
+      return;
+    }
+
+    setPendingOfflinePaths((current) => uniqueSorted(current.concat(normalizedPaths)));
+
+    try {
+      const next = shouldDownload
+        ? await downloadOfflineTracks(normalizedPaths)
+        : await removeOfflineTracks(normalizedPaths);
+      setOfflineDownloads(next);
+      setStatus(
+        shouldDownload
+          ? `Downloaded for offline playback · ${label}`
+          : normalizedPaths.length === 1
+            ? `Removed offline copy · ${label}`
+            : `Removed offline copies · ${label}`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingOfflinePaths((current) => current.filter((path) => !normalizedPaths.includes(path)));
+    }
+  };
+  const toggleTrackOffline = async (track: Track, shouldDownload: boolean) => {
+    await setOfflineCopiesByPaths([track.path], shouldDownload, track.title);
+  };
+  const toggleTracksOffline = async (tracks: Track[], shouldDownload: boolean, label: string) => {
+    const trackPaths = uniqueSorted(tracks.map((track) => track.path).filter(Boolean));
+    if (trackPaths.length === 0) {
+      return;
+    }
+    await setOfflineCopiesByPaths(trackPaths, shouldDownload, label);
+  };
   const adjustTrackBpmValue = async (track: Track, adjustment: TrackBpmAdjustment) => {
     setPendingTrackBpms((current) =>
       current.includes(track.path) ? current : current.concat(track.path),
@@ -1386,7 +1897,8 @@ function App() {
       setPendingTrackBpms((current) => current.filter((path) => path !== track.path));
     }
   };
-  const saveExactTrackBpmValue = async (track: Track, bpm: number) => {
+  const saveExactTrackBpmValue = async (editorState: TrackBpmEditorState, bpm: number) => {
+    const { track, dismissFromAudit } = editorState;
     setPendingTrackBpms((current) =>
       current.includes(track.path) ? current : current.concat(track.path),
     );
@@ -1394,11 +1906,24 @@ function App() {
     try {
       setBusy('Saving BPM…');
       const next = await persistTrackBpmValue(track.path, bpm, metadataEditMode);
+      const shouldAdvance = dismissFromAudit && track.path === currentBpmAuditReviewPath;
+      const updatedTrack = next.library.tracks.find((entry) => entry.path === track.path) ?? { ...track, bpm };
+      const nextReviewTrack =
+        shouldAdvance
+          ? bpmAuditItems[bpmAuditItems.findIndex((entry) => entry.track.path === track.path) + 1]?.track ?? null
+          : null;
       setData(next);
+      if (dismissFromAudit) {
+        const reviewedKey = bpmAuditDismissalKey(updatedTrack);
+        setReviewedBpmAuditKeys((current) => (current.includes(reviewedKey) ? current : current.concat(reviewedKey)));
+      }
       setTrackBpmEditor(null);
       setStatus(
         `${metadataEditMode === 'write_to_files' ? 'Updated file BPM' : 'Saved BPM correction'} · ${track.title}`,
       );
+      if (shouldAdvance && nextReviewTrack) {
+        void startBpmAuditReview(nextReviewTrack);
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1513,13 +2038,16 @@ function App() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
+    const appSettings = data?.settings ?? null;
+    const offlinePathMap = offlineDownloadByLocalPath;
     void (async () => {
       const dispose = await listen<{ name: string; data: unknown }>(
         'mpv-property',
         (event) => {
           const { name, data } = event.payload;
           if (name === 'path') {
-            const path = typeof data === 'string' ? data : null;
+            const rawPath = typeof data === 'string' ? data : null;
+            const path = normalizeNeedleBackendPlaybackPath(rawPath, appSettings, offlinePathMap);
             backendPathRef.current = path;
             backendIdleRef.current = path == null;
             setCurrentPath(path);
@@ -1608,19 +2136,231 @@ function App() {
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [queuePaths]);
+  }, [data, offlineDownloadByLocalPath, queuePaths]);
 
   useEffect(() => {
     void (async () => {
       try {
-        setData(await bootstrapApp());
+        const [bootstrapResult, runtimeInfoResult, offlineDownloadsResult] = await Promise.allSettled([
+          bootstrapAppState(),
+          getRuntimeInfo(),
+          listOfflineDownloads(),
+        ]);
+
+        if (bootstrapResult.status === 'rejected') {
+          throw bootstrapResult.reason;
+        }
+
+        applyBootstrapState(bootstrapResult.value);
+        if (runtimeInfoResult.status === 'fulfilled') {
+          setRuntimeInfo(runtimeInfoResult.value);
+        }
+        if (offlineDownloadsResult.status === 'fulfilled') {
+          setOfflineDownloads(offlineDownloadsResult.value);
+        }
       } catch (error) {
-        setStatus(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        setStartupError(message);
+        setStatus(message);
       } finally {
         setLoading(false);
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (!isNeedleBackendMode || typeof window === 'undefined') {
+      return;
+    }
+
+    const handleBackendConnectivityLoss = (event: Event) => {
+      const detail =
+        event instanceof CustomEvent && event.detail && typeof event.detail === 'object'
+          ? (event.detail as { message?: string })
+          : null;
+
+      if (isBackendOfflineMode) {
+        return;
+      }
+
+      if (backendOfflineRecoveryRef.current) {
+        return;
+      }
+
+      backendOfflineRecoveryRef.current = true;
+      backendOfflineRecoveryStartedAtRef.current = Date.now();
+      void (async () => {
+        try {
+          const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
+            bootstrapAppState(),
+            listOfflineDownloads(),
+          ]);
+          applyBootstrapState(nextBootstrapState);
+          setOfflineDownloads(nextOfflineDownloads);
+          setStatus(
+            nextBootstrapState.startup_notice ??
+              detail?.message ??
+              'Needle backend unreachable · offline mode active',
+          );
+        } catch (error) {
+          setStatus(detail?.message ?? (error instanceof Error ? error.message : String(error)));
+        } finally {
+          backendOfflineRecoveryRef.current = false;
+          backendOfflineRecoveryStartedAtRef.current = null;
+        }
+      })();
+    };
+
+    window.addEventListener('needle-backend-connectivity-error', handleBackendConnectivityLoss as EventListener);
+    return () => {
+      window.removeEventListener(
+        'needle-backend-connectivity-error',
+        handleBackendConnectivityLoss as EventListener,
+      );
+    };
+  }, [isBackendOfflineMode, isNeedleBackendMode]);
+
+  useEffect(() => {
+    if (!isNeedleBackendMode || !data?.settings.needle_backend_url || typeof window === 'undefined') {
+      return;
+    }
+
+    let cancelled = false;
+    const heartbeatIntervalMs = 3000;
+    const staleGuardAfterMs = 15000;
+    const wakeHeartbeatThrottleMs = 1200;
+    const offlineTransferRunning =
+      offlineDownloadProgress?.status === 'running' &&
+      (offlineDownloadProgress.operation === 'download' || offlineDownloadProgress.operation === 'remove');
+
+    const releaseStaleGuards = () => {
+      const now = Date.now();
+
+      if (
+        backendHeartbeatInFlightRef.current &&
+        backendHeartbeatStartedAtRef.current != null &&
+        now - backendHeartbeatStartedAtRef.current >= staleGuardAfterMs
+      ) {
+        backendHeartbeatInFlightRef.current = false;
+        backendHeartbeatStartedAtRef.current = null;
+      }
+
+      if (
+        backendOfflineRecoveryRef.current &&
+        backendOfflineRecoveryStartedAtRef.current != null &&
+        now - backendOfflineRecoveryStartedAtRef.current >= staleGuardAfterMs
+      ) {
+        backendOfflineRecoveryRef.current = false;
+        backendOfflineRecoveryStartedAtRef.current = null;
+      }
+    };
+
+    const triggerOfflineRecovery = (message?: string) => {
+      window.dispatchEvent(
+        new CustomEvent(backendConnectivityEventName, {
+          detail: {
+            message,
+            happenedAt: Date.now(),
+            source: 'heartbeat',
+          },
+        }),
+      );
+    };
+
+    const runHeartbeat = async (options?: { restoreIfOnline?: boolean }) => {
+      releaseStaleGuards();
+
+      if (offlineTransferRunning || backendHeartbeatInFlightRef.current || backendOfflineRecoveryRef.current) {
+        return;
+      }
+
+      backendHeartbeatInFlightRef.current = true;
+      backendHeartbeatStartedAtRef.current = Date.now();
+      try {
+        await getNeedleBackendStatus(data.settings.needle_backend_url);
+        if (cancelled || !options?.restoreIfOnline || !isBackendOfflineMode) {
+          return;
+        }
+
+        const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
+          bootstrapAppState(),
+          listOfflineDownloads(),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        applyBootstrapState(nextBootstrapState);
+        setOfflineDownloads(nextOfflineDownloads);
+        if (!nextBootstrapState.offline_mode) {
+          setStatus(
+            `Needle backend reconnected · ${nextBootstrapState.bootstrap.library.track_count} tracks`,
+          );
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        triggerOfflineRecovery(message);
+      } finally {
+        backendHeartbeatInFlightRef.current = false;
+        backendHeartbeatStartedAtRef.current = null;
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void runHeartbeat({ restoreIfOnline: true });
+    }, heartbeatIntervalMs);
+
+    const handleBrowserOffline = () => {
+      triggerOfflineRecovery("Needle couldn't reach the configured homeserver.");
+    };
+
+    const handleBrowserOnline = () => {
+      void runHeartbeat({ restoreIfOnline: true });
+    };
+
+    const handleWakeLikeEvent = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+
+      const now = Date.now();
+      if (now - backendWakeHeartbeatAtRef.current < wakeHeartbeatThrottleMs) {
+        return;
+      }
+
+      backendWakeHeartbeatAtRef.current = now;
+      void runHeartbeat({ restoreIfOnline: true });
+    };
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        handleWakeLikeEvent();
+      }
+    };
+
+    window.addEventListener('offline', handleBrowserOffline);
+    window.addEventListener('online', handleBrowserOnline);
+    window.addEventListener('focus', handleWakeLikeEvent);
+    window.addEventListener('pageshow', handleWakeLikeEvent);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+    void runHeartbeat({ restoreIfOnline: true });
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('offline', handleBrowserOffline);
+      window.removeEventListener('online', handleBrowserOnline);
+      window.removeEventListener('focus', handleWakeLikeEvent);
+      window.removeEventListener('pageshow', handleWakeLikeEvent);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+    };
+  }, [data?.settings.needle_backend_url, isBackendOfflineMode, isNeedleBackendMode, offlineDownloadProgress]);
 
   useEffect(() => {
     if (!data) {
@@ -1648,6 +2388,12 @@ function App() {
   }, [data?.settings.library_roots]);
 
   useEffect(() => {
+    setNeedleBackendStatus(null);
+    setNeedleBackendMigrationReport(null);
+    setNeedleBackendFeedback(null);
+  }, [data?.settings.needle_backend_url]);
+
+  useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void (async () => {
@@ -1658,6 +2404,108 @@ function App() {
         }
 
         setMaintenanceLog((current) => [...current.slice(-79), formatMaintenanceLogLine(message)]);
+      });
+      if (cancelled) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!offlineDownloadProgress) {
+      offlineDownloadsSyncProgressRef.current = null;
+      return;
+    }
+
+    if (offlineDownloadProgress.operation !== 'download' && offlineDownloadProgress.operation !== 'remove') {
+      return;
+    }
+
+    const syncKey = [
+      offlineDownloadProgress.operation,
+      offlineDownloadProgress.status,
+      offlineDownloadProgress.completed_tracks,
+      offlineDownloadProgress.current_track_path ?? '',
+    ].join(':');
+
+    if (offlineDownloadsSyncProgressRef.current === syncKey) {
+      return;
+    }
+
+    const shouldSync =
+      offlineDownloadProgress.status === 'completed' || offlineDownloadProgress.status === 'error';
+
+    if (!shouldSync) {
+      return;
+    }
+
+    offlineDownloadsSyncProgressRef.current = syncKey;
+    void (async () => {
+      try {
+        setOfflineDownloads(await listOfflineDownloads());
+        if (offlineDownloadProgress.operation === 'download') {
+          setOptimisticOfflinePaths([]);
+        }
+      } catch {
+        // Keep the existing list until the next successful refresh.
+      }
+    })();
+  }, [offlineDownloadProgress]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const dispose = await listen<OfflineDownloadProgress>('offline-download-progress', (event) => {
+        const payload = event.payload;
+        if (!payload || typeof payload !== 'object') {
+          return;
+        }
+
+        setOfflineDownloadProgress(payload);
+        if (payload.operation === 'download') {
+          if (
+            payload.status === 'running' &&
+            payload.current_track_path &&
+            payload.completed_tracks > offlineCompletedTracksRef.current
+          ) {
+            offlineCompletedTracksRef.current = payload.completed_tracks;
+            setOptimisticOfflinePaths((current) =>
+              current.includes(payload.current_track_path as string)
+                ? current
+                : current.concat(payload.current_track_path as string),
+            );
+          }
+
+          const downloadedBytes = payload.current_track_downloaded_bytes;
+          const totalBytes = payload.current_track_total_bytes;
+          if (
+            payload.status === 'running' &&
+            payload.current_track_path &&
+            typeof downloadedBytes === 'number' &&
+            typeof totalBytes === 'number' &&
+            totalBytes > 0 &&
+            downloadedBytes >= totalBytes
+          ) {
+            setOptimisticOfflinePaths((current) =>
+              current.includes(payload.current_track_path as string)
+                ? current
+                : current.concat(payload.current_track_path as string),
+            );
+          }
+          if (payload.status === 'completed' || payload.status === 'error') {
+            offlineCompletedTracksRef.current = 0;
+          }
+        } else if (payload.operation === 'remove' && (payload.status === 'completed' || payload.status === 'error')) {
+          offlineCompletedTracksRef.current = 0;
+        }
       });
       if (cancelled) {
         dispose();
@@ -1848,6 +2696,9 @@ function App() {
     if (!data) {
       return;
     }
+    if (!data.settings.volume_leveling_enabled) {
+      return;
+    }
 
     let cancelled = false;
     void (async () => {
@@ -1933,8 +2784,97 @@ function App() {
     };
   }, [isQueueOpen]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(bpmAuditDismissedStorageKey, JSON.stringify(dismissedBpmAuditKeys));
+  }, [dismissedBpmAuditKeys]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(bpmAuditDismissedPathStorageKey, JSON.stringify(dismissedBpmAuditPaths));
+  }, [dismissedBpmAuditPaths]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(bpmAuditReviewedStorageKey, JSON.stringify(reviewedBpmAuditKeys));
+  }, [reviewedBpmAuditKeys]);
+
   const allTracks = data?.library.tracks ?? [];
+  const rawBpmAuditItems = useMemo(() => findSuspiciousBpmTracks(allTracks), [allTracks]);
+  const bpmAuditItems = useMemo(
+    () =>
+      rawBpmAuditItems.filter(
+        (item) =>
+          !dismissedBpmAuditKeySet.has(bpmAuditDismissalKey(item.track)) &&
+          !dismissedBpmAuditPathSet.has(item.track.path) &&
+          !reviewedBpmAuditKeySet.has(bpmAuditDismissalKey(item.track)),
+      ),
+    [dismissedBpmAuditKeySet, dismissedBpmAuditPathSet, rawBpmAuditItems, reviewedBpmAuditKeySet],
+  );
+  const dismissedBpmAuditCount = rawBpmAuditItems.length - bpmAuditItems.length;
+  const bpmAuditTrackPaths = useMemo(
+    () => bpmAuditItems.map((item) => item.track.path),
+    [bpmAuditItems],
+  );
+  const bpmAuditTrackPathSet = useMemo(() => new Set(bpmAuditTrackPaths), [bpmAuditTrackPaths]);
   const trackByPath = useMemo(() => new Map(allTracks.map((track) => [track.path, track])), [allTracks]);
+  const activeOfflineDownloadTrackPath =
+    offlineDownloadProgress?.operation === 'download' && offlineDownloadProgress.status === 'running'
+      ? offlineDownloadProgress.current_track_path
+      : null;
+  const activeOfflineDownloadTrackProgress =
+    offlineDownloadProgress?.operation === 'download' &&
+    offlineDownloadProgress.status === 'running' &&
+    activeOfflineDownloadTrackPath &&
+    offlineDownloadProgress.current_track_path === activeOfflineDownloadTrackPath &&
+    typeof offlineDownloadProgress.current_track_downloaded_bytes === 'number' &&
+    typeof offlineDownloadProgress.current_track_total_bytes === 'number' &&
+    offlineDownloadProgress.current_track_total_bytes > 0
+      ? Math.max(
+          0,
+          Math.min(
+            offlineDownloadProgress.current_track_downloaded_bytes /
+              offlineDownloadProgress.current_track_total_bytes,
+            1,
+          ),
+        )
+      : null;
+  const offlineDownloadCurrentLabel = useMemo(() => {
+    const currentPath = offlineDownloadProgress?.current_track_path;
+    if (!currentPath) {
+      return null;
+    }
+    return trackByPath.get(currentPath)?.title ?? currentPath.split('/').pop() ?? currentPath;
+  }, [offlineDownloadProgress?.current_track_path, trackByPath]);
+  const offlineTrackDetails = useMemo(
+    () =>
+      Object.fromEntries(
+        offlineDownloads.map((entry) => {
+          const track = trackByPath.get(entry.track_path);
+          return [
+            entry.track_path,
+            {
+              title: track?.title ?? entry.track_path.split('/').pop() ?? entry.track_path,
+              subtitle: track?.artist
+                ? `${track.artist}${track.album ? ` — ${track.album}` : ''}`
+                : entry.track_path,
+            },
+          ];
+        }),
+      ),
+    [offlineDownloads, trackByPath],
+  );
+  const removeOfflineDownloadByPath = async (trackPath: string) => {
+    const label = trackByPath.get(trackPath)?.title ?? 'Selected track';
+    await setOfflineCopiesByPaths([trackPath], false, label);
+  };
+  const clearOfflineDownloads = async () => {
+    const trackPaths = offlineDownloads.map((entry) => entry.track_path);
+    if (trackPaths.length === 0) {
+      return;
+    }
+    await setOfflineCopiesByPaths(trackPaths, false, 'offline cache');
+  };
 
   const restoreSession = async (
     session: PlaybackSession,
@@ -2061,14 +3001,52 @@ function App() {
   );
 
   useEffect(() => {
+    playbackSessionRef.current = playbackSession;
+  }, [playbackSession]);
+
+  useEffect(() => {
     if (!sessionHydratedRef.current) return;
 
+    if (isNeedleBackendMode && isPlaying) {
+      return;
+    }
+
+    const persistDelayMs = currentPath ? 900 : 150;
     const timeout = window.setTimeout(() => {
       void persistSession(playbackSession);
-    }, currentPath ? 900 : 150);
+    }, persistDelayMs);
 
     return () => window.clearTimeout(timeout);
-  }, [currentPath, playbackSession]);
+  }, [currentPath, isNeedleBackendMode, isPlaying, playbackSession]);
+
+  useEffect(() => {
+    if (!isNeedleBackendMode || typeof window === 'undefined') {
+      return;
+    }
+
+    const persistBeforeUnload = () => {
+      if (!sessionHydratedRef.current) {
+        return;
+      }
+
+      const latestSession = playbackSessionRef.current;
+      if (!latestSession) {
+        return;
+      }
+
+      void savePlaybackSession({
+        ...latestSession,
+        paused: true,
+      }).catch(() => {});
+    };
+
+    window.addEventListener('pagehide', persistBeforeUnload);
+    window.addEventListener('beforeunload', persistBeforeUnload);
+    return () => {
+      window.removeEventListener('pagehide', persistBeforeUnload);
+      window.removeEventListener('beforeunload', persistBeforeUnload);
+    };
+  }, [isNeedleBackendMode]);
 
   const smartPlaylists = useMemo(
     () => generateAutoPlaylists(allTracks),
@@ -2076,31 +3054,33 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [allTracks, featuredSeed],
   );
-  const dashboardPlaylists = useMemo(() => {
+  const dashboardPlaylistSections = useMemo(() => {
     const byId = new Map(smartPlaylists.map((playlist) => [playlist.id, playlist]));
-    const topGenrePlaylist = smartPlaylists.find((playlist) => playlist.id.startsWith('genre:')) ?? null;
-    const ordered: AutoPlaylist[] = [];
-
-    const pushIfPresent = (playlist: AutoPlaylist | null | undefined) => {
-      if (!playlist || ordered.some((entry) => entry.id === playlist.id)) return;
-      ordered.push(playlist);
+    const signaturePlaylists = smartPlaylists.filter((playlist) => playlist.id.startsWith('signature:'));
+    const section = (
+      id: string,
+      title: string,
+      entries: Array<AutoPlaylist | null | undefined>,
+    ): DashboardPlaylistSection | null => {
+      const playlists = entries.filter((entry): entry is AutoPlaylist => Boolean(entry));
+      return playlists.length > 0 ? { id, title, playlists } : null;
     };
 
-    pushIfPresent(byId.get('history:most-played'));
-    pushIfPresent(byId.get('history:recent'));
-    pushIfPresent(topGenrePlaylist);
-    pushIfPresent(byId.get('library:first-spin'));
-    pushIfPresent(byId.get('vibes:wind-down'));
-    pushIfPresent(byId.get('vibes:cruise-and-groove'));
-    pushIfPresent(byId.get('vibes:lift-and-energy'));
-    pushIfPresent(byId.get('vibes:get-on-your-feet'));
-
-    for (const playlist of smartPlaylists) {
-      if (ordered.length >= 8) break;
-      pushIfPresent(playlist);
-    }
-
-    return ordered.slice(0, 8);
+    return [
+      section('library', 'From your library', [
+        byId.get('library:favorites'),
+        byId.get('ratings:top-rated'),
+        byId.get('history:most-played'),
+        byId.get('history:recent'),
+      ]),
+      section('signatures', 'Library signatures', signaturePlaylists),
+      section('vibes', 'Vibes', [
+        byId.get('vibes:wind-down'),
+        byId.get('vibes:cruise-and-groove'),
+        byId.get('vibes:lift-and-energy'),
+        byId.get('vibes:get-on-your-feet'),
+      ]),
+    ].filter((entry): entry is DashboardPlaylistSection => Boolean(entry));
   }, [smartPlaylists]);
 
   const manualPlaylists = data?.playlists ?? [];
@@ -2177,6 +3157,10 @@ function App() {
     () => uniqueSorted(scopedTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
     [scopedTracks],
   );
+  const trackVibeOptions = useMemo(() => {
+    const presentVibes = new Set(scopedTracks.map((track) => vibeKeyForTrack(track)).filter(Boolean));
+    return VIBE_BUCKETS.filter((bucket) => presentVibes.has(bucket.key));
+  }, [scopedTracks]);
   const trackYearOptions = useMemo(
     () =>
       Array.from(new Set(scopedTracks.map((track) => track.year).filter((year): year is number => year != null)))
@@ -2200,6 +3184,9 @@ function App() {
       list = list.filter((track) =>
         expectedTrackGenre ? splitTrackGenreKeys(effectiveTrackGenre(track)).includes(expectedTrackGenre) : true,
       );
+    }
+    if (!playlistMode && trackVibeFilter !== allTrackFilterValue) {
+      list = list.filter((track) => vibeKeyForTrack(track) === trackVibeFilter);
     }
     const startYear = playlistMode ? null : yearFilterNumber(trackYearFromFilter);
     const endYear = playlistMode ? null : yearFilterNumber(trackYearToFilter);
@@ -2226,6 +3213,7 @@ function App() {
     scopedTracks,
     trackArtistFilter,
     trackGenreFilter,
+    trackVibeFilter,
     trackYearFromFilter,
     trackYearToFilter,
     search,
@@ -2269,13 +3257,14 @@ function App() {
   }, [selectedSmartPlaylist, smartPlaylistGenreOptions]);
 
   const albums = useMemo(() => {
-    const map = new Map<string, AlbumSummary>();
+    const map = new Map<string, AlbumSummary & { downloadedCount: number }>();
     for (const t of allTracks) {
       const key = trackAlbumKey(t);
       if (!key || !t.album) continue;
       const existing = map.get(key);
       if (existing) {
         existing.count += 1;
+        if (offlineAvailableTrackPathSet.has(t.path)) existing.downloadedCount += 1;
         if (t.added_at && (!existing.addedAt || t.added_at > existing.addedAt)) {
           existing.addedAt = t.added_at;
         }
@@ -2295,11 +3284,16 @@ function App() {
           samplePath: t.path,
           is_vinyl_rip: t.is_vinyl_rip,
           addedAt: t.added_at ?? null,
+          downloadedCount: offlineAvailableTrackPathSet.has(t.path) ? 1 : 0,
+          offlineAvailability: 'none',
         });
       }
     }
-    return Array.from(map.values());
-  }, [allTracks]);
+    return Array.from(map.values()).map(({ downloadedCount, ...album }) => ({
+      ...album,
+      offlineAvailability: offlineAvailabilityFromCounts(downloadedCount, album.count),
+    }));
+  }, [allTracks, offlineAvailableTrackPathSet]);
   const sortedAlbums = useMemo(() => {
     return albums.slice().sort((a, b) => {
       if (albumSort === 'artist') {
@@ -2334,7 +3328,7 @@ function App() {
   const recentAlbums = useMemo(() => {
     const withDate = albums.filter((a) => Boolean(a.addedAt));
     if (withDate.length === 0) return [];
-    return withDate.slice().sort((a, b) => (b.addedAt ?? '').localeCompare(a.addedAt ?? '')).slice(0, 8);
+    return withDate.slice().sort((a, b) => (b.addedAt ?? '').localeCompare(a.addedAt ?? '')).slice(0, 5);
   }, [albums]);
 
   const artistSummaries = useMemo(() => {
@@ -2420,6 +3414,12 @@ function App() {
     () => (currentPath ? trackByPath.get(currentPath) ?? null : currentQueueTrack),
     [currentPath, currentQueueTrack, trackByPath],
   );
+  const currentTrackArtwork = useCoverArt(currentTrack?.path, {
+    enabled: Boolean(currentTrack),
+  });
+  const currentBpmAuditReviewPath =
+    currentTrack && bpmAuditTrackPathSet.has(currentTrack.path) ? currentTrack.path : null;
+  const currentTrackFavoritePending = currentTrack ? pendingTrackFavorites.includes(currentTrack.path) : false;
   const activeTrack = useMemo(
     () => (currentPath ? trackByPath.get(currentPath) ?? currentQueueTrack ?? null : null),
     [currentPath, currentQueueTrack, trackByPath],
@@ -2474,10 +3474,14 @@ function App() {
   const hasTrackFilters =
     (!playlistMode && trackArtistFilter !== allTrackFilterValue) ||
     (!playlistMode && trackGenreFilter !== allTrackFilterValue) ||
+    (!playlistMode && trackVibeFilter !== allTrackFilterValue) ||
     yearFilterSummary !== null;
   const activeTrackFilterSummary = [
     !playlistMode && trackArtistFilter !== allTrackFilterValue ? trackArtistFilter : null,
     !playlistMode && trackGenreFilter !== allTrackFilterValue ? trackGenreFilter : null,
+    !playlistMode && trackVibeFilter !== allTrackFilterValue
+      ? VIBE_BUCKETS.find((bucket) => bucket.key === trackVibeFilter)?.label ?? trackVibeFilter
+      : null,
     yearFilterSummary,
   ]
     .filter(Boolean)
@@ -2507,6 +3511,7 @@ function App() {
     trackSort,
     trackArtistFilter,
     trackGenreFilter,
+    trackVibeFilter,
     trackYearFromFilter,
     trackYearToFilter,
     selectedAlbum,
@@ -2575,6 +3580,43 @@ function App() {
   const progressStyle = {
     background: `linear-gradient(to right, var(--accent) 0%, var(--accent) ${progressPercent}%, var(--border) ${progressPercent}%, var(--border) 100%)`,
   };
+  const nowPlayingElapsedSecond = Math.floor(clampedPosition);
+
+  useEffect(() => {
+    if (!currentTrack) {
+      void clearNowPlayingMetadata().catch(() => {});
+      return;
+    }
+
+    void updateNowPlayingMetadata({
+      title: currentTrack.title,
+      artist: currentTrack.artist,
+      album: currentTrack.album,
+      durationSeconds: effectiveDuration > 0 ? effectiveDuration : null,
+      elapsedSeconds: null,
+      playing: isPlaying,
+      artworkDataUrl: currentTrackArtwork,
+      preserveArtwork: currentTrackArtwork == null,
+    }).catch(() => {});
+  }, [
+    currentTrack?.path,
+    currentTrack?.title,
+    currentTrack?.artist,
+    currentTrack?.album,
+    currentTrackArtwork,
+    effectiveDuration,
+    isPlaying,
+  ]);
+
+  useEffect(() => {
+    if (!currentTrack) return;
+
+    void updateNowPlayingPlayback({
+      durationSeconds: effectiveDuration > 0 ? effectiveDuration : null,
+      elapsedSeconds: clampedPosition,
+      playing: isPlaying,
+    }).catch(() => {});
+  }, [currentTrack?.path, effectiveDuration, isPlaying, nowPlayingElapsedSecond]);
 
   const commitSeek = async (position: number | null) => {
     const next = position == null ? null : Math.max(0, Math.min(position, progressMax));
@@ -2600,16 +3642,61 @@ function App() {
 
   const updateSettings = async (next: AppSettings) => {
     if (!data) return;
+    const previousSettings = data.settings;
     const normalizedSettings = {
       ...next,
       accent_color: normalizeAccentColor(next.accent_color),
       tracks_page_size: normalizeTracksPageSize(next.tracks_page_size),
     };
+    const librarySourceChanged = previousSettings.library_source !== normalizedSettings.library_source;
     setData({ ...data, settings: normalizedSettings });
     try {
       await saveSettings(normalizedSettings);
+      if (librarySourceChanged) {
+        const backendUrl = normalizedSettings.needle_backend_url?.trim() ?? '';
+        if (normalizedSettings.library_source === 'needle_backend' && backendUrl.length === 0) {
+          setStatus('Needle backend selected · enter the backend URL to connect this app');
+          return;
+        }
+        setBusy(
+          normalizedSettings.library_source === 'needle_backend'
+            ? 'Connecting to Needle backend…'
+            : 'Loading local library…',
+        );
+        const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
+          bootstrapAppState(),
+          listOfflineDownloads(),
+        ]);
+        applyBootstrapState(nextBootstrapState);
+        setOfflineDownloads(nextOfflineDownloads);
+        setStatus(
+          normalizedSettings.library_source === 'needle_backend'
+            ? nextBootstrapState.offline_mode
+              ? `Needle backend offline · using ${nextBootstrapState.bootstrap.library.track_count} offline track${nextBootstrapState.bootstrap.library.track_count === 1 ? '' : 's'}`
+              : `Connected to Needle backend · ${nextBootstrapState.bootstrap.library.track_count} tracks`
+            : `Switched to local library · ${nextBootstrapState.bootstrap.library.track_count} tracks`,
+        );
+      }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (librarySourceChanged && normalizedSettings.library_source !== 'needle_backend') {
+        setData({ ...data, settings: previousSettings });
+      }
+      if (
+        librarySourceChanged &&
+        normalizedSettings.library_source === 'needle_backend' &&
+        normalizedSettings.needle_backend_url?.trim()
+      ) {
+        setNeedleBackendFeedback({
+          tone: 'error',
+          message: errorMessage,
+        });
+      }
+      setStatus(errorMessage);
+    } finally {
+      if (librarySourceChanged) {
+        setBusy(null);
+      }
     }
   };
 
@@ -2695,6 +3782,86 @@ function App() {
     }
   };
 
+  const checkNeedleBackend = async () => {
+    if (!data) return;
+
+    try {
+      setIsNeedleBackendStatusLoading(true);
+      setNeedleBackendFeedback({
+        tone: 'info',
+        message: 'Checking Needle backend…',
+      });
+      const backendStatus = await getNeedleBackendStatus(data.settings.needle_backend_url);
+      setNeedleBackendStatus(backendStatus);
+      setNeedleBackendFeedback({
+        tone: backendStatus.enabled ? 'success' : 'warning',
+        message: backendStatus.enabled
+          ? `Connected to Needle backend at ${backendStatus.url}`
+          : 'Backend responded, but local Needle library mode is not enabled there yet.',
+      });
+      if (data.settings.library_source === 'needle_backend' && backendStatus.enabled) {
+        setBusy('Loading Needle backend library…');
+        const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
+          bootstrapAppState(),
+          listOfflineDownloads(),
+        ]);
+        applyBootstrapState(nextBootstrapState);
+        setOfflineDownloads(nextOfflineDownloads);
+      }
+      setStatus(
+        backendStatus.enabled
+          ? data.settings.library_source === 'needle_backend'
+            ? `Loaded Needle backend library · ${backendStatus.track_count ?? 0} tracks`
+            : `Needle backend reachable · ${backendStatus.track_count ?? 0} tracks`
+          : 'Needle backend reachable, but local library mode is not enabled there yet',
+      );
+    } catch (error) {
+      setNeedleBackendStatus(null);
+      const message = error instanceof Error ? error.message : String(error);
+      setNeedleBackendFeedback({
+        tone: 'error',
+        message,
+      });
+      setStatus(message);
+    } finally {
+      setIsNeedleBackendStatusLoading(false);
+      setBusy(null);
+    }
+  };
+
+  const migrateNeedleBackend = async () => {
+    if (!data) return;
+
+    try {
+      setIsNeedleBackendMigrationRunning(true);
+      setBusy('Migrating to Needle backend…');
+      setNeedleBackendFeedback({
+        tone: 'info',
+        message: 'Migrating local Needle state to the backend…',
+      });
+      const report = await migrateDesktopStateToNeedleBackend(data.settings.needle_backend_url);
+      setNeedleBackendStatus(report.backend_status);
+      setNeedleBackendMigrationReport(report);
+      setNeedleBackendFeedback({
+        tone: 'success',
+        message: 'Local Needle state migrated to the backend.',
+      });
+      setStatus(
+        `Migrated desktop state · ${report.import_summary.playlists_imported} playlists, ${report.import_summary.track_app_state_imported} track-state rows, ${report.import_summary.track_loudness_imported} loudness rows`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setNeedleBackendFeedback({
+        tone: 'error',
+        message,
+      });
+      setStatus(message);
+    } finally {
+      setIsNeedleBackendMigrationRunning(false);
+      setBusy(null);
+    }
+  };
+
   const refreshAlbumMetadata = async (
     album: string,
     albumArtist: string | null,
@@ -2754,7 +3921,7 @@ function App() {
       setData(next);
       const created = next.playlists
         .filter((playlist) => playlist.name === name)
-        .sort((a, b) => b.id - a.id)[0];
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id.localeCompare(a.id))[0];
       if (created) {
         setSelectedPlaylist({ kind: 'manual', id: created.id });
         setView('tracks');
@@ -2825,9 +3992,10 @@ function App() {
                   ? selectedArtist
                   : null;
             const genreValue = trackGenreFilter !== allTrackFilterValue ? trackGenreFilter : null;
+            const vibeValue = trackVibeFilter !== allTrackFilterValue ? trackVibeFilter : null;
             const yearFromValue = yearFilterNumber(trackYearFromFilter);
             const yearToValue = yearFilterNumber(trackYearToFilter);
-            if (!searchValue && !artistValue && !genreValue && yearFromValue == null && yearToValue == null) {
+            if (!searchValue && !artistValue && !genreValue && !vibeValue && yearFromValue == null && yearToValue == null) {
               return null;
             }
             return {
@@ -2835,6 +4003,7 @@ function App() {
               search: searchValue,
               artist: artistValue,
               genre: genreValue,
+              vibe: vibeValue,
               year_from: yearFromValue,
               year_to: yearToValue,
             };
@@ -2920,6 +4089,7 @@ function App() {
     selectedPlaylistData,
     trackArtistFilter,
     trackGenreFilter,
+    trackVibeFilter,
     trackYearFromFilter,
     trackYearToFilter,
     view,
@@ -3054,7 +4224,7 @@ function App() {
     }
   };
 
-  const moveManualPlaylistTrack = async (playlistId: number, fromIndex: number, toIndex: number) => {
+  const moveManualPlaylistTrack = async (playlistId: string, fromIndex: number, toIndex: number) => {
     try {
       const next = await movePlaylistTrack(playlistId, fromIndex, toIndex);
       setData(next);
@@ -3064,7 +4234,7 @@ function App() {
     }
   };
 
-  const removeManualPlaylistTrack = async (playlistId: number, index: number) => {
+  const removeManualPlaylistTrack = async (playlistId: string, index: number) => {
     try {
       const next = await removePlaylistTrack(playlistId, index);
       setData(next);
@@ -3262,6 +4432,44 @@ function App() {
 
   const play = async (track: Track) => {
     await startQueue([track], `Playing ${track.title}`);
+  };
+
+  const dismissBpmAuditTrack = (track: Pick<Track, 'path' | 'bpm' | 'title'>) => {
+    const key = bpmAuditDismissalKey(track);
+    setDismissedBpmAuditKeys((current) => (current.includes(key) ? current : current.concat(key)));
+    setDismissedBpmAuditPaths((current) => (current.includes(track.path) ? current : current.concat(track.path)));
+  };
+
+  const startBpmAuditReview = async (track: Track) => {
+    const reviewTracks = bpmAuditItems.map((item) => item.track);
+    if (reviewTracks.length === 0) return;
+    await playQueue(reviewTracks, `BPM review · ${track.title}`, {
+      baseTracks: reviewTracks,
+      currentPath: track.path,
+    });
+  };
+
+  const toggleBpmAuditReviewPlayback = async (fallbackTrack?: Track | null) => {
+    if (currentBpmAuditReviewPath) {
+      await togglePlayPause();
+      return;
+    }
+    const target = fallbackTrack ?? bpmAuditItems[0]?.track ?? null;
+    if (!target) return;
+    await startBpmAuditReview(target);
+  };
+
+  const stepBpmAuditReview = async (delta: number) => {
+    if (bpmAuditItems.length === 0 || delta === 0) return;
+    const activeIndex = currentBpmAuditReviewPath
+      ? bpmAuditItems.findIndex((item) => item.track.path === currentBpmAuditReviewPath)
+      : -1;
+    const fallbackIndex = delta > 0 ? 0 : bpmAuditItems.length - 1;
+    const targetIndex = activeIndex >= 0 ? activeIndex + delta : fallbackIndex;
+    if (targetIndex < 0 || targetIndex >= bpmAuditItems.length) return;
+    const target = bpmAuditItems[targetIndex]?.track;
+    if (!target) return;
+    await startBpmAuditReview(target);
   };
 
   const playQueue = async (
@@ -3865,24 +5073,36 @@ function App() {
   const tracksEmptyMessage = !hasLibraryTracks
     ? 'Add a folder from the sidebar to import FLAC, ALAC, WAV, MP3, OGG, M4A, and more.'
     : !selectedSmartPlaylist && search.trim()
-        ? `Try a different search than “${search.trim()}”.`
+      ? `Try a different search than “${search.trim()}”.`
       : smartPlaylistHasGenreFocus
         ? 'Try a different genre combination or clear the mix focus.'
-      : hasTrackFilters
-        ? 'Try widening the artist, genre, or year range filters.'
-      : selectedManualPlaylist
-        ? 'This saved playlist is empty right now.'
-      : selectedArtist
-          ? `No imported tracks are currently linked to ${selectedArtist}.`
-          : selectedPlaylistData
-            ? 'This playlist does not have any tracks available right now.'
-            : 'There is nothing to show in this view yet.';
+        : hasTrackFilters
+          ? 'Try widening the artist, genre, vibe, or year range filters.'
+          : selectedManualPlaylist
+            ? 'This saved playlist is empty right now.'
+            : selectedArtist
+              ? `No imported tracks are currently linked to ${selectedArtist}.`
+              : selectedPlaylistData
+                ? 'This playlist does not have any tracks available right now.'
+                : 'There is nothing to show in this view yet.';
 
   if (loading) {
     return <div className="fullscreen-message">Loading…</div>;
   }
   if (!data) {
-    return <div className="fullscreen-message">Failed to initialize.</div>;
+    return (
+      <div className="fullscreen-message">
+        <div className="startup-failure-card" role="alert">
+          <div className="startup-failure-eyebrow">Startup problem</div>
+          <h1>Needle couldn&apos;t finish launching</h1>
+          <p>{startupError ?? 'The app failed to initialize.'}</p>
+          <p>
+            If your homeserver is offline, bring it back and relaunch Needle. Once the app has connected at
+            least once, it will reuse its cached library and downloaded tracks for offline playback.
+          </p>
+        </div>
+      </div>
+    );
   }
 
   const lib = data.library;
@@ -4037,13 +5257,21 @@ function App() {
       </aside>
 
       <main className="content">
+        {backendModeNotice && (
+          <div className="connection-banner" role="status">
+            <div className="connection-banner-title">Offline mode</div>
+            <div className="connection-banner-copy">
+              {backendModeNotice} Needle will switch back automatically when the homeserver is reachable again.
+            </div>
+          </div>
+        )}
         {view === 'dashboard' && (
           <DashboardView
             tracks={allTracks}
             albums={albums}
             recentAlbums={recentAlbums}
             artists={allArtists}
-            playlists={dashboardPlaylists}
+            playlistSections={dashboardPlaylistSections}
             currentTrack={currentTrack}
             isPlaying={isPlaying}
             featuredSeed={featuredSeed}
@@ -4079,6 +5307,8 @@ function App() {
             onOpenView={(v) => setView(v)}
             onPlay={play}
             busy={!!busy}
+            isNeedleBackendMode={isNeedleBackendMode}
+            isBackendOfflineMode={isBackendOfflineMode}
           />
         )}
 
@@ -4110,6 +5340,9 @@ function App() {
             genreFilterValue={trackGenreFilter}
             onGenreFilterChange={setTrackGenreFilter}
             genreFilterOptions={trackGenreOptions}
+            vibeFilterValue={trackVibeFilter}
+            onVibeFilterChange={setTrackVibeFilter}
+            vibeFilterOptions={trackVibeOptions}
             yearFilterFromValue={trackYearFromFilter}
             onYearFilterFromChange={updateTrackYearFromFilter}
             yearFilterToValue={trackYearToFilter}
@@ -4160,6 +5393,14 @@ function App() {
               )
             }
             onClearSmartPlaylistGenres={() => setSelectedSmartPlaylistGenres([])}
+            onToggleFavorite={updateTrackFavorite}
+            pendingFavoritePaths={pendingTrackFavorites}
+            showOfflineControls={isNeedleBackendMode && !isBackendOfflineMode}
+            isOfflineAvailable={(track) => offlineAvailableTrackPathSet.has(track.path)}
+            pendingOfflinePaths={pendingOfflinePaths}
+            activeOfflineDownloadTrackPath={activeOfflineDownloadTrackPath}
+            activeOfflineDownloadTrackProgress={activeOfflineDownloadTrackProgress}
+            onToggleOffline={(track, shouldDownload) => void toggleTrackOffline(track, shouldDownload)}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
             metadataEditMode={metadataEditMode}
@@ -4278,6 +5519,23 @@ function App() {
                 suggestedName: `${selectedAlbumSummary.album} picks`,
               })
             }
+            showOfflineActions={isNeedleBackendMode && !isBackendOfflineMode}
+            isBackendOfflineMode={isBackendOfflineMode}
+            areAllTracksOffline={tracksForAlbum(selectedAlbum).every((track) => offlineAvailableTrackPathSet.has(track.path))}
+            hasAnyOfflineTracks={tracksForAlbum(selectedAlbum).some((track) => offlineAvailableTrackPathSet.has(track.path))}
+            isOfflineAvailable={(track) => offlineAvailableTrackPathSet.has(track.path)}
+            pendingOfflinePaths={pendingOfflinePaths}
+            activeOfflineDownloadTrackPath={activeOfflineDownloadTrackPath}
+            activeOfflineDownloadTrackProgress={activeOfflineDownloadTrackProgress}
+            onToggleOfflineTrack={(track, shouldDownload) => void toggleTrackOffline(track, shouldDownload)}
+            onDownloadAlbumOffline={() =>
+              void toggleTracksOffline(tracksForAlbum(selectedAlbum), true, selectedAlbumSummary.album)
+            }
+            onRemoveAlbumOffline={() =>
+              void toggleTracksOffline(tracksForAlbum(selectedAlbum), false, selectedAlbumSummary.album)
+            }
+            onToggleFavorite={updateTrackFavorite}
+            pendingFavoritePaths={pendingTrackFavorites}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
             metadataEditMode={metadataEditMode}
@@ -4331,6 +5589,7 @@ function App() {
             layoutMode={artistLayoutMode}
             onLayoutModeChange={setArtistLayoutMode}
             onSelect={(artist) => openArtist(artist, artistBrowseMode)}
+            isBackendOfflineMode={isBackendOfflineMode}
           />
         )}
 
@@ -4404,18 +5663,27 @@ function App() {
                 suggestedName: `${selectedArtistProfile} picks`,
               })
             }
+            onToggleFavorite={updateTrackFavorite}
+            pendingFavoritePaths={pendingTrackFavorites}
             onSetRating={updateTrackRating}
             pendingRatingPaths={pendingTrackRatings}
+            activeOfflineDownloadTrackPath={activeOfflineDownloadTrackPath}
+            activeOfflineDownloadTrackProgress={activeOfflineDownloadTrackProgress}
             metadataEditMode={metadataEditMode}
             onAdjustBpm={adjustTrackBpmValue}
             onOpenBpmEditor={(track) => setTrackBpmEditor({ track })}
             pendingBpmPaths={pendingTrackBpms}
+            isNeedleBackendMode={isNeedleBackendMode}
+            isBackendOfflineMode={isBackendOfflineMode}
+            onSetBusy={setBusy}
+            onSetStatus={setStatus}
           />
         )}
 
         {view === 'settings' && (
           <SettingsView
             settings={data.settings}
+            runtimeInfo={runtimeInfo}
             currentAccentColor={currentAccentColor}
             onChange={updateSettings}
             onAddFolder={importFolder}
@@ -4431,6 +5699,38 @@ function App() {
             loudnessAnalysisFailures={loudnessAnalysisFailures}
             onCopyLoudnessFailures={copyLoudnessAnalysisFailures}
             missingLibraryRoots={missingLibraryRoots}
+            backendStatus={needleBackendStatus}
+            backendMigrationReport={needleBackendMigrationReport}
+            backendStatusBusy={isNeedleBackendStatusLoading}
+            backendMigrationBusy={isNeedleBackendMigrationRunning}
+            onCheckBackend={checkNeedleBackend}
+            onMigrateBackend={migrateNeedleBackend}
+            offlineDownloads={offlineDownloads}
+            offlineDownloadProgress={offlineDownloadProgress}
+            offlineDownloadCurrentLabel={offlineDownloadCurrentLabel}
+            offlineTrackDetails={offlineTrackDetails}
+            onRemoveOfflineTrack={removeOfflineDownloadByPath}
+            onClearOfflineDownloads={clearOfflineDownloads}
+            backendFeedback={needleBackendFeedback}
+            bpmAuditItems={bpmAuditItems}
+            onAdjustBpm={adjustTrackBpmValue}
+            onOpenBpmEditor={(track) => setTrackBpmEditor({ track, dismissFromAudit: true })}
+            pendingBpmPaths={pendingTrackBpms}
+            currentBpmAuditReviewPath={currentBpmAuditReviewPath}
+            isBpmAuditReviewPlaying={Boolean(currentBpmAuditReviewPath && isPlaying)}
+            onStartBpmAuditReview={(track) => void startBpmAuditReview(track)}
+            onToggleBpmAuditReviewPlayback={(track) => void toggleBpmAuditReviewPlayback(track)}
+            onStepBpmAuditReview={(delta) => void stepBpmAuditReview(delta)}
+            dismissedBpmAuditCount={dismissedBpmAuditCount}
+            onDismissBpmAuditItem={(track) => {
+              dismissBpmAuditTrack(track);
+              setStatus(`Marked BPM as intentional · ${track.title}`);
+            }}
+            onClearDismissedBpmAuditItems={() => {
+              setDismissedBpmAuditKeys([]);
+              setDismissedBpmAuditPaths([]);
+              setStatus('Restored dismissed BPM audit candidates');
+            }}
           />
         )}
       </main>
@@ -4478,8 +5778,9 @@ function App() {
           state={trackBpmEditor}
           metadataEditMode={metadataEditMode}
           busy={busy === 'Saving BPM…'}
+          isTrackPlaying={trackBpmEditor.track.path === currentPath && isPlaying}
           onClose={() => setTrackBpmEditor(null)}
-          onSubmit={(bpm) => void saveExactTrackBpmValue(trackBpmEditor.track, bpm)}
+          onSubmit={(bpm) => void saveExactTrackBpmValue(trackBpmEditor, bpm)}
         />
       )}
 
@@ -4529,45 +5830,71 @@ function App() {
       )}
 
       <footer className="player-bar">
-        {currentAlbum ? (
+        <div className="player-now-cluster">
+          {currentAlbum ? (
+            <button
+              className="player-now player-now-button"
+              onClick={() => {
+                if (currentAlbumKey) openAlbum(currentAlbumKey);
+              }}
+              title={`Open album · ${currentAlbum}`}
+            >
+              <Cover
+                trackPath={currentTrack?.path ?? null}
+                fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
+                size="md"
+              />
+              <div className="player-meta">
+                <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
+                <div className="player-sub">
+                  {currentTrack
+                    ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
+                    : 'Pick a track from your library'}
+                </div>
+              </div>
+            </button>
+          ) : (
+            <div className="player-now">
+              <Cover
+                trackPath={currentTrack?.path ?? null}
+                fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
+                size="md"
+              />
+              <div className="player-meta">
+                <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
+                <div className="player-sub">
+                  {currentTrack
+                    ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
+                    : 'Pick a track from your library'}
+                </div>
+              </div>
+            </div>
+          )}
           <button
-            className="player-now player-now-button"
+            className={`ctrl ctrl-favorite ${currentTrack?.is_favorite ? 'is-active' : ''}`}
             onClick={() => {
-              if (currentAlbumKey) openAlbum(currentAlbumKey);
+              if (!currentTrack) return;
+              void updateTrackFavorite(currentTrack, !currentTrack.is_favorite);
             }}
-            title={`Open album · ${currentAlbum}`}
+            disabled={!currentTrack || currentTrackFavoritePending}
+            title={
+              currentTrack
+                ? currentTrack.is_favorite
+                  ? `Remove ${currentTrack.title} from favourites`
+                  : `Mark ${currentTrack.title} as favourite`
+                : 'Nothing playing'
+            }
+            aria-label={
+              currentTrack
+                ? currentTrack.is_favorite
+                  ? `Remove ${currentTrack.title} from favourites`
+                  : `Mark ${currentTrack.title} as favourite`
+                : 'Nothing playing'
+            }
           >
-            <Cover
-              trackPath={currentTrack?.path ?? null}
-              fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
-              size="md"
-            />
-            <div className="player-meta">
-              <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
-              <div className="player-sub">
-                {currentTrack
-                  ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
-                  : 'Pick a track from your library'}
-              </div>
-            </div>
+            <HeartIcon filled={Boolean(currentTrack?.is_favorite)} />
           </button>
-        ) : (
-          <div className="player-now">
-            <Cover
-              trackPath={currentTrack?.path ?? null}
-              fallback={currentTrack?.title?.[0]?.toUpperCase() ?? '♪'}
-              size="md"
-            />
-            <div className="player-meta">
-              <div className="player-title">{currentTrack?.title ?? 'Nothing playing'}</div>
-              <div className="player-sub">
-                {currentTrack
-                  ? `${currentTrack.artist ?? 'Unknown artist'} — ${currentTrack.album ?? 'Unknown album'}`
-                  : 'Pick a track from your library'}
-              </div>
-            </div>
-          </div>
-        )}
+        </div>
 
         <div className="player-progress-wrap">
           <div className="player-progress">
@@ -5285,6 +6612,7 @@ interface TrackBpmEditorModalProps {
   state: TrackBpmEditorState;
   metadataEditMode: MetadataEditMode;
   busy: boolean;
+  isTrackPlaying: boolean;
   onClose: () => void;
   onSubmit: (bpm: number) => void;
 }
@@ -5293,19 +6621,37 @@ function TrackBpmEditorModal({
   state,
   metadataEditMode,
   busy,
+  isTrackPlaying,
   onClose,
   onSubmit,
 }: TrackBpmEditorModalProps) {
   const [value, setValue] = useState(formatBpm(state.track.bpm) ?? '');
+  const [tapTimes, setTapTimes] = useState<number[]>([]);
 
   useEffect(() => {
     setValue(formatBpm(state.track.bpm) ?? '');
+    setTapTimes([]);
   }, [state]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !busy) {
         onClose();
+        return;
+      }
+
+      if (
+        event.code === 'Space' &&
+        !event.repeat &&
+        !busy &&
+        !['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes((event.target as HTMLElement | null)?.tagName ?? '')
+      ) {
+        event.preventDefault();
+        setTapTimes((current) => {
+          const now = Date.now();
+          const recent = current.length > 0 && now - current[current.length - 1]! <= 2600 ? current : [];
+          return recent.concat(now).slice(-8);
+        });
       }
     };
 
@@ -5315,6 +6661,46 @@ function TrackBpmEditorModal({
 
   const parsed = Number.parseInt(value.trim(), 10);
   const canSubmit = Number.isFinite(parsed) && parsed > 0;
+  const tappedBpm = useMemo(() => {
+    if (tapTimes.length < 2) {
+      return null;
+    }
+
+    const intervals: number[] = [];
+    for (let index = 1; index < tapTimes.length; index += 1) {
+      intervals.push(tapTimes[index]! - tapTimes[index - 1]!);
+    }
+    if (intervals.length === 0) {
+      return null;
+    }
+
+    const sorted = intervals.slice().sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    const medianInterval =
+      sorted.length % 2 === 1
+        ? sorted[middle]!
+        : ((sorted[middle - 1] ?? sorted[middle]!) + (sorted[middle] ?? sorted[middle - 1]!)) / 2;
+    if (!Number.isFinite(medianInterval) || medianInterval <= 0) {
+      return null;
+    }
+    return Math.max(1, Math.round(60000 / medianInterval));
+  }, [tapTimes]);
+  const tapCountLabel =
+    tapTimes.length === 0
+      ? 'No taps captured yet'
+      : tapTimes.length === 1
+        ? '1 tap captured'
+        : `${tapTimes.length} taps captured`;
+  const registerTap = () => {
+    if (busy) {
+      return;
+    }
+    setTapTimes((current) => {
+      const now = Date.now();
+      const recent = current.length > 0 && now - current[current.length - 1]! <= 2600 ? current : [];
+      return recent.concat(now).slice(-8);
+    });
+  };
 
   return (
     <div className="modal-scrim" onClick={() => !busy && onClose()}>
@@ -5353,6 +6739,45 @@ function TrackBpmEditorModal({
             autoFocus
           />
         </label>
+
+        <div className="bpm-tap-panel">
+          <div className="bpm-tap-panel-head">
+            <div>
+              <div className="field-label">Tap tempo</div>
+              <div className="field-help">
+                {isTrackPlaying
+                  ? 'Tap Space or the button in time with the music. Needle estimates BPM from your most recent taps.'
+                  : 'Tap Space or the button in time with the music. This works best while the track is currently playing.'}
+              </div>
+            </div>
+            <div className="bpm-tap-readout" aria-live="polite">
+              <div className="bpm-tap-readout-value">{tappedBpm != null ? `${tappedBpm} BPM` : '—'}</div>
+              <div className="bpm-tap-readout-meta">{tapCountLabel}</div>
+            </div>
+          </div>
+
+          <div className="bpm-tap-actions">
+            <button className="primary-button bpm-tap-button" type="button" onClick={registerTap} disabled={busy}>
+              Tap now
+            </button>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => tappedBpm != null && setValue(String(tappedBpm))}
+              disabled={tappedBpm == null || busy}
+            >
+              Use tapped BPM
+            </button>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => setTapTimes([])}
+              disabled={tapTimes.length === 0 || busy}
+            >
+              Reset taps
+            </button>
+          </div>
+        </div>
 
         <div className="modal-actions">
           <button className="ghost-button" onClick={onClose} disabled={busy}>
@@ -5741,6 +7166,9 @@ interface TracksViewProps {
   genreFilterValue: string;
   onGenreFilterChange: (value: string) => void;
   genreFilterOptions: string[];
+  vibeFilterValue: string;
+  onVibeFilterChange: (value: string) => void;
+  vibeFilterOptions: typeof VIBE_BUCKETS;
   yearFilterFromValue: TrackYearBoundaryFilter;
   onYearFilterFromChange: (value: TrackYearBoundaryFilter) => void;
   yearFilterToValue: TrackYearBoundaryFilter;
@@ -5768,6 +7196,14 @@ interface TracksViewProps {
   selectedSmartPlaylistGenres?: string[];
   onToggleSmartPlaylistGenre?: (genre: string) => void;
   onClearSmartPlaylistGenres?: () => void;
+  onToggleFavorite: (track: Track, favorite: boolean) => void;
+  pendingFavoritePaths: string[];
+  showOfflineControls?: boolean;
+  isOfflineAvailable?: (track: Track) => boolean;
+  pendingOfflinePaths: string[];
+  activeOfflineDownloadTrackPath: string | null;
+  activeOfflineDownloadTrackProgress: number | null;
+  onToggleOffline?: (track: Track, shouldDownload: boolean) => void;
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
   metadataEditMode: MetadataEditMode;
@@ -5809,6 +7245,9 @@ function TracksView({
   genreFilterValue,
   onGenreFilterChange,
   genreFilterOptions,
+  vibeFilterValue,
+  onVibeFilterChange,
+  vibeFilterOptions,
   yearFilterFromValue,
   onYearFilterFromChange,
   yearFilterToValue,
@@ -5836,6 +7275,14 @@ function TracksView({
   selectedSmartPlaylistGenres = [],
   onToggleSmartPlaylistGenre,
   onClearSmartPlaylistGenres,
+  onToggleFavorite,
+  pendingFavoritePaths,
+  showOfflineControls = false,
+  isOfflineAvailable,
+  pendingOfflinePaths,
+  activeOfflineDownloadTrackPath,
+  activeOfflineDownloadTrackProgress,
+  onToggleOffline,
   onSetRating,
   pendingRatingPaths,
   metadataEditMode,
@@ -5857,6 +7304,7 @@ function TracksView({
 }: TracksViewProps) {
   const rangeStart = totalTracks === 0 ? 0 : pageStartIndex + 1;
   const rangeEnd = totalTracks === 0 ? 0 : Math.min(pageStartIndex + tracks.length, totalTracks);
+  const pendingOfflinePathSet = useMemo(() => new Set(pendingOfflinePaths), [pendingOfflinePaths]);
   const renderPagination = () =>
     totalTracks > 0 ? (
       <div className="tracks-pagination" aria-label="Track list pagination">
@@ -6049,6 +7497,21 @@ function TracksView({
                     ))}
                   </select>
                 </label>
+                <label className="tracks-filter-card">
+                  <span className="view-select-label">Vibe</span>
+                  <select
+                    className="view-select tracks-select"
+                    value={vibeFilterValue}
+                    onChange={(event) => onVibeFilterChange(event.currentTarget.value)}
+                  >
+                    <option value={allTrackFilterValue}>All vibes</option>
+                    {vibeFilterOptions.map((vibe) => (
+                      <option key={vibe.key} value={vibe.key}>
+                        {vibe.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label className="tracks-filter-card tracks-filter-card-year">
                   <span className="view-select-label">Year</span>
                   <div className="tracks-year-range">
@@ -6122,6 +7585,10 @@ function TracksView({
                 typeof playlistSourceTotalCount === 'number'
                   ? playlistSourceTotalCount - 1
                   : Math.max(totalTracks - 1, 0);
+              const offlineAvailable = isOfflineAvailable?.(track) ?? false;
+              const downloadState = offlineDownloadIndicatorState(track.path, activeOfflineDownloadTrackPath);
+              const offlineIsPending = pendingOfflinePathSet.has(track.path);
+              const favoriteIsPending = pendingFavoritePaths.includes(track.path);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
               const bpmIsPending = pendingBpmPaths.includes(track.path);
               return (
@@ -6135,7 +7602,12 @@ function TracksView({
                   />
                   <button className="track-row-main" onClick={() => onPlay(track)}>
                     <span className="track-index">
-                      {isCurrent ? <PlayingIndicator /> : displayIndex + 1}
+                      <TrackNumberIndicator
+                        value={displayIndex + 1}
+                        isCurrent={isCurrent}
+                        downloadState={downloadState}
+                        progressRatio={downloadState === 'active' ? activeOfflineDownloadTrackProgress : null}
+                      />
                     </span>
                     <span className="track-title-wrap">
                       <span className="track-title">{track.title}</span>
@@ -6144,6 +7616,7 @@ function TracksView({
                           (track.play_count ?? 0) > 0
                             ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
                             : 'Unplayed so far',
+                          track.is_favorite ? 'Favourite' : null,
                           track.rating ? `Rated ${formatTrackRatingLabel(track.rating)}` : null,
                         ]
                           .filter(Boolean)
@@ -6180,6 +7653,19 @@ function TracksView({
                       onAdjust={onAdjustBpm}
                       onOpenEditor={onOpenBpmEditor}
                     />
+                    <TrackFavoriteControl
+                      track={track}
+                      disabled={favoriteIsPending}
+                      onToggleFavorite={onToggleFavorite}
+                    />
+                    {showOfflineControls && onToggleOffline && (
+                      <TrackOfflineControl
+                        track={track}
+                        downloaded={offlineAvailable}
+                        disabled={offlineIsPending}
+                        onToggleOffline={onToggleOffline}
+                      />
+                    )}
                     <TrackRatingControl
                       track={track}
                       disabled={ratingIsPending}
@@ -6294,6 +7780,19 @@ interface AlbumDetailViewProps {
   onAddAlbumToQueue: () => void;
   onAddAlbumToPlaylist: () => void;
   onAddTrackToPlaylist: (track: Track) => void;
+  showOfflineActions?: boolean;
+  isBackendOfflineMode: boolean;
+  areAllTracksOffline?: boolean;
+  hasAnyOfflineTracks?: boolean;
+  isOfflineAvailable: (track: Track) => boolean;
+  pendingOfflinePaths: string[];
+  activeOfflineDownloadTrackPath: string | null;
+  activeOfflineDownloadTrackProgress: number | null;
+  onToggleOfflineTrack: (track: Track, shouldDownload: boolean) => void;
+  onDownloadAlbumOffline: () => void;
+  onRemoveAlbumOffline: () => void;
+  onToggleFavorite: (track: Track, favorite: boolean) => void;
+  pendingFavoritePaths: string[];
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
   metadataEditMode: MetadataEditMode;
@@ -6326,6 +7825,19 @@ function AlbumDetailView({
   onAddAlbumToQueue,
   onAddAlbumToPlaylist,
   onAddTrackToPlaylist,
+  showOfflineActions = false,
+  isBackendOfflineMode,
+  areAllTracksOffline = false,
+  hasAnyOfflineTracks = false,
+  isOfflineAvailable,
+  pendingOfflinePaths,
+  activeOfflineDownloadTrackPath,
+  activeOfflineDownloadTrackProgress,
+  onToggleOfflineTrack,
+  onDownloadAlbumOffline,
+  onRemoveAlbumOffline,
+  onToggleFavorite,
+  pendingFavoritePaths,
   onSetRating,
   pendingRatingPaths,
   metadataEditMode,
@@ -6340,6 +7852,7 @@ function AlbumDetailView({
 }: AlbumDetailViewProps) {
   const [isMetadataMenuOpen, setIsMetadataMenuOpen] = useState(false);
   const metadataMenuRef = useRef<HTMLDivElement | null>(null);
+  const pendingOfflinePathSet = useMemo(() => new Set(pendingOfflinePaths), [pendingOfflinePaths]);
   const albumTracks = useMemo(
     () =>
       tracks
@@ -6427,9 +7940,11 @@ function AlbumDetailView({
   }, [albumTracks]);
 
   const samplePath = albumTracks[0]?.path ?? null;
+  const albumOfflineAvailability = areAllTracksOffline ? 'full' : hasAnyOfflineTracks ? 'partial' : 'none';
   const { info, loading: infoLoading, retrying: infoRetrying, retry: retryAlbumInfo } = useAlbumInfo(
     album,
     primaryArtist,
+    { autoRefreshOnMiss: !isBackendOfflineMode },
   );
 
   useEffect(() => {
@@ -6478,6 +7993,9 @@ function AlbumDetailView({
           className="artist-hero-media"
           ref={metadataMenuRef}
           onContextMenu={(event) => {
+            if (isBackendOfflineMode) {
+              return;
+            }
             event.preventDefault();
             setIsMetadataMenuOpen(true);
           }}
@@ -6487,6 +8005,7 @@ function AlbumDetailView({
             fallback={album[0]?.toUpperCase() ?? '◉'}
             size="hero"
             vinylRip={isVinylRip}
+            offlineAvailability={albumOfflineAvailability}
           />
           {isMetadataRefreshing && (
             <div className="artist-image-refresh-overlay" aria-hidden="true">
@@ -6494,7 +8013,7 @@ function AlbumDetailView({
               <div className="artist-image-refresh-label">Refreshing metadata…</div>
             </div>
           )}
-          {isMetadataMenuOpen && (
+          {isMetadataMenuOpen && !isBackendOfflineMode && (
             <div className="artist-image-menu-panel" role="menu" aria-label={`Metadata options for ${album}`}>
               <button
                 className="artist-image-menu-option"
@@ -6570,6 +8089,19 @@ function AlbumDetailView({
             <button className="ghost-button" onClick={onShuffleAlbum}>
               ⤮ Shuffle
             </button>
+            {showOfflineActions && (
+              <button
+                className="ghost-button"
+                onClick={areAllTracksOffline ? onRemoveAlbumOffline : onDownloadAlbumOffline}
+                disabled={pendingOfflinePaths.some((path) => albumTracks.some((track) => track.path === path))}
+              >
+                {areAllTracksOffline
+                  ? 'Remove offline copy'
+                  : hasAnyOfflineTracks
+                    ? 'Finish offline download'
+                    : '↓ Download offline'}
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -6600,9 +8132,9 @@ function AlbumDetailView({
             <button
               className="album-about-retry"
               onClick={() => void retryAlbumInfo()}
-              disabled={infoRetrying}
+              disabled={infoRetrying || isBackendOfflineMode}
             >
-              {infoRetrying ? 'Retrying…' : 'Retry lookup'}
+              {isBackendOfflineMode ? 'Offline mode' : infoRetrying ? 'Retrying…' : 'Retry lookup'}
             </button>
           </div>
         )}
@@ -6618,6 +8150,10 @@ function AlbumDetailView({
                 {tracks.map((t) => {
                   const isCurrent = currentPath === t.path;
                   const isQueued = queuePaths.includes(t.path);
+                  const offlineAvailable = isOfflineAvailable(t);
+                  const favoriteIsPending = pendingFavoritePaths.includes(t.path);
+                  const offlineIsPending = pendingOfflinePathSet.has(t.path);
+                  const downloadState = offlineDownloadIndicatorState(t.path, activeOfflineDownloadTrackPath);
                   const ratingIsPending = pendingRatingPaths.includes(t.path);
                   const bpmIsPending = pendingBpmPaths.includes(t.path);
                   const techDetails = formatTrackTechDetails(t);
@@ -6632,7 +8168,12 @@ function AlbumDetailView({
                         onClick={() => onPlayTrack(t)}
                       >
                         <span className="album-track-num">
-                          {isCurrent ? <PlayingIndicator /> : (t.track_number ?? '—')}
+                          <TrackNumberIndicator
+                            value={t.track_number ?? '—'}
+                            isCurrent={isCurrent}
+                            downloadState={downloadState}
+                            progressRatio={downloadState === 'active' ? activeOfflineDownloadTrackProgress : null}
+                          />
                         </span>
                         <span className="album-track-copy">
                           <span className="album-track-title">{t.title}</span>
@@ -6661,6 +8202,19 @@ function AlbumDetailView({
                           onAdjust={onAdjustBpm}
                           onOpenEditor={onOpenBpmEditor}
                         />
+                        <TrackFavoriteControl
+                          track={t}
+                          disabled={favoriteIsPending}
+                          onToggleFavorite={onToggleFavorite}
+                        />
+                        {showOfflineActions && (
+                          <TrackOfflineControl
+                            track={t}
+                            downloaded={Boolean(offlineAvailable)}
+                            disabled={offlineIsPending}
+                            onToggleOffline={onToggleOfflineTrack}
+                          />
+                        )}
                         <TrackRatingControl
                           track={t}
                           disabled={ratingIsPending}
@@ -6738,12 +8292,20 @@ interface ArtistDetailViewProps {
   onPlayTopTracksNext: () => void;
   onAddTopTracksToQueue: () => void;
   onAddTrackToPlaylist: (track: Track) => void;
+  onToggleFavorite: (track: Track, favorite: boolean) => void;
+  pendingFavoritePaths: string[];
   onSetRating: (track: Track, rating: number | null) => void;
   pendingRatingPaths: string[];
+  activeOfflineDownloadTrackPath: string | null;
+  activeOfflineDownloadTrackProgress: number | null;
   metadataEditMode: MetadataEditMode;
   onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => void;
   onOpenBpmEditor: (track: Track) => void;
   pendingBpmPaths: string[];
+  isNeedleBackendMode: boolean;
+  isBackendOfflineMode: boolean;
+  onSetBusy: (value: string | null) => void;
+  onSetStatus: (value: string) => void;
 }
 
 function ArtistDetailView({
@@ -6772,22 +8334,37 @@ function ArtistDetailView({
   onPlayTopTracksNext,
   onAddTopTracksToQueue,
   onAddTrackToPlaylist,
+  onToggleFavorite,
+  pendingFavoritePaths,
   onSetRating,
   pendingRatingPaths,
+  activeOfflineDownloadTrackPath,
+  activeOfflineDownloadTrackProgress,
   metadataEditMode,
   onAdjustBpm,
   onOpenBpmEditor,
   pendingBpmPaths,
+  isNeedleBackendMode,
+  isBackendOfflineMode,
+  onSetBusy,
+  onSetStatus,
 }: ArtistDetailViewProps) {
   const [isBioExpanded, setIsBioExpanded] = useState(false);
   const [isImageMenuOpen, setIsImageMenuOpen] = useState(false);
+  const [isArtistPhotoUpdating, setIsArtistPhotoUpdating] = useState(false);
   const imageMenuRef = useRef<HTMLDivElement | null>(null);
   const {
     url: artistImageUrl,
     retrying: artistImageRetrying,
     retry: retryArtistImage,
-  } = useArtistImage(artist);
-  const { info, loading: infoLoading, retrying: infoRetrying, retry: retryArtistInfo } = useArtistInfo(artist);
+    reload: reloadArtistImage,
+  } = useArtistImage(artist, {
+    autoRefreshOnMiss: !isBackendOfflineMode,
+    cacheOnly: isBackendOfflineMode,
+  });
+  const { info, loading: infoLoading, retrying: infoRetrying, retry: retryArtistInfo } = useArtistInfo(artist, {
+    autoRefreshOnMiss: !isBackendOfflineMode,
+  });
   const artistTracks = useMemo(
     () => tracks.filter((track) => artistNameForTrack(track, mode) === artist),
     [artist, mode, tracks],
@@ -6830,6 +8407,51 @@ function ArtistDetailView({
   const fallbackArtworkPath = artistAlbums[0]?.samplePath ?? artistTracks[0]?.path ?? null;
   const shouldClampBio = (info?.description?.length ?? 0) > 320;
   const canRefreshBio = infoLoading || infoRetrying ? false : true;
+  const isArtistPhotoActionBusy = artistImageRetrying || isArtistPhotoUpdating;
+
+  const handleUploadArtistPhoto = async () => {
+    if (!isNeedleBackendMode) return;
+
+    const selection = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'] }],
+    });
+    const imagePath = Array.isArray(selection) ? selection[0] ?? null : selection;
+    if (!imagePath || typeof imagePath !== 'string') {
+      return;
+    }
+
+    setIsArtistPhotoUpdating(true);
+    onSetBusy('Uploading artist photo…');
+    try {
+      await uploadCustomArtistImage(artist, imagePath);
+      await reloadArtistImage();
+      onSetStatus(`Updated artist photo · ${artist}`);
+    } catch (error) {
+      onSetStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsArtistPhotoUpdating(false);
+      onSetBusy(null);
+    }
+  };
+
+  const handleRestoreAutomaticArtistPhoto = async () => {
+    if (!isNeedleBackendMode) return;
+
+    setIsArtistPhotoUpdating(true);
+    onSetBusy('Restoring automatic artist photo…');
+    try {
+      await restoreAutomaticBackendArtistImage(artist);
+      await reloadArtistImage();
+      onSetStatus(`Restored automatic artist photo · ${artist}`);
+    } catch (error) {
+      onSetStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsArtistPhotoUpdating(false);
+      onSetBusy(null);
+    }
+  };
   useEffect(() => {
     setIsBioExpanded(false);
     setIsImageMenuOpen(false);
@@ -6877,27 +8499,56 @@ function ArtistDetailView({
           <ArtistAvatar
             name={artist}
             size="hero"
+            imageMode={isBackendOfflineMode ? 'cache_only' : 'default'}
             urlOverride={artistImageUrl}
             fallbackTrackPath={fallbackArtworkPath}
           />
-          {artistImageRetrying && (
+          {isArtistPhotoActionBusy && (
             <div className="artist-image-refresh-overlay" aria-hidden="true">
               <div className="artist-image-refresh-spinner" />
-              <div className="artist-image-refresh-label">Refreshing photo…</div>
+              <div className="artist-image-refresh-label">
+                {isArtistPhotoUpdating ? 'Updating photo…' : 'Refreshing photo…'}
+              </div>
             </div>
           )}
           {isImageMenuOpen && (
             <div className="artist-image-menu-panel" role="menu" aria-label={`Refresh options for ${artist}`}>
+              {isNeedleBackendMode && !isBackendOfflineMode && (
+                <button
+                  className="artist-image-menu-option"
+                  onClick={() => {
+                    setIsImageMenuOpen(false);
+                    void handleUploadArtistPhoto();
+                  }}
+                  disabled={isArtistPhotoActionBusy}
+                  role="menuitem"
+                >
+                  {isArtistPhotoUpdating ? 'Updating photo…' : 'Upload photo…'}
+                </button>
+              )}
+              {isNeedleBackendMode && !isBackendOfflineMode && (
+                <button
+                  className="artist-image-menu-option"
+                  onClick={() => {
+                    setIsImageMenuOpen(false);
+                    void handleRestoreAutomaticArtistPhoto();
+                  }}
+                  disabled={isArtistPhotoActionBusy}
+                  role="menuitem"
+                >
+                  Use automatic photo again
+                </button>
+              )}
               <button
                 className="artist-image-menu-option"
                 onClick={() => {
                   setIsImageMenuOpen(false);
                   void retryArtistImage();
                 }}
-                disabled={artistImageRetrying}
+                disabled={isArtistPhotoActionBusy || isBackendOfflineMode}
                 role="menuitem"
               >
-                {artistImageRetrying ? 'Refreshing photo…' : 'Refresh photo'}
+                {isBackendOfflineMode ? 'Offline mode' : artistImageRetrying ? 'Refreshing photo…' : 'Refresh photo'}
               </button>
               <button
                 className="artist-image-menu-option"
@@ -6905,10 +8556,10 @@ function ArtistDetailView({
                   setIsImageMenuOpen(false);
                   void retryArtistInfo();
                 }}
-                disabled={!canRefreshBio}
+                disabled={!canRefreshBio || isBackendOfflineMode}
                 role="menuitem"
               >
-                {infoRetrying ? 'Refreshing bio…' : 'Refresh bio'}
+                {isBackendOfflineMode ? 'Offline mode' : infoRetrying ? 'Refreshing bio…' : 'Refresh bio'}
               </button>
             </div>
           )}
@@ -7022,6 +8673,7 @@ function ArtistDetailView({
                     fallback={album.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
                     vinylRip={album.is_vinyl_rip}
+                    offlineAvailability={album.offlineAvailability}
                   />
                   <div className="card-title">{album.album}</div>
                   <div className="card-sub">{album.year ?? relativeAdded(album.addedAt)}</div>
@@ -7087,6 +8739,8 @@ function ArtistDetailView({
               const isCurrent = currentPath === track.path;
               const isQueued = queuePaths.includes(track.path);
               const albumKeyValue = trackAlbumKey(track);
+              const downloadState = offlineDownloadIndicatorState(track.path, activeOfflineDownloadTrackPath);
+              const favoriteIsPending = pendingFavoritePaths.includes(track.path);
               const ratingIsPending = pendingRatingPaths.includes(track.path);
               const bpmIsPending = pendingBpmPaths.includes(track.path);
               return (
@@ -7098,7 +8752,12 @@ function ArtistDetailView({
                   />
                   <button className="album-track-row-main artist-top-track-main" onClick={() => onPlayTrack(track)}>
                     <span className="album-track-num">
-                      {isCurrent ? <PlayingIndicator /> : index + 1}
+                      <TrackNumberIndicator
+                        value={index + 1}
+                        isCurrent={isCurrent}
+                        downloadState={downloadState}
+                        progressRatio={downloadState === 'active' ? activeOfflineDownloadTrackProgress : null}
+                      />
                     </span>
                     <span className="artist-track-title-wrap">
                       <span className="album-track-title">{track.title}</span>
@@ -7107,6 +8766,7 @@ function ArtistDetailView({
                           (track.play_count ?? 0) > 0
                             ? `${track.play_count} play${track.play_count === 1 ? '' : 's'}`
                             : 'Unplayed so far',
+                          track.is_favorite ? 'Favourite' : null,
                           track.rating ? `Rated ${formatTrackRatingLabel(track.rating)}` : null,
                         ]
                           .filter(Boolean)
@@ -7132,6 +8792,11 @@ function ArtistDetailView({
                       disabled={bpmIsPending}
                       onAdjust={onAdjustBpm}
                       onOpenEditor={onOpenBpmEditor}
+                    />
+                    <TrackFavoriteControl
+                      track={track}
+                      disabled={favoriteIsPending}
+                      onToggleFavorite={onToggleFavorite}
                     />
                     <TrackRatingControl
                       track={track}
@@ -7231,6 +8896,7 @@ function AlbumsView({
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
                     vinylRip={a.is_vinyl_rip}
+                    offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
                   />
@@ -7277,6 +8943,7 @@ interface CoverProps {
   fallback: string;
   size: 'md' | 'card' | 'hero' | 'queue' | 'mini';
   vinylRip?: boolean;
+  offlineAvailability?: OfflineAvailability;
   imageMode?: 'default' | 'cache_only' | 'deferred';
   lazyLoad?: boolean;
 }
@@ -7286,6 +8953,7 @@ function Cover({
   fallback,
   size,
   vinylRip = false,
+  offlineAvailability = 'none',
   imageMode = 'default',
   lazyLoad = false,
 }: CoverProps) {
@@ -7310,6 +8978,7 @@ function Cover({
     return (
       <div className={className} ref={ref}>
         <img src={url} alt="" className="cover-img" />
+        <OfflineAvailableBadge availability={offlineAvailability} size={size} />
         {vinylRip && <VinylRipBadge size={size} />}
       </div>
     );
@@ -7318,6 +8987,7 @@ function Cover({
   return (
     <div className={className} ref={ref}>
       {fallback}
+      <OfflineAvailableBadge availability={offlineAvailability} size={size} />
       {vinylRip && <VinylRipBadge size={size} />}
     </div>
   );
@@ -7336,7 +9006,7 @@ interface ArtistAvatarProps {
   size: 'sm' | 'lg' | 'hero';
   urlOverride?: string | null;
   fallbackTrackPath?: string | null;
-  imageMode?: 'default' | 'cache_only';
+  imageMode?: 'default' | 'cache_only' | 'deferred';
   lazyLoad?: boolean;
 }
 
@@ -7351,10 +9021,12 @@ function ArtistAvatar({
   const { ref, isNearViewport } = useNearViewport(lazyLoad);
   const { url } = useArtistImage(urlOverride === undefined ? name : null, {
     cacheOnly: imageMode === 'cache_only',
+    defer: imageMode === 'deferred',
     enabled: isNearViewport,
   });
   const fallbackArtworkUrl = useCoverArt(fallbackTrackPath ?? null, {
-    cacheOnly: imageMode === 'cache_only',
+    cacheOnly: false,
+    defer: imageMode !== 'default',
     enabled: isNearViewport,
   });
   const resolvedUrl = urlOverride ?? url;
@@ -7412,6 +9084,7 @@ interface ArtistsViewProps {
   layoutMode: ArtistLayoutMode;
   onLayoutModeChange: (value: ArtistLayoutMode) => void;
   onSelect: (artist: string) => void;
+  isBackendOfflineMode: boolean;
 }
 
 function ArtistsView({
@@ -7425,6 +9098,7 @@ function ArtistsView({
   layoutMode,
   onLayoutModeChange,
   onSelect,
+  isBackendOfflineMode,
 }: ArtistsViewProps) {
   const scopeLabel = browseMode === 'album' ? 'Album artists' : 'All artists';
   const emptyTitle = search.trim() ? 'No matching artists' : `No ${browseMode === 'album' ? 'album artists' : 'artists'}`;
@@ -7522,7 +9196,7 @@ function ArtistsView({
                 name={artist.artist}
                 size="lg"
                 fallbackTrackPath={artist.samplePath}
-                imageMode="cache_only"
+                imageMode={isBackendOfflineMode ? 'cache_only' : 'deferred'}
                 lazyLoad
               />
               <div className="artist-tile-name">{artist.artist}</div>
@@ -7538,7 +9212,7 @@ function ArtistsView({
                 name={artist.artist}
                 size="sm"
                 fallbackTrackPath={artist.samplePath}
-                imageMode="cache_only"
+                imageMode={isBackendOfflineMode ? 'cache_only' : 'deferred'}
                 lazyLoad
               />
               <div className="list-main">
@@ -7556,6 +9230,7 @@ function ArtistsView({
 
 interface SettingsViewProps {
   settings: AppSettings;
+  runtimeInfo: RuntimeInfo | null;
   currentAccentColor: string;
   onChange: (next: AppSettings) => void;
   onAddFolder: () => void;
@@ -7571,10 +9246,39 @@ interface SettingsViewProps {
   loudnessAnalysisFailures: LoudnessAnalysisFailure[];
   onCopyLoudnessFailures: () => void;
   missingLibraryRoots: string[];
+  backendStatus: NeedleBackendStatus | null;
+  backendMigrationReport: NeedleBackendMigrationReport | null;
+  backendStatusBusy: boolean;
+  backendMigrationBusy: boolean;
+  onCheckBackend: () => void;
+  onMigrateBackend: () => void;
+  offlineDownloads: OfflineDownloadEntry[];
+  offlineDownloadProgress: OfflineDownloadProgress | null;
+  offlineDownloadCurrentLabel: string | null;
+  offlineTrackDetails: Record<string, { title: string; subtitle: string }>;
+  onRemoveOfflineTrack: (trackPath: string) => Promise<void>;
+  onClearOfflineDownloads: () => Promise<void>;
+  backendFeedback: {
+    tone: 'info' | 'success' | 'warning' | 'error';
+    message: string;
+  } | null;
+  bpmAuditItems: BpmAuditItem[];
+  onAdjustBpm: (track: Track, adjustment: TrackBpmAdjustment) => Promise<void>;
+  onOpenBpmEditor: (track: Track) => void;
+  pendingBpmPaths: string[];
+  currentBpmAuditReviewPath: string | null;
+  isBpmAuditReviewPlaying: boolean;
+  onStartBpmAuditReview: (track: Track) => void;
+  onToggleBpmAuditReviewPlayback: (track: Track | null) => void;
+  onStepBpmAuditReview: (delta: number) => void;
+  dismissedBpmAuditCount: number;
+  onDismissBpmAuditItem: (track: Track) => void;
+  onClearDismissedBpmAuditItems: () => void;
 }
 
 function SettingsView({
   settings,
+  runtimeInfo,
   currentAccentColor,
   onChange,
   onAddFolder,
@@ -7590,9 +9294,58 @@ function SettingsView({
   loudnessAnalysisFailures,
   onCopyLoudnessFailures,
   missingLibraryRoots,
+  backendStatus,
+  backendMigrationReport,
+  backendStatusBusy,
+  backendMigrationBusy,
+  onCheckBackend,
+  onMigrateBackend,
+  offlineDownloads,
+  offlineDownloadProgress,
+  offlineDownloadCurrentLabel,
+  offlineTrackDetails,
+  onRemoveOfflineTrack,
+  onClearOfflineDownloads,
+  backendFeedback,
+  bpmAuditItems,
+  onAdjustBpm,
+  onOpenBpmEditor,
+  pendingBpmPaths,
+  currentBpmAuditReviewPath,
+  isBpmAuditReviewPlaying,
+  onStartBpmAuditReview,
+  onToggleBpmAuditReviewPlayback,
+  onStepBpmAuditReview,
+  dismissedBpmAuditCount,
+  onDismissBpmAuditItem,
+  onClearDismissedBpmAuditItems,
 }: SettingsViewProps) {
   const isManualEqualizer = settings.equalizer_preset === 'manual';
   const accentColorValue = normalizeAccentColor(settings.accent_color) ?? currentAccentColor;
+  const backendUrlValue = settings.needle_backend_url ?? '';
+  const backendUsernameValue = settings.needle_backend_username ?? '';
+  const backendPasswordValue = settings.needle_backend_password ?? '';
+  const canCheckBackend =
+    backendUrlValue.trim().length > 0 &&
+    backendUsernameValue.trim().length > 0 &&
+    backendPasswordValue.trim().length > 0 &&
+    !backendStatusBusy;
+  const canMigrateBackend =
+    backendUrlValue.trim().length > 0 &&
+    backendUsernameValue.trim().length > 0 &&
+    backendPasswordValue.trim().length > 0 &&
+    backendStatus?.enabled === true &&
+    !backendMigrationBusy &&
+    !backendStatusBusy;
+  const [activeTab, setActiveTab] = useState<SettingsTab>('library');
+  const shouldShowOfflineCachePanel =
+    settings.library_source === 'needle_backend' || offlineDownloads.length > 0 || offlineDownloadProgress != null;
+  const totalOfflineBytes = offlineDownloads.reduce((sum, entry) => sum + (entry.file_size ?? 0), 0);
+  const offlineDownloadProgressRatio = offlineDownloadProgress?.total_tracks
+    ? Math.min(1, offlineDownloadProgress.completed_tracks / offlineDownloadProgress.total_tracks)
+    : 0;
+  const offlineDownloadProgressPercent = Math.round(offlineDownloadProgressRatio * 100);
+  const offlineOperationBusy = offlineDownloadProgress?.status === 'running';
   const lastMaintenanceLabel = formatMaintenanceTimestamp(settings.last_maintenance_at);
   const lastLoudnessAnalysisLabel = formatMaintenanceTimestamp(settings.last_loudness_analysis_at);
   const [manualBandsDraft, setManualBandsDraft] = useState(() =>
@@ -7600,11 +9353,82 @@ function SettingsView({
   );
   const maintenanceLogRef = useRef<HTMLDivElement | null>(null);
   const loudnessAnalysisLogRef = useRef<HTMLDivElement | null>(null);
+  const bpmAuditBulkToggleRef = useRef<HTMLInputElement | null>(null);
   const missingRootsSet = useMemo(() => new Set(missingLibraryRoots), [missingLibraryRoots]);
+  const selectableBpmAuditPaths = useMemo(
+    () =>
+      bpmAuditItems
+        .filter((item) => item.suggestedAdjustment != null)
+        .map((item) => item.track.path),
+    [bpmAuditItems],
+  );
+  const selectableBpmAuditPathSet = useMemo(
+    () => new Set(selectableBpmAuditPaths),
+    [selectableBpmAuditPaths],
+  );
+  const [selectedBpmAuditPaths, setSelectedBpmAuditPaths] = useState<string[]>([]);
+  const [isApplyingBpmAuditSelection, setIsApplyingBpmAuditSelection] = useState(false);
+  const [isApplyingBpmAuditAutoFix, setIsApplyingBpmAuditAutoFix] = useState(false);
   const loudnessProgressRatio = loudnessAnalysisProgress?.total_tracks
     ? Math.min(1, loudnessAnalysisProgress.processed_tracks / loudnessAnalysisProgress.total_tracks)
     : 0;
   const loudnessProgressPercent = Math.round(loudnessProgressRatio * 100);
+  const selectedBpmAuditPathSet = useMemo(
+    () => new Set(selectedBpmAuditPaths),
+    [selectedBpmAuditPaths],
+  );
+  const selectedSuggestedBpmAuditCount = selectedBpmAuditPaths.length;
+  const hasSelectableBpmAuditItems = selectableBpmAuditPaths.length > 0;
+  const areAllSuggestedBpmAuditItemsSelected =
+    hasSelectableBpmAuditItems && selectedSuggestedBpmAuditCount === selectableBpmAuditPaths.length;
+  const hasSomeSuggestedBpmAuditItemsSelected =
+    selectedSuggestedBpmAuditCount > 0 && !areAllSuggestedBpmAuditItemsSelected;
+  const selectedSuggestedBpmAuditItems = useMemo(
+    () =>
+      bpmAuditItems.filter(
+        (item) =>
+          selectedBpmAuditPathSet.has(item.track.path) &&
+          item.suggestedAdjustment != null &&
+          !pendingBpmPaths.includes(item.track.path),
+      ),
+    [bpmAuditItems, pendingBpmPaths, selectedBpmAuditPathSet],
+  );
+  const highConfidenceBpmAuditItems = useMemo(
+    () =>
+      bpmAuditItems.filter(
+        (item) =>
+          item.autoFixEligible &&
+          item.suggestedAdjustment != null &&
+          !pendingBpmPaths.includes(item.track.path),
+      ),
+    [bpmAuditItems, pendingBpmPaths],
+  );
+  const isApplyingAnyBpmAuditChange = isApplyingBpmAuditSelection || isApplyingBpmAuditAutoFix;
+  const currentBpmAuditReviewIndex = currentBpmAuditReviewPath
+    ? bpmAuditItems.findIndex((item) => item.track.path === currentBpmAuditReviewPath)
+    : -1;
+  const currentBpmAuditReviewItem =
+    currentBpmAuditReviewIndex >= 0 ? bpmAuditItems[currentBpmAuditReviewIndex] ?? null : null;
+  const hasPreviousBpmAuditReviewItem = currentBpmAuditReviewIndex > 0;
+  const hasNextBpmAuditReviewItem =
+    currentBpmAuditReviewIndex >= 0 && currentBpmAuditReviewIndex < bpmAuditItems.length - 1;
+  const settingsTabs: Array<{ id: SettingsTab; label: string; description: string }> = [
+    {
+      id: 'library',
+      label: 'Library',
+      description: 'Backend mode, offline cache, metadata, and maintenance',
+    },
+    {
+      id: 'playback',
+      label: 'Playback',
+      description: 'Equalizer, loudness analysis, and listening controls',
+    },
+    {
+      id: 'appearance',
+      label: 'Appearance',
+      description: 'Theme and accent color',
+    },
+  ];
 
   useEffect(() => {
     setManualBandsDraft(normalizeEqualizerBands(settings.equalizer_bands));
@@ -7627,6 +9451,20 @@ function SettingsView({
 
     node.scrollTop = node.scrollHeight;
   }, [loudnessAnalysisLog]);
+
+  useEffect(() => {
+    setSelectedBpmAuditPaths((current) => {
+      const next = current.filter((path) => selectableBpmAuditPathSet.has(path));
+      return next.length === current.length ? current : next;
+    });
+  }, [selectableBpmAuditPathSet]);
+
+  useEffect(() => {
+    if (!bpmAuditBulkToggleRef.current) {
+      return;
+    }
+    bpmAuditBulkToggleRef.current.indeterminate = hasSomeSuggestedBpmAuditItemsSelected;
+  }, [hasSomeSuggestedBpmAuditItemsSelected]);
 
   const equalizerBands = isManualEqualizer ? manualBandsDraft : displayedEqualizerBands(settings);
 
@@ -7665,6 +9503,90 @@ function SettingsView({
     });
   };
 
+  const toggleBpmAuditSelection = (path: string, checked: boolean) => {
+    setSelectedBpmAuditPaths((current) => {
+      if (checked) {
+        return current.includes(path) ? current : current.concat(path);
+      }
+      return current.filter((entry) => entry !== path);
+    });
+  };
+
+  const setAllSuggestedBpmAuditSelections = (checked: boolean) => {
+    setSelectedBpmAuditPaths(checked ? selectableBpmAuditPaths : []);
+  };
+
+  const applySelectedBpmAuditSuggestions = async () => {
+    if (selectedSuggestedBpmAuditItems.length === 0 || isApplyingAnyBpmAuditChange) {
+      return;
+    }
+
+    setIsApplyingBpmAuditSelection(true);
+    try {
+      for (const item of selectedSuggestedBpmAuditItems) {
+        if (!item.suggestedAdjustment) {
+          continue;
+        }
+        await onAdjustBpm(item.track, item.suggestedAdjustment);
+      }
+      setSelectedBpmAuditPaths([]);
+    } finally {
+      setIsApplyingBpmAuditSelection(false);
+    }
+  };
+
+  const applyHighConfidenceBpmAuditSuggestions = async () => {
+    if (highConfidenceBpmAuditItems.length === 0 || isApplyingAnyBpmAuditChange) {
+      return;
+    }
+
+    setIsApplyingBpmAuditAutoFix(true);
+    try {
+      for (const item of highConfidenceBpmAuditItems) {
+        if (!item.suggestedAdjustment) {
+          continue;
+        }
+        await onAdjustBpm(item.track, item.suggestedAdjustment);
+      }
+      setSelectedBpmAuditPaths((current) =>
+        current.filter((path) => !highConfidenceBpmAuditItems.some((item) => item.track.path === path)),
+      );
+    } finally {
+      setIsApplyingBpmAuditAutoFix(false);
+    }
+  };
+
+  const applyBpmAuditAdjustment = async (
+    item: BpmAuditItem,
+    adjustment: Exclude<TrackBpmAdjustment, 'reset'>,
+  ) => {
+    const shouldAdvance = item.track.path === currentBpmAuditReviewPath;
+    const nextReviewTrack =
+      shouldAdvance
+        ? bpmAuditItems[
+            bpmAuditItems.findIndex((entry) => entry.track.path === item.track.path) + 1
+          ]?.track ?? null
+        : null;
+
+    await onAdjustBpm(item.track, adjustment);
+
+    if (shouldAdvance && nextReviewTrack) {
+      onStartBpmAuditReview(nextReviewTrack);
+    }
+  };
+
+  const dismissBpmAuditItem = (item: BpmAuditItem) => {
+    const currentIndex = bpmAuditItems.findIndex((entry) => entry.track.path === item.track.path);
+    const nextReviewTrack =
+      item.track.path === currentBpmAuditReviewPath
+        ? bpmAuditItems[currentIndex + 1]?.track ?? bpmAuditItems[currentIndex - 1]?.track ?? null
+        : null;
+    onDismissBpmAuditItem(item.track);
+    if (nextReviewTrack) {
+      onStartBpmAuditReview(nextReviewTrack);
+    }
+  };
+
   return (
     <div className="view">
       <header className="view-header">
@@ -7675,6 +9597,23 @@ function SettingsView({
       </header>
 
       <div className="settings">
+        <div className="settings-tabs" role="tablist" aria-label="Settings categories">
+          {settingsTabs.map((tab) => (
+            <button
+              key={tab.id}
+              className={`settings-tab ${activeTab === tab.id ? 'is-active' : ''}`}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              <span className="settings-tab-label">{tab.label}</span>
+              <span className="settings-tab-copy">{tab.description}</span>
+            </button>
+          ))}
+        </div>
+
+        {activeTab === 'appearance' && (
         <section className="settings-section">
           <div className="settings-section-head">
             <h2>Appearance</h2>
@@ -7733,7 +9672,10 @@ function SettingsView({
             </div>
           </div>
         </section>
+        )}
 
+        {activeTab === 'playback' && (
+        <>
         <section className="settings-section">
           <div className="settings-section-head">
             <h2>Equalizer</h2>
@@ -7815,7 +9757,11 @@ function SettingsView({
             </div>
           </div>
         </section>
+        </>
+        )}
 
+        {activeTab === 'library' && (
+        <>
         <section className="settings-section">
           <div className="settings-section-head">
             <h2>Metadata edits</h2>
@@ -7858,6 +9804,364 @@ function SettingsView({
             <h2>Library</h2>
             <p>Keep your library database in sync without touching the underlying audio files.</p>
           </div>
+          <div className="settings-row">
+            <div className="settings-row-copy">
+              <label className="settings-label">Library source</label>
+              <p className="settings-hint">
+                Choose whether this desktop app should stay local-first or prepare for a shared Needle backend library.
+              </p>
+            </div>
+            <div className="settings-row-control">
+              <div className="seg">
+                {librarySourceOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    className={`seg-btn ${settings.library_source === option.value ? 'on' : ''}`}
+                    onClick={() =>
+                      onChange({
+                        ...settings,
+                        library_source: option.value,
+                      })
+                    }
+                    title={option.hint}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <p className="settings-inline-note">
+                {librarySourceOptions.find((option) => option.value === settings.library_source)?.hint}
+              </p>
+            </div>
+          </div>
+          {settings.library_source === 'needle_backend' && (
+            <div className="settings-row settings-row-block">
+              <div className="settings-row-copy">
+                <label className="settings-label">Needle backend</label>
+                <p className="settings-hint">
+                  Add the backend URL here, check that the backend is reachable, and migrate your existing desktop library state into it.
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <div className="settings-backend-url-control">
+                  <input
+                    className="settings-backend-input"
+                    type="url"
+                    value={backendUrlValue}
+                    placeholder="Enter backend URL"
+                    onChange={(event) =>
+                      onChange({
+                        ...settings,
+                        needle_backend_url: event.currentTarget.value.trim() || null,
+                      })
+                    }
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                  />
+                  <input
+                    className="settings-backend-input"
+                    type="text"
+                    value={backendUsernameValue}
+                    placeholder="Needle backend username"
+                    onChange={(event) =>
+                      onChange({
+                        ...settings,
+                        needle_backend_username: event.currentTarget.value.trim() || null,
+                      })
+                    }
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    autoComplete="username"
+                  />
+                  <input
+                    className="settings-backend-input"
+                    type="password"
+                    value={backendPasswordValue}
+                    placeholder="Needle backend password"
+                    onChange={(event) =>
+                      onChange({
+                        ...settings,
+                        needle_backend_password: event.currentTarget.value || null,
+                      })
+                    }
+                    autoComplete="current-password"
+                  />
+                  <div className="settings-backend-actions">
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={onCheckBackend}
+                      disabled={!canCheckBackend}
+                    >
+                      {backendStatusBusy ? 'Checking…' : 'Check backend'}
+                    </button>
+                    <button
+                      className="primary"
+                      type="button"
+                      onClick={onMigrateBackend}
+                      disabled={!canMigrateBackend}
+                    >
+                      {backendMigrationBusy ? 'Migrating…' : 'Migrate local state'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className="settings-backend-note">
+                {backendUrlValue.trim().length === 0
+                  ? 'Enter the backend URL to enable the connection check. Example: http://localhost:2104'
+                  : backendUsernameValue.trim().length === 0 || backendPasswordValue.trim().length === 0
+                    ? 'Enter the Needle backend username and password created in the web player before checking the connection.'
+                  : backendStatus?.enabled
+                    ? 'Backend verified. You can migrate your local Needle state now.'
+                    : 'Check the backend first. Migration unlocks after Needle confirms the backend is ready.'}
+              </div>
+              <div className="settings-backend-note">
+                This pass migrates playlists, track favourites and history, metadata caches, loudness-analysis data, and the shared playback session into the backend.
+              </div>
+              {backendFeedback && (
+                <div className={`settings-backend-feedback is-${backendFeedback.tone}`} role="status">
+                  {backendFeedback.message}
+                </div>
+              )}
+              {backendStatus?.enabled !== true && backendUrlValue.trim().length > 0 && (
+                <div className="settings-backend-note">
+                  Migrate local state stays disabled until the backend responds successfully from Check backend.
+                </div>
+              )}
+              {backendStatus && (
+                <div className="settings-backend-status" role="status">
+                  <div className="settings-backend-status-head">
+                    <strong>{backendStatus.enabled ? 'Backend ready' : 'Backend reachable'}</strong>
+                    <span>{backendStatus.url}</span>
+                  </div>
+                  <div className="settings-backend-stats">
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Mode</span>
+                      <strong>{backendStatus.mode ?? 'Unknown'}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Roots</span>
+                      <strong>{backendStatus.roots_configured}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Tracks</span>
+                      <strong>{backendStatus.track_count ?? '—'}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Albums</span>
+                      <strong>{backendStatus.album_count ?? '—'}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Artists</span>
+                      <strong>{backendStatus.artist_count ?? '—'}</strong>
+                    </div>
+                  </div>
+                  {backendStatus.configured_roots.length > 0 && (
+                    <div className="settings-backend-roots">
+                      {backendStatus.configured_roots.map((root) => (
+                        <code key={root}>{root}</code>
+                      ))}
+                    </div>
+                  )}
+                  {backendStatus.last_scan_status && (
+                    <div className="settings-backend-note">Last backend scan: {backendStatus.last_scan_status}</div>
+                  )}
+                </div>
+              )}
+              {backendMigrationReport && (
+                <div className="settings-backend-migration-summary" role="status">
+                  <div className="settings-backend-status-head">
+                    <strong>Latest migration</strong>
+                    <span>{backendMigrationReport.import_summary.source_database_path ?? 'Desktop library.sqlite'}</span>
+                  </div>
+                  <div className="settings-backend-stats">
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Playlists</span>
+                      <strong>{backendMigrationReport.import_summary.playlists_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Playlist misses</span>
+                      <strong>{backendMigrationReport.import_summary.playlist_tracks_missing}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Track state</span>
+                      <strong>{backendMigrationReport.import_summary.track_app_state_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Track-state misses</span>
+                      <strong>{backendMigrationReport.import_summary.track_app_state_missing}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Overrides</span>
+                      <strong>{backendMigrationReport.import_summary.track_metadata_overrides_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Loudness rows</span>
+                      <strong>{backendMigrationReport.import_summary.track_loudness_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Artist images</span>
+                      <strong>{backendMigrationReport.import_summary.artist_images_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Artist info</span>
+                      <strong>{backendMigrationReport.import_summary.artist_infos_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Album info</span>
+                      <strong>{backendMigrationReport.import_summary.album_infos_imported}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Playback session</span>
+                      <strong>{backendMigrationReport.import_summary.playback_session_imported ? 'Imported' : 'Skipped'}</strong>
+                    </div>
+                  </div>
+                  {backendMigrationReport.root_mappings.length > 0 && (
+                    <div className="settings-backend-mappings">
+                      {backendMigrationReport.root_mappings.map((mapping) => (
+                        <div key={`${mapping.source_prefix}->${mapping.target_prefix}`} className="settings-backend-mapping">
+                          <div className="settings-backend-mapping-path">
+                            <span className="settings-backend-mapping-label">Desktop root</span>
+                            <code>{mapping.source_prefix}</code>
+                          </div>
+                          <span className="settings-backend-mapping-arrow" aria-hidden="true">→</span>
+                          <div className="settings-backend-mapping-path">
+                            <span className="settings-backend-mapping-label">Backend root</span>
+                            <code>{mapping.target_prefix}</code>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {backendMigrationReport.unmapped_roots.length > 0 && (
+                    <div className="settings-backend-note">
+                      Unmapped local roots will need manual attention:
+                      {' '}
+                      {backendMigrationReport.unmapped_roots.join(', ')}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+          {shouldShowOfflineCachePanel && (
+            <div className="settings-row settings-row-block">
+              <div className="settings-row-copy">
+                <label className="settings-label">Offline cache</label>
+                <p className="settings-hint">
+                  Keep selected backend tracks on this computer for offline playback. Needle will prefer these local copies whenever they exist.
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <div className="settings-backend-status settings-offline-cache" role="status">
+                  <div className="settings-backend-status-head">
+                    <strong>{offlineDownloads.length > 0 ? 'Downloads ready' : 'No offline downloads yet'}</strong>
+                    <span>{settings.library_source === 'needle_backend' ? 'Backend-mode media cache' : 'Cached from Needle backend'}</span>
+                  </div>
+                  <div className="settings-backend-stats">
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Cached tracks</span>
+                      <strong>{offlineDownloads.length.toLocaleString()}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Storage used</span>
+                      <strong>{formatFileSize(totalOfflineBytes)}</strong>
+                    </div>
+                    <div className="settings-backend-stat">
+                      <span className="settings-backend-stat-label">Latest offline copy</span>
+                      <strong>
+                        {formatMaintenanceTimestamp(offlineDownloads[0]?.downloaded_at) ?? '—'}
+                      </strong>
+                    </div>
+                  </div>
+                  {offlineDownloadProgress && (
+                    <div className="settings-offline-progress">
+                      <div className="settings-offline-progress-head">
+                        <strong>
+                          {offlineDownloadProgress.operation === 'download' ? 'Offline download' : 'Offline cleanup'}
+                          {' '}
+                          {offlineDownloadProgress.status === 'running'
+                            ? 'in progress'
+                            : offlineDownloadProgress.status === 'completed'
+                              ? 'complete'
+                              : 'interrupted'}
+                        </strong>
+                        <span>
+                          {offlineDownloadProgress.completed_tracks.toLocaleString()} /{' '}
+                          {offlineDownloadProgress.total_tracks.toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="settings-offline-progress-bar" aria-hidden="true">
+                        <div
+                          className="settings-offline-progress-bar-fill"
+                          style={{ width: `${offlineDownloadProgressPercent}%` }}
+                        />
+                      </div>
+                      <div className="settings-offline-progress-note">
+                        {offlineDownloadProgress.status === 'error' && offlineDownloadProgress.error_message
+                          ? offlineDownloadProgress.error_message
+                          : offlineDownloadCurrentLabel
+                            ? `${offlineDownloadProgress.operation === 'download' ? 'Current track' : 'Current removal'}: ${offlineDownloadCurrentLabel}`
+                            : offlineDownloadProgress.status === 'completed'
+                              ? 'The latest offline batch finished successfully.'
+                              : 'Needle is processing your offline media selection in the background.'}
+                      </div>
+                    </div>
+                  )}
+                  <div className="settings-backend-actions">
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={() => void onClearOfflineDownloads()}
+                      disabled={offlineDownloads.length === 0 || offlineOperationBusy}
+                    >
+                      Remove all offline copies
+                    </button>
+                  </div>
+                  {offlineDownloads.length > 0 ? (
+                    <>
+                      <div className="settings-offline-list">
+                        {offlineDownloads.slice(0, 12).map((entry) => {
+                          const cachedTrack = offlineTrackDetails[entry.track_path];
+                          return (
+                            <div key={entry.track_path} className="settings-offline-item">
+                              <div className="settings-offline-item-copy">
+                                <strong>{cachedTrack?.title ?? entry.track_path.split('/').pop() ?? entry.track_path}</strong>
+                                <span>{cachedTrack?.subtitle ?? entry.track_path}</span>
+                              </div>
+                              <div className="settings-offline-item-meta">
+                                <span>{formatFileSize(entry.file_size)}</span>
+                                <span>{formatMaintenanceTimestamp(entry.downloaded_at) ?? 'Saved locally'}</span>
+                              </div>
+                              <button
+                                className="ghost-button"
+                                type="button"
+                                onClick={() => void onRemoveOfflineTrack(entry.track_path)}
+                                disabled={offlineOperationBusy}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {offlineDownloads.length > 12 && (
+                        <div className="settings-backend-note">
+                          Showing the latest 12 offline copies. Needle is currently caching {offlineDownloads.length.toLocaleString()} tracks on this computer.
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="settings-backend-note">
+                      Download a track or album while using Needle backend mode and it will appear here for quick cleanup.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
           <div className="settings-row settings-row-block">
             <div className="settings-row-copy">
               <label className="settings-label">Folders</label>
@@ -7950,6 +10254,339 @@ function SettingsView({
 
         <section className="settings-section">
           <div className="settings-section-head">
+            <h2>BPM sanity check</h2>
+            <p>
+              Review tracks whose BPM looks suspicious for their range, genre families, album context, or is missing
+              entirely, then fix them in place.
+            </p>
+          </div>
+          <div className="settings-row settings-row-block">
+            <div className="settings-row-copy">
+              <label className="settings-label">Flagged tracks</label>
+              <p className="settings-hint">
+                Needle highlights likely half-time and double-time mistakes such as `95` vs `190`, obvious album
+                outliers, and tracks with no BPM tag yet.
+              </p>
+            </div>
+            {bpmAuditItems.length === 0 ? (
+              <div className="settings-bpm-audit-empty">
+                <div className="settings-library-empty">
+                  {dismissedBpmAuditCount > 0
+                    ? 'All current BPM audit candidates are marked as intentional.'
+                    : 'No suspicious or missing BPMs stood out in the current library snapshot.'}
+                </div>
+                {dismissedBpmAuditCount > 0 && (
+                  <button className="ghost-button" type="button" onClick={onClearDismissedBpmAuditItems}>
+                    Restore {dismissedBpmAuditCount} dismissed
+                  </button>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="settings-bpm-audit-toolbar">
+                  <div className="settings-bpm-audit-toolbar-copy">
+                    <div className="settings-maintenance-meta">
+                      Showing {bpmAuditItems.length} BPM candidates and missing-tag tracks to review.
+                    </div>
+                    {hasSelectableBpmAuditItems && (
+                      <label className="settings-bpm-audit-toggle">
+                        <input
+                          ref={bpmAuditBulkToggleRef}
+                          type="checkbox"
+                          checked={areAllSuggestedBpmAuditItemsSelected}
+                          onChange={(event) => setAllSuggestedBpmAuditSelections(event.currentTarget.checked)}
+                          disabled={isApplyingAnyBpmAuditChange}
+                        />
+                        <span>
+                          Select all suggested fixes
+                          {selectedSuggestedBpmAuditCount > 0
+                            ? ` · ${selectedSuggestedBpmAuditCount} selected`
+                            : ''}
+                        </span>
+                      </label>
+                    )}
+                  </div>
+                  <div className="settings-bpm-audit-toolbar-actions">
+                    {dismissedBpmAuditCount > 0 && (
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={onClearDismissedBpmAuditItems}
+                        disabled={isApplyingAnyBpmAuditChange}
+                        title="Show BPMs you previously marked as intentional again"
+                      >
+                        Restore {dismissedBpmAuditCount} dismissed
+                      </button>
+                    )}
+                    {selectedSuggestedBpmAuditCount > 0 && (
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={() => setSelectedBpmAuditPaths([])}
+                        disabled={isApplyingAnyBpmAuditChange}
+                      >
+                        Clear
+                      </button>
+                    )}
+                    {highConfidenceBpmAuditItems.length > 0 && (
+                      <button
+                        className="row-action-button settings-bpm-audit-apply-button is-auto"
+                        type="button"
+                        onClick={() => void applyHighConfidenceBpmAuditSuggestions()}
+                        disabled={isApplyingAnyBpmAuditChange}
+                        title="Best-effort album-based auto-fixes for the strongest half/double-time BPM candidates"
+                      >
+                        {isApplyingBpmAuditAutoFix
+                          ? 'Auto-fixing…'
+                          : `Auto-fix ${highConfidenceBpmAuditItems.length} high-confidence candidate${
+                              highConfidenceBpmAuditItems.length === 1 ? '' : 's'
+                            }`}
+                      </button>
+                    )}
+                    <button
+                      className="row-action-button settings-bpm-audit-apply-button is-suggested"
+                      type="button"
+                      onClick={() => void applySelectedBpmAuditSuggestions()}
+                      disabled={selectedSuggestedBpmAuditItems.length === 0 || isApplyingAnyBpmAuditChange}
+                    >
+                      {isApplyingBpmAuditSelection
+                        ? 'Applying…'
+                        : `Apply ${selectedSuggestedBpmAuditItems.length} suggestion${
+                            selectedSuggestedBpmAuditItems.length === 1 ? '' : 's'
+                          }`}
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-bpm-review-bar">
+                  <div className="settings-bpm-review-copy">
+                    <div className="settings-bpm-review-title">Review mode</div>
+                    <div className="settings-bpm-review-sub">
+                      {currentBpmAuditReviewItem
+                        ? `${currentBpmAuditReviewItem.track.title} · ${
+                            currentBpmAuditReviewItem.track.artist ?? 'Unknown artist'
+                          }`
+                        : 'Preview flagged tracks or missing-BPM tracks before you update them.'}
+                    </div>
+                    {highConfidenceBpmAuditItems.length > 0 && (
+                      <div className="settings-bpm-review-note">
+                        Needle can auto-fix the strongest album-based BPM spikes, but it is still a best-effort heuristic.
+                      </div>
+                    )}
+                    {dismissedBpmAuditCount > 0 && (
+                      <div className="settings-bpm-review-note">
+                        {dismissedBpmAuditCount} track{dismissedBpmAuditCount === 1 ? '' : 's'} marked as intentional
+                        BPM {dismissedBpmAuditCount === 1 ? 'is' : 'are'} hidden from this queue.
+                      </div>
+                    )}
+                  </div>
+                  <div className="settings-bpm-review-controls">
+                    <button
+                      className="row-icon-button"
+                      type="button"
+                      onClick={() => onStepBpmAuditReview(-1)}
+                      disabled={!hasPreviousBpmAuditReviewItem}
+                      title="Previous flagged track"
+                      aria-label="Previous flagged track"
+                    >
+                      <PreviousIcon />
+                    </button>
+                    <button
+                      className="row-icon-button settings-bpm-review-toggle"
+                      type="button"
+                      onClick={() =>
+                        onToggleBpmAuditReviewPlayback(currentBpmAuditReviewItem?.track ?? bpmAuditItems[0]?.track ?? null)
+                      }
+                      disabled={bpmAuditItems.length === 0}
+                      title={
+                        currentBpmAuditReviewItem
+                          ? isBpmAuditReviewPlaying
+                            ? 'Pause BPM review'
+                            : 'Resume BPM review'
+                          : 'Start BPM review'
+                      }
+                      aria-label={
+                        currentBpmAuditReviewItem
+                          ? isBpmAuditReviewPlaying
+                            ? 'Pause BPM review'
+                            : 'Resume BPM review'
+                          : 'Start BPM review'
+                      }
+                    >
+                      {currentBpmAuditReviewItem && isBpmAuditReviewPlaying ? <PauseIcon /> : <PlayIcon />}
+                    </button>
+                    <button
+                      className="row-icon-button"
+                      type="button"
+                      onClick={() => onStepBpmAuditReview(1)}
+                      disabled={!hasNextBpmAuditReviewItem}
+                      title="Next flagged track"
+                      aria-label="Next flagged track"
+                    >
+                      <NextIcon />
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-bpm-audit-list">
+                  {bpmAuditItems.map((item) => {
+                    const bpmPending = pendingBpmPaths.includes(item.track.path);
+                    const isSelectable = item.suggestedAdjustment != null;
+                    const isSelected = selectedBpmAuditPathSet.has(item.track.path);
+                    const isReviewing = item.track.path === currentBpmAuditReviewPath;
+                    const isMissingBpm = item.track.bpm == null || item.track.bpm <= 0;
+                    const suggestedActionLabel =
+                      item.suggestedAdjustment === 'half'
+                        ? `Apply halve${item.track.bpm ? ` to ${Math.max(1, Math.round(item.track.bpm / 2))} BPM` : ''}`
+                        : item.suggestedAdjustment === 'double'
+                          ? `Apply double${item.track.bpm ? ` to ${Math.max(1, item.track.bpm * 2)} BPM` : ''}`
+                          : null;
+                    return (
+                      <div
+                        key={item.track.path}
+                        className={`settings-bpm-audit-item ${isReviewing ? 'is-reviewing' : ''}`}
+                      >
+                        <label
+                          className={`settings-bpm-audit-select ${isSelectable ? '' : 'is-disabled'}`}
+                          title={isSelectable ? 'Select this suggested fix' : 'No automatic suggestion yet'}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(event) => toggleBpmAuditSelection(item.track.path, event.currentTarget.checked)}
+                            disabled={!isSelectable || isApplyingAnyBpmAuditChange}
+                          />
+                        </label>
+                        <div className="settings-bpm-audit-copy">
+                          <div className="settings-bpm-audit-head">
+                            <div className="settings-bpm-audit-title">{item.track.title}</div>
+                          </div>
+                          <div className="settings-bpm-audit-sub">
+                            {(item.track.artist ?? 'Unknown artist') + ' — ' + (item.track.album ?? 'Unknown album')}
+                          </div>
+                          <div className="settings-bpm-audit-meta">
+                            {formatTrackDetails(item.track)}
+                            {isMissingBpm && (
+                              <span className="settings-bpm-audit-suggestion">
+                                Missing BPM
+                              </span>
+                            )}
+                            {item.suggestedAdjustment && (
+                              <span className="settings-bpm-audit-suggestion">
+                                {item.suggestedAdjustment === 'half' ? 'Suggested: halve' : 'Suggested: double'}
+                              </span>
+                            )}
+                            {item.confidence !== 'low' && (
+                              <span
+                                className={`settings-bpm-audit-confidence is-${item.confidence}`}
+                                title={
+                                  item.confidence === 'high'
+                                    ? 'Strong album-based half/double-time candidate'
+                                    : 'Multiple audit signals point in the same direction'
+                                }
+                              >
+                                {item.confidence === 'high' ? 'High confidence' : 'Medium confidence'}
+                              </span>
+                            )}
+                          </div>
+                          <div className="settings-bpm-audit-reasons">
+                            {item.reasons.map((reason) => (
+                              <span key={`${item.track.path}-${reason.id}`} className="settings-bpm-audit-reason">
+                                {reason.label}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="settings-bpm-audit-actions">
+                          <button
+                            className={`row-icon-button ${isReviewing ? 'is-queued' : ''}`}
+                            type="button"
+                            onClick={() =>
+                              isReviewing
+                                ? onToggleBpmAuditReviewPlayback(item.track)
+                                : onStartBpmAuditReview(item.track)
+                            }
+                            disabled={isApplyingAnyBpmAuditChange}
+                            title={
+                              isReviewing
+                                ? isBpmAuditReviewPlaying
+                                  ? `Pause ${item.track.title}`
+                                  : `Resume ${item.track.title}`
+                                : `Preview ${item.track.title}`
+                            }
+                            aria-label={
+                              isReviewing
+                                ? isBpmAuditReviewPlaying
+                                  ? `Pause ${item.track.title}`
+                                  : `Resume ${item.track.title}`
+                                : `Preview ${item.track.title}`
+                            }
+                          >
+                            {isReviewing && isBpmAuditReviewPlaying ? <PauseIcon /> : <PlayIcon />}
+                          </button>
+                          {item.suggestedAdjustment ? (
+                            <button
+                              className="row-action-button settings-bpm-audit-apply-button is-suggested"
+                              type="button"
+                              onClick={() => {
+                                if (item.suggestedAdjustment === 'half' || item.suggestedAdjustment === 'double') {
+                                  void applyBpmAuditAdjustment(item, item.suggestedAdjustment);
+                                }
+                              }}
+                              disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                            >
+                              {suggestedActionLabel}
+                            </button>
+                          ) : !isMissingBpm ? (
+                            <>
+                              <button
+                                className="row-action-button"
+                                type="button"
+                                onClick={() => void applyBpmAuditAdjustment(item, 'half')}
+                                disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                              >
+                                Halve
+                              </button>
+                              <button
+                                className="row-action-button"
+                                type="button"
+                                onClick={() => void applyBpmAuditAdjustment(item, 'double')}
+                                disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                              >
+                                Double
+                              </button>
+                            </>
+                          ) : null}
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            onClick={() => onOpenBpmEditor(item.track)}
+                            disabled={bpmPending || isApplyingAnyBpmAuditChange}
+                          >
+                            {isMissingBpm ? 'Set BPM…' : 'Edit BPM…'}
+                          </button>
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            onClick={() => dismissBpmAuditItem(item)}
+                            disabled={isApplyingAnyBpmAuditChange}
+                            title="Mark this BPM as intentional so it stops appearing in the audit queue"
+                          >
+                            Mark intentional
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+        </>
+        )}
+
+        {activeTab === 'playback' && (
+        <section className="settings-section">
+          <div className="settings-section-head">
             <h2>Playback</h2>
             <p>Needle plays through mpv for local, bit-perfect playback.</p>
           </div>
@@ -7985,6 +10622,9 @@ function SettingsView({
               </p>
               <p className="settings-hint">
                 It keeps running while you browse or play music. The first pass can take a while on larger libraries, but later runs only revisit changed files.
+              </p>
+              <p className="settings-hint">
+                If Needle upgrades its loudness-analysis method, one run may intentionally refresh older cached results across the library.
               </p>
             </div>
             <div className="settings-row-control">
@@ -8092,13 +10732,14 @@ function SettingsView({
           </div>
           <div className="settings-row">
             <div className="settings-row-copy">
-              <label className="settings-label">Backend</label>
+              <label className="settings-label">mpv</label>
               <p className="settings-hint">
                 On macOS install it with <code>brew install mpv</code> if it is not already available.
               </p>
             </div>
           </div>
         </section>
+        )}
       </div>
     </div>
   );
@@ -8108,8 +10749,8 @@ interface DashboardViewProps {
   tracks: Track[];
   albums: AlbumSummary[];
   recentAlbums: AlbumSummary[];
-  artists: Array<{ artist: string; count: number }>;
-  playlists: AutoPlaylist[];
+  artists: ArtistSummary[];
+  playlistSections: DashboardPlaylistSection[];
   currentTrack: Track | null;
   isPlaying: boolean;
   featuredSeed: number;
@@ -8129,6 +10770,8 @@ interface DashboardViewProps {
   onOpenView: (view: View) => void;
   onPlay: (track: Track) => void;
   busy: boolean;
+  isNeedleBackendMode: boolean;
+  isBackendOfflineMode: boolean;
 }
 
 function DashboardView({
@@ -8136,7 +10779,7 @@ function DashboardView({
   albums,
   recentAlbums,
   artists,
-  playlists,
+  playlistSections,
   currentTrack,
   isPlaying,
   featuredSeed,
@@ -8156,11 +10799,13 @@ function DashboardView({
   onOpenView,
   onPlay,
   busy,
+  isNeedleBackendMode,
+  isBackendOfflineMode,
 }: DashboardViewProps) {
   const currentArtwork = useCoverArt(currentTrack?.path);
   const dashboardBackdrop = currentArtwork ?? dashboardIdleBackdrop;
   const featured = useMemo(
-    () => sampleN(albums, 6),
+    () => sampleN(albums, 5),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [albums, featuredSeed],
   );
@@ -8177,29 +10822,83 @@ function DashboardView({
   );
   const heroBackdropStyle = { backgroundImage: `url(${dashboardBackdrop})` };
   const recordLabelStyle = currentArtwork ? ({ backgroundImage: `url(${currentArtwork})` } as CSSProperties) : undefined;
+  const fromYourLibrarySection = playlistSections.find((section) => section.id === 'library') ?? null;
+  const signaturesSection = playlistSections.find((section) => section.id === 'signatures') ?? null;
+  const vibesSection = playlistSections.find((section) => section.id === 'vibes') ?? null;
 
   const isEmpty = tracks.length === 0;
 
-  if (isEmpty) {
+  const renderPlaylistSection = (section: DashboardPlaylistSection) => (
+    <section key={section.id} className="dashboard-section">
+      <div className="section-head">
+        <h2 className="section-title">{section.title}</h2>
+      </div>
+      <div
+        className="playlist-grid"
+        style={
+          {
+            ['--playlist-grid-columns' as string]: String(Math.min(Math.max(section.playlists.length, 1), 4)),
+          } as CSSProperties
+        }
+      >
+        {section.playlists.map((pl) => (
+          <div key={pl.id} className="playlist-card" style={{ background: pl.accent }}>
+            <button
+              className="playlist-open"
+              onClick={() => onOpenPlaylist(pl)}
+              title={`Open ${pl.name}`}
+            >
+              <div className="playlist-name">{pl.name}</div>
+              <div className="playlist-desc">{pl.description}</div>
+              <div className="playlist-meta">{pl.tracks.length} tracks</div>
+            </button>
+            <button
+              className="playlist-play"
+              onClick={() => onPlayPlaylist(pl)}
+              title="Shuffle play"
+            >
+              ▶
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+
+  if (isEmpty && !isNeedleBackendMode) {
+    const isBackendOfflineEmptyState = false;
     return (
       <div className="view dashboard">
         <header className="dashboard-hero">
           <div>
             <div className="view-eyebrow">{greeting()}</div>
-            <h1 className="view-title">Welcome to Needle</h1>
+            <h1 className="view-title">
+              {isBackendOfflineEmptyState ? 'Needle backend offline' : 'Welcome to Needle'}
+            </h1>
             <p className="dashboard-lead">
-              Your library is empty. Import a folder of music to get started — FLAC, ALAC, WAV, AIFF, M4A, AAC, MP3,
-              OGG, and Opus are all supported.
+              {isBackendOfflineEmptyState
+                ? "Needle couldn't reach your homeserver, and there are no downloaded tracks on this computer yet."
+                : 'Your library is empty. Import a folder of music to get started — FLAC, ALAC, WAV, AIFF, M4A, AAC, MP3, OGG, and Opus are all supported.'}
             </p>
           </div>
         </header>
         <div className="empty">
           <div className="empty-icon">♪</div>
-          <h2>No music yet</h2>
-          <p>Add a folder to begin scanning. Your audio files are never modified.</p>
-          <button className="primary" onClick={onAddFolder} disabled={busy} style={{ marginTop: 12 }}>
-            + Add folder
-          </button>
+          <h2>{isBackendOfflineEmptyState ? 'No offline downloads available' : 'No music yet'}</h2>
+          <p>
+            {isBackendOfflineEmptyState
+              ? 'Reconnect the backend, or download albums and tracks for offline playback before going offline next time.'
+              : 'Add a folder to begin scanning. Your audio files are never modified.'}
+          </p>
+          {isBackendOfflineEmptyState ? (
+            <button className="ghost-button" onClick={onOpenSettings} style={{ marginTop: 12 }}>
+              Open settings
+            </button>
+          ) : (
+            <button className="primary" onClick={onAddFolder} disabled={busy} style={{ marginTop: 12 }}>
+              + Add folder
+            </button>
+          )}
         </div>
       </div>
     );
@@ -8275,6 +10974,7 @@ function DashboardView({
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
                     vinylRip={a.is_vinyl_rip}
+                    offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
                   />
@@ -8313,40 +11013,7 @@ function DashboardView({
         </section>
       )}
 
-      {playlists.length > 0 && (
-        <section className="dashboard-section">
-          <div className="section-head">
-            <h2 className="section-title">From your library</h2>
-            <div className="section-actions">
-              <button className="ghost-button" onClick={onShuffleFeatured}>
-                ↻ Refresh
-              </button>
-            </div>
-          </div>
-          <div className="playlist-grid">
-            {playlists.map((pl) => (
-              <div key={pl.id} className="playlist-card" style={{ background: pl.accent }}>
-                <button
-                  className="playlist-open"
-                  onClick={() => onOpenPlaylist(pl)}
-                  title={`Open ${pl.name}`}
-                >
-                  <div className="playlist-name">{pl.name}</div>
-                  <div className="playlist-desc">{pl.description}</div>
-                  <div className="playlist-meta">{pl.tracks.length} tracks</div>
-                </button>
-                <button
-                  className="playlist-play"
-                  onClick={() => onPlayPlaylist(pl)}
-                  title="Shuffle play"
-                >
-                  ▶
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
+      {fromYourLibrarySection && renderPlaylistSection(fromYourLibrarySection)}
 
       {featured.length > 0 && (
         <section className="dashboard-section">
@@ -8370,6 +11037,7 @@ function DashboardView({
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
                     vinylRip={a.is_vinyl_rip}
+                    offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
                   />
@@ -8408,6 +11076,8 @@ function DashboardView({
         </section>
       )}
 
+      {signaturesSection && renderPlaylistSection(signaturesSection)}
+
       {topArtists.length > 0 && (
         <section className="dashboard-section">
           <div className="section-head">
@@ -8423,7 +11093,13 @@ function DashboardView({
                   className="artist-tile"
                   onClick={() => onOpenArtist(a.artist)}
                 >
-                  <ArtistAvatar name={a.artist} size="lg" imageMode="cache_only" lazyLoad />
+                  <ArtistAvatar
+                    name={a.artist}
+                    size="lg"
+                    imageMode={isBackendOfflineMode ? 'cache_only' : 'deferred'}
+                    fallbackTrackPath={a.samplePath}
+                    lazyLoad
+                  />
                   <div className="artist-tile-name">{a.artist}</div>
                   <div className="artist-tile-meta">{a.count} tracks</div>
                 </button>
@@ -8439,6 +11115,8 @@ function DashboardView({
           </div>
         </section>
       )}
+
+      {vibesSection && renderPlaylistSection(vibesSection)}
 
       <section className="dashboard-section">
         <div className="section-head">

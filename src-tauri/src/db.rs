@@ -7,9 +7,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::artist::ArtistGender;
 use crate::models::{
     default_equalizer_bands, default_tracks_page_size, AppSettings, BootstrapPayload,
-    EqualizerPreset, LibraryData, MetadataEditMode, PlaybackSession, SavedPlaylist,
-    SavedPlaylistRule, ThemeMode, Track, TrackBpmAdjustment, TrackMetadataOverride,
+    EqualizerPreset, ImportedAlbumInfo, ImportedAlbumPrimaryGenre, ImportedArtistImage,
+    ImportedArtistInfo, ImportedDesktopPlaylist, ImportedTrackAppState, ImportedTrackLoudness,
+    ImportedTrackMetadataOverride, LibraryData, LibrarySource, MetadataEditMode,
+    OfflineDownloadEntry, PlaybackSession, SavedPlaylist, SavedPlaylistRule, ThemeMode, Track,
+    TrackBpmAdjustment, TrackMetadataOverride,
 };
+
+fn parse_local_playlist_id(value: &str) -> Result<i64> {
+    value
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| anyhow!("Playlist is not available in local-library mode"))
+}
 
 fn normalize_hex_color(value: &str) -> Option<String> {
     let trimmed = value.trim();
@@ -39,6 +49,23 @@ pub struct TrackLoudnessAnalysisRecord {
     pub analysis_version: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct BackendTrackLoudnessCacheEntry {
+    pub track_path: String,
+    pub source_fingerprint: String,
+    pub analysis_version: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackendTrackLoudnessAnalysisRecord {
+    pub track_path: String,
+    pub integrated_lufs: f32,
+    pub true_peak_db: f32,
+    pub target_gain_db: f32,
+    pub source_fingerprint: String,
+    pub analysis_version: i64,
+}
+
 pub fn init_database(db_path: &Path) -> Result<()> {
     let connection = Connection::open(db_path)?;
 
@@ -64,6 +91,7 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             play_count INTEGER NOT NULL DEFAULT 0,
             last_played_at TEXT,
+            is_favorite INTEGER NOT NULL DEFAULT 0,
             rating INTEGER
         );
 
@@ -155,6 +183,30 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             analysis_version INTEGER NOT NULL DEFAULT 1,
             analyzed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS backend_track_loudness (
+            track_path TEXT PRIMARY KEY,
+            integrated_lufs REAL NOT NULL,
+            true_peak_db REAL NOT NULL,
+            target_gain_db REAL NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            analysis_version INTEGER NOT NULL DEFAULT 1,
+            analyzed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS offline_downloads (
+            track_path TEXT PRIMARY KEY,
+            local_path TEXT NOT NULL,
+            content_type TEXT,
+            file_size INTEGER,
+            downloaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS backend_bootstrap_cache (
+            cache_key TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         ",
     )?;
 
@@ -181,6 +233,10 @@ pub fn init_database(db_path: &Path) -> Result<()> {
         "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
         params!["metadata_edit_mode", "needle_only"],
     )?;
+    connection.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+        params!["library_source", "local_folders"],
+    )?;
 
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN genre TEXT", []);
     let _ = connection.execute(
@@ -198,6 +254,10 @@ pub fn init_database(db_path: &Path) -> Result<()> {
         [],
     );
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN last_played_at TEXT", []);
+    let _ = connection.execute(
+        "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     let _ = connection.execute("ALTER TABLE tracks ADD COLUMN rating INTEGER", []);
     let _ = connection.execute("ALTER TABLE artist_info ADD COLUMN gender TEXT", []);
     let _ = connection.execute(
@@ -308,6 +368,43 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
         )
         .unwrap_or_else(|_| "needle_only".to_string());
 
+    let library_source = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'library_source'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "local_folders".to_string());
+
+    let needle_backend_url = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'needle_backend_url'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let needle_backend_username = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'needle_backend_username'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let needle_backend_password = connection
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'needle_backend_password'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
     let last_maintenance_at = connection
         .query_row(
             "SELECT value FROM settings WHERE key = 'last_maintenance_at'",
@@ -353,6 +450,13 @@ pub fn load_settings(db_path: &Path) -> Result<AppSettings> {
             "write_to_files" => MetadataEditMode::WriteToFiles,
             _ => MetadataEditMode::NeedleOnly,
         },
+        library_source: match library_source.as_str() {
+            "needle_backend" => LibrarySource::NeedleBackend,
+            _ => LibrarySource::LocalFolders,
+        },
+        needle_backend_url,
+        needle_backend_username,
+        needle_backend_password,
         tracks_page_size,
         last_maintenance_at,
         last_loudness_analysis_at,
@@ -391,6 +495,68 @@ pub fn save_settings(db_path: &Path, settings: &AppSettings) -> Result<AppSettin
             equalizer_to_str(&settings.equalizer_preset)
         ],
     )?;
+
+    connection.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![
+            "library_source",
+            match settings.library_source {
+                LibrarySource::NeedleBackend => "needle_backend",
+                LibrarySource::LocalFolders => "local_folders",
+            }
+        ],
+    )?;
+
+    if let Some(backend_url) = settings
+        .needle_backend_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params!["needle_backend_url", backend_url],
+        )?;
+    } else {
+        connection.execute("DELETE FROM settings WHERE key = 'needle_backend_url'", [])?;
+    }
+
+    if let Some(username) = settings
+        .needle_backend_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params!["needle_backend_username", username],
+        )?;
+    } else {
+        connection.execute(
+            "DELETE FROM settings WHERE key = 'needle_backend_username'",
+            [],
+        )?;
+    }
+
+    if let Some(password) = settings
+        .needle_backend_password
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params!["needle_backend_password", password],
+        )?;
+    } else {
+        connection.execute(
+            "DELETE FROM settings WHERE key = 'needle_backend_password'",
+            [],
+        )?;
+    }
 
     connection.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -688,6 +854,7 @@ pub fn load_album_tracks_for_match(
                t.added_at,
                t.play_count,
                t.last_played_at,
+               t.is_favorite,
                t.rating
         FROM tracks t
         LEFT JOIN track_metadata_overrides tmo ON tmo.track_path = t.path
@@ -707,7 +874,7 @@ pub fn load_album_tracks_for_match(
     let tracks = statement
         .query_map(params![normalized_album, normalized_album_artist], |row| {
             Ok(Track {
-                id: row.get(0)?,
+                id: row.get::<_, i64>(0)?.to_string(),
                 path: row.get(1)?,
                 title: row.get(2)?,
                 artist: row.get(3)?,
@@ -728,7 +895,8 @@ pub fn load_album_tracks_for_match(
                 added_at: row.get(18)?,
                 play_count: row.get::<_, i64>(19)?,
                 last_played_at: row.get(20)?,
-                rating: row.get(21)?,
+                is_favorite: row.get::<_, i64>(21)? != 0,
+                rating: row.get(22)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1102,11 +1270,38 @@ pub fn set_track_rating(db_path: &Path, path: &str, rating: Option<i64>) -> Resu
     Ok(())
 }
 
+pub fn set_track_favorite(db_path: &Path, path: &str, favorite: bool) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    let updated = connection.execute(
+        "UPDATE tracks
+         SET is_favorite = ?2
+         WHERE path = ?1",
+        params![path, if favorite { 1 } else { 0 }],
+    )?;
+    if updated == 0 {
+        bail!("Track not found");
+    }
+
+    Ok(())
+}
+
 pub fn get_track_loudness_gain(db_path: &Path, path: &str) -> Result<Option<f32>> {
     let connection = Connection::open(db_path)?;
     connection
         .query_row(
             "SELECT target_gain_db FROM track_loudness WHERE track_path = ?1",
+            params![path],
+            |row| row.get::<_, f32>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+pub fn get_backend_track_loudness_gain(db_path: &Path, path: &str) -> Result<Option<f32>> {
+    let connection = Connection::open(db_path)?;
+    connection
+        .query_row(
+            "SELECT target_gain_db FROM backend_track_loudness WHERE track_path = ?1",
             params![path],
             |row| row.get::<_, f32>(0),
         )
@@ -1220,6 +1415,337 @@ pub fn save_playback_session(db_path: &Path, session: &PlaybackSession) -> Resul
     load_playback_session(db_path)
 }
 
+pub fn load_backend_bootstrap_cache(db_path: &Path) -> Result<Option<BootstrapPayload>> {
+    let connection = Connection::open(db_path)?;
+    let value = connection
+        .query_row(
+            "SELECT payload_json FROM backend_bootstrap_cache WHERE cache_key = 'needle_backend'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    value
+        .map(|json| serde_json::from_str::<BootstrapPayload>(&json).map_err(anyhow::Error::from))
+        .transpose()
+}
+
+pub fn save_backend_bootstrap_cache(db_path: &Path, payload: &BootstrapPayload) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "
+        INSERT INTO backend_bootstrap_cache (cache_key, payload_json, updated_at)
+        VALUES ('needle_backend', ?1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(cache_key) DO UPDATE SET
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        ",
+        params![serde_json::to_string(payload)?],
+    )?;
+    Ok(())
+}
+
+pub fn list_offline_downloads(db_path: &Path) -> Result<Vec<OfflineDownloadEntry>> {
+    let connection = Connection::open(db_path)?;
+    let mut statement = connection.prepare(
+        "
+        SELECT track_path, local_path, content_type, file_size, downloaded_at
+        FROM offline_downloads
+        ORDER BY downloaded_at DESC, track_path ASC
+        ",
+    )?;
+
+    let downloads = statement
+        .query_map([], |row| {
+            Ok(OfflineDownloadEntry {
+                track_path: row.get::<_, String>(0)?,
+                local_path: row.get::<_, String>(1)?,
+                content_type: row.get::<_, Option<String>>(2)?,
+                file_size: row
+                    .get::<_, Option<i64>>(3)?
+                    .map(|value| value.max(0) as u64),
+                downloaded_at: row.get::<_, String>(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)?;
+
+    Ok(downloads)
+}
+
+pub fn get_offline_download(
+    db_path: &Path,
+    track_path: &str,
+) -> Result<Option<OfflineDownloadEntry>> {
+    let connection = Connection::open(db_path)?;
+    connection
+        .query_row(
+            "
+            SELECT track_path, local_path, content_type, file_size, downloaded_at
+            FROM offline_downloads
+            WHERE track_path = ?1
+            ",
+            params![track_path],
+            |row| {
+                Ok(OfflineDownloadEntry {
+                    track_path: row.get::<_, String>(0)?,
+                    local_path: row.get::<_, String>(1)?,
+                    content_type: row.get::<_, Option<String>>(2)?,
+                    file_size: row
+                        .get::<_, Option<i64>>(3)?
+                        .map(|value| value.max(0) as u64),
+                    downloaded_at: row.get::<_, String>(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+pub fn upsert_offline_download(db_path: &Path, entry: &OfflineDownloadEntry) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "
+        INSERT INTO offline_downloads (
+            track_path,
+            local_path,
+            content_type,
+            file_size,
+            downloaded_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(track_path) DO UPDATE SET
+            local_path = excluded.local_path,
+            content_type = excluded.content_type,
+            file_size = excluded.file_size,
+            downloaded_at = excluded.downloaded_at
+        ",
+        params![
+            entry.track_path,
+            entry.local_path,
+            entry.content_type,
+            entry.file_size.map(|value| value as i64),
+            entry.downloaded_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn remove_offline_download(db_path: &Path, track_path: &str) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "DELETE FROM offline_downloads WHERE track_path = ?1",
+        params![track_path],
+    )?;
+    Ok(())
+}
+
+pub fn current_timestamp(db_path: &Path) -> Result<String> {
+    let connection = Connection::open(db_path)?;
+    connection
+        .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(Into::into)
+}
+
+pub fn export_playlists_for_backend(db_path: &Path) -> Result<Vec<ImportedDesktopPlaylist>> {
+    let playlists = load_playlists(db_path)?;
+    let mut exported = Vec::with_capacity(playlists.len());
+
+    for playlist in playlists {
+        exported.push(ImportedDesktopPlaylist {
+            id: format!("desktop-playlist-{}", playlist.id),
+            name: playlist.name,
+            created_at: playlist.created_at,
+            updated_at: playlist.updated_at,
+            track_paths: playlist.track_paths,
+            rule_json: playlist
+                .rule
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        });
+    }
+
+    Ok(exported)
+}
+
+pub fn list_artist_images_for_backend(db_path: &Path) -> Result<Vec<ImportedArtistImage>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection
+        .prepare("SELECT name, url, fetched_at FROM artist_images ORDER BY lower(name), name")?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedArtistImage {
+            name: row.get(0)?,
+            url: row.get(1)?,
+            fetched_at: row.get(2)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+pub fn list_artist_info_for_backend(db_path: &Path) -> Result<Vec<ImportedArtistInfo>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "SELECT name, description, source_url, gender, fetched_at
+         FROM artist_info
+         ORDER BY lower(name), name",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedArtistInfo {
+            name: row.get(0)?,
+            description: row.get(1)?,
+            source_url: row.get(2)?,
+            gender: row.get(3)?,
+            fetched_at: row.get(4)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+pub fn list_album_info_for_backend(db_path: &Path) -> Result<Vec<ImportedAlbumInfo>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "SELECT key, description, source_url, fetched_at
+         FROM album_info
+         ORDER BY key",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedAlbumInfo {
+            key: row.get(0)?,
+            description: row.get(1)?,
+            source_url: row.get(2)?,
+            fetched_at: row.get(3)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+pub fn list_album_primary_genres_for_backend(
+    db_path: &Path,
+) -> Result<Vec<ImportedAlbumPrimaryGenre>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "SELECT album, album_artist, primary_genre, updated_at
+         FROM album_primary_genres
+         ORDER BY lower(album), lower(album_artist), album, album_artist",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedAlbumPrimaryGenre {
+            album: row.get(0)?,
+            album_artist: row.get(1)?,
+            primary_genre: row.get(2)?,
+            updated_at: row.get(3)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+pub fn list_track_metadata_overrides_for_backend(
+    db_path: &Path,
+) -> Result<Vec<ImportedTrackMetadataOverride>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "
+        SELECT track_path, title, artist, album, album_artist, disc_number, track_number,
+               bpm, genre, year, recording_mbid, release_track_mbid, release_mbid,
+               release_group_mbid, confidence, source, updated_at
+        FROM track_metadata_overrides
+        ORDER BY track_path
+        ",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedTrackMetadataOverride {
+            track_path: row.get(0)?,
+            title: row.get(1)?,
+            artist: row.get(2)?,
+            album: row.get(3)?,
+            album_artist: row.get(4)?,
+            disc_number: row.get(5)?,
+            track_number: row.get(6)?,
+            bpm: row.get(7)?,
+            genre: row.get(8)?,
+            year: row.get(9)?,
+            recording_mbid: row.get(10)?,
+            release_track_mbid: row.get(11)?,
+            release_mbid: row.get(12)?,
+            release_group_mbid: row.get(13)?,
+            confidence: row.get(14)?,
+            source: row.get(15)?,
+            updated_at: row.get(16)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+pub fn list_track_loudness_for_backend(db_path: &Path) -> Result<Vec<ImportedTrackLoudness>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "
+        SELECT track_path, integrated_lufs, true_peak_db, target_gain_db,
+               file_size, file_modified_at, analysis_version, analyzed_at
+        FROM track_loudness
+        ORDER BY track_path
+        ",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedTrackLoudness {
+            track_path: row.get(0)?,
+            integrated_lufs: row.get(1)?,
+            true_peak_db: row.get(2)?,
+            target_gain_db: row.get(3)?,
+            file_size: row.get(4)?,
+            file_modified_at: row.get(5)?,
+            analysis_version: row.get(6)?,
+            analyzed_at: row.get(7)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+pub fn list_track_app_state_for_backend(db_path: &Path) -> Result<Vec<ImportedTrackAppState>> {
+    let connection = Connection::open(db_path)?;
+    let mut stmt = connection.prepare(
+        "
+        SELECT path, is_favorite, rating, play_count, last_played_at, added_at
+        FROM tracks
+        ORDER BY path
+        ",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ImportedTrackAppState {
+            track_path: row.get(0)?,
+            favorite: row.get::<_, i64>(1)? != 0,
+            rating: row.get(2)?,
+            play_count: row.get(3)?,
+            last_played_at: row.get(4)?,
+            date_added: row.get(5)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 pub fn load_playlists(db_path: &Path) -> Result<Vec<SavedPlaylist>> {
     let mut connection = Connection::open(db_path)?;
     prune_orphaned_playlist_tracks(&mut connection)?;
@@ -1269,7 +1795,7 @@ pub fn load_playlists(db_path: &Path) -> Result<Vec<SavedPlaylist>> {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         playlists.push(SavedPlaylist {
-            id,
+            id: id.to_string(),
             name,
             track_paths,
             rule,
@@ -1312,11 +1838,16 @@ pub fn create_playlist(
     load_playlists(db_path)
 }
 
-pub fn rename_playlist(db_path: &Path, playlist_id: i64, name: &str) -> Result<Vec<SavedPlaylist>> {
+pub fn rename_playlist(
+    db_path: &Path,
+    playlist_id: &str,
+    name: &str,
+) -> Result<Vec<SavedPlaylist>> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         bail!("Playlist name cannot be empty");
     }
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
 
     let connection = Connection::open(db_path)?;
     let updated = connection.execute(
@@ -1329,7 +1860,8 @@ pub fn rename_playlist(db_path: &Path, playlist_id: i64, name: &str) -> Result<V
     load_playlists(db_path)
 }
 
-pub fn delete_playlist(db_path: &Path, playlist_id: i64) -> Result<Vec<SavedPlaylist>> {
+pub fn delete_playlist(db_path: &Path, playlist_id: &str) -> Result<Vec<SavedPlaylist>> {
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     transaction.execute(
@@ -1351,9 +1883,10 @@ pub fn delete_playlist(db_path: &Path, playlist_id: i64) -> Result<Vec<SavedPlay
 
 pub fn append_tracks_to_playlist(
     db_path: &Path,
-    playlist_id: i64,
+    playlist_id: &str,
     track_paths: &[String],
 ) -> Result<Vec<SavedPlaylist>> {
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
@@ -1370,9 +1903,10 @@ pub fn append_tracks_to_playlist(
 
 pub fn replace_playlist_tracks(
     db_path: &Path,
-    playlist_id: i64,
+    playlist_id: &str,
     track_paths: &[String],
 ) -> Result<Vec<SavedPlaylist>> {
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
@@ -1383,9 +1917,10 @@ pub fn replace_playlist_tracks(
 
 pub fn remove_playlist_track(
     db_path: &Path,
-    playlist_id: i64,
+    playlist_id: &str,
     index: usize,
 ) -> Result<Vec<SavedPlaylist>> {
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
@@ -1401,10 +1936,11 @@ pub fn remove_playlist_track(
 
 pub fn move_playlist_track(
     db_path: &Path,
-    playlist_id: i64,
+    playlist_id: &str,
     from_index: usize,
     to_index: usize,
 ) -> Result<Vec<SavedPlaylist>> {
+    let playlist_id = parse_local_playlist_id(playlist_id)?;
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction()?;
     ensure_playlist_is_track_editable_tx(&transaction, playlist_id)?;
@@ -1483,6 +2019,7 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                t.added_at,
                t.play_count,
                t.last_played_at,
+               t.is_favorite,
                t.rating
         FROM tracks t
         LEFT JOIN track_metadata_overrides tmo
@@ -1503,7 +2040,7 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
     let tracks = statement
         .query_map([], |row| {
             Ok(Track {
-                id: row.get(0)?,
+                id: row.get::<_, i64>(0)?.to_string(),
                 path: row.get(1)?,
                 title: row.get(2)?,
                 artist: row.get(3)?,
@@ -1524,7 +2061,8 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                 added_at: row.get(18)?,
                 play_count: row.get::<_, i64>(19)?,
                 last_played_at: row.get(20)?,
-                rating: row.get(21)?,
+                is_favorite: row.get::<_, i64>(21)? != 0,
+                rating: row.get(22)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1617,6 +2155,79 @@ fn ensure_playlist_is_track_editable_tx(
     Ok(())
 }
 
+pub fn list_backend_track_loudness_cache(
+    db_path: &Path,
+) -> Result<Vec<BackendTrackLoudnessCacheEntry>> {
+    let connection = Connection::open(db_path)?;
+    let mut statement = connection.prepare(
+        "
+        SELECT track_path, source_fingerprint, analysis_version
+        FROM backend_track_loudness
+        ",
+    )?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(BackendTrackLoudnessCacheEntry {
+                track_path: row.get(0)?,
+                source_fingerprint: row.get(1)?,
+                analysis_version: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)?;
+
+    Ok(rows)
+}
+
+pub fn save_backend_track_loudness_records(
+    db_path: &Path,
+    records: &[BackendTrackLoudnessAnalysisRecord],
+) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    let mut statement = transaction.prepare(
+        "
+        INSERT INTO backend_track_loudness (
+            track_path,
+            integrated_lufs,
+            true_peak_db,
+            target_gain_db,
+            source_fingerprint,
+            analysis_version,
+            analyzed_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)
+        ON CONFLICT(track_path) DO UPDATE SET
+            integrated_lufs = excluded.integrated_lufs,
+            true_peak_db = excluded.true_peak_db,
+            target_gain_db = excluded.target_gain_db,
+            source_fingerprint = excluded.source_fingerprint,
+            analysis_version = excluded.analysis_version,
+            analyzed_at = excluded.analyzed_at
+        ",
+    )?;
+
+    for record in records {
+        statement.execute(params![
+            record.track_path,
+            record.integrated_lufs,
+            record.true_peak_db,
+            record.target_gain_db,
+            record.source_fingerprint,
+            record.analysis_version,
+        ])?;
+    }
+
+    drop(statement);
+    transaction.commit()?;
+
+    Ok(())
+}
+
 fn replace_playlist_tracks_tx(
     transaction: &rusqlite::Transaction<'_>,
     playlist_id: i64,
@@ -1662,6 +2273,7 @@ fn validate_playlist_rule(rule: &SavedPlaylistRule) -> Result<()> {
             search,
             artist,
             genre,
+            vibe,
             year_from,
             year_to,
         } => {
@@ -1677,8 +2289,12 @@ fn validate_playlist_rule(rule: &SavedPlaylistRule) -> Result<()> {
                 .as_deref()
                 .map(str::trim)
                 .is_some_and(|value| !value.is_empty());
+            let has_vibe = vibe
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
             let has_year = year_from.is_some() || year_to.is_some();
-            if !has_search && !has_artist && !has_genre && !has_year {
+            if !has_search && !has_artist && !has_genre && !has_vibe && !has_year {
                 bail!("Auto-updating playlists need at least one filter");
             }
             if let (Some(start), Some(end)) = (year_from, year_to) {
@@ -1737,6 +2353,18 @@ fn split_track_genres(genre: &str) -> impl Iterator<Item = String> + '_ {
         .filter_map(normalize_genre_key)
 }
 
+fn vibe_key_for_bpm(bpm: i64) -> Option<&'static str> {
+    match bpm {
+        value if value <= 0 => None,
+        value if value < 90 => Some("slowdown"),
+        value if value < 110 => Some("cruise"),
+        value if value < 120 => Some("groove"),
+        value if value < 130 => Some("lift"),
+        value if value < 145 => Some("energy"),
+        _ => Some("chaos"),
+    }
+}
+
 fn track_paths_for_playlist_rule(
     connection: &Connection,
     rule: &SavedPlaylistRule,
@@ -1749,7 +2377,8 @@ fn track_paths_for_playlist_rule(
                COALESCE(tmo.album, t.album) AS album,
                COALESCE(tmo.genre, t.genre) AS genre,
                apg.primary_genre,
-               COALESCE(tmo.year, t.year) AS year
+               COALESCE(tmo.year, t.year) AS year,
+               CAST(ROUND(COALESCE(tmo.bpm, t.bpm)) AS INTEGER) AS bpm
         FROM tracks t
         LEFT JOIN track_metadata_overrides tmo ON tmo.track_path = t.path
         LEFT JOIN album_primary_genres apg
@@ -1775,6 +2404,7 @@ fn track_paths_for_playlist_rule(
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1783,11 +2413,13 @@ fn track_paths_for_playlist_rule(
                         artist_value: Option<&str>,
                         album: Option<&str>,
                         genre_value: Option<&str>,
+                        bpm: Option<i64>,
                         year_value: Option<i64>| match rule {
         SavedPlaylistRule::FilteredLibrary {
             search,
             artist,
             genre,
+            vibe,
             year_from,
             year_to,
         } => {
@@ -1825,6 +2457,16 @@ fn track_paths_for_playlist_rule(
                 }
             }
 
+            if let Some(expected_vibe) = vibe
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if bpm.and_then(vibe_key_for_bpm) != Some(expected_vibe) {
+                    return false;
+                }
+            }
+
             if year_from.is_some() || year_to.is_some() {
                 let Some(year) = year_value else {
                     return false;
@@ -1847,16 +2489,19 @@ fn track_paths_for_playlist_rule(
 
     Ok(rows
         .into_iter()
-        .filter(|(_, title, artist, album, genre, primary_genre, year)| {
-            matches_rule(
-                title.as_deref(),
-                artist.as_deref(),
-                album.as_deref(),
-                effective_genre(primary_genre.as_deref(), genre.as_deref()),
-                *year,
-            )
-        })
-        .map(|(path, _, _, _, _, _, _)| path)
+        .filter(
+            |(_, title, artist, album, genre, primary_genre, year, bpm)| {
+                matches_rule(
+                    title.as_deref(),
+                    artist.as_deref(),
+                    album.as_deref(),
+                    effective_genre(primary_genre.as_deref(), genre.as_deref()),
+                    *bpm,
+                    *year,
+                )
+            },
+        )
+        .map(|(path, _, _, _, _, _, _, _)| path)
         .collect())
 }
 

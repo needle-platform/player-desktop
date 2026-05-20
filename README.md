@@ -1,10 +1,24 @@
 # Needle
 
-A local-first, hi-fi music player for macOS built with **Tauri**, **React + TypeScript**, and **Rust**. Audio playback is handled by **mpv** through its JSON IPC, so lossless formats (FLAC, ALAC, WAV, AIFF) sound exactly the way they should.
+A personal, hi-fi music player for macOS built with **Tauri**, **React + TypeScript**, and **Rust**. Audio playback is handled by **mpv** through its JSON IPC, so lossless formats (FLAC, ALAC, WAV, AIFF) sound exactly the way they should.
 
-> Status: actively usable local-first player — library, queue, saved playlists, playback persistence, equalizer, and richer library curation tools are all in place, with smarter playlisting and metadata refinement continuing to grow.
+> Status: actively usable personal desktop player. Local-folder mode is the most mature path; Needle backend mode is real and useful, but still being shaken down across desktop / homeserver workflows. Expect sharp opinions, moving edges, and changes driven by how I actually use the app.
 
 ![Needle App](needle-app.png)
+
+## Project stance
+
+Needle is a personal project built around how I want to experience and manage music.
+
+The source code is available for transparency, experimentation, and learning purposes. Support is not guaranteed. Feature requests may be ignored. Pull requests may be ignored.
+
+This software reflects my preferences, workflow, and design decisions. If Needle does not fit yours, you are encouraged to adapt it, fork it, or build upon it.
+
+I want Needle to remain enjoyable to build and evolve, rather than turning into an obligation driven by endless feature requests, expectations, or community pressure. Keeping the project opinionated and personal is a deliberate choice.
+
+Use it. Break it. Improve it. Make it your own.
+
+Just don’t expect democracy.
 
 ## Features
 
@@ -24,13 +38,13 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Idle dashboard backdrop** from bundled artwork when nothing is playing, so the hero stays readable instead of falling back to empty white space
 - **Quick actions**: Shuffle play · Add folder
 - **Recently added albums** sorted by newest tracks with relative timestamps (Today / 3d ago / 2w ago…)
-- **From your library** recommendations grounded in your own listening history and collection metadata:
+- **From your library** row grounded in your own listening history and collection metadata:
+  - **Favourites** from the heart-marked tracks you explicitly saved
   - **Top rated** from the stars you assign yourself
-  - **Most played** & **Recently played** (from real play history)
-  - **Needs a first spin** for unplayed tracks still waiting in the library
-  - **Rediscover** for tracks you played before but have not visited in a while
-  - **From your top genre** for one focused genre mix instead of a wall of auto-generated buckets
+  - **Most played** & **Recently played** from real play history
 - **Featured albums** & **Top artists** rows
+- **Library signatures** row that turns your strongest decade + genre pockets into smart mixes such as `2000s Pop` or `1990s Rock`
+  - signature tiles reflect the full matching library pocket while their 50-track playlists stay album-balanced so one record cannot dominate the mix
 - **Vibe row** with four BPM-informed smart mixes:
   - **Wind down** for slower songs that help the room exhale
   - **Cruise & groove** for easy motion and warm rhythm
@@ -47,14 +61,23 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Queue-aware playback**: play album · shuffle artist · play all Quick picks · shuffle a From-your-library playlist — mpv auto-advances through the queue
 - **Playback persistence** restores queue, selected track, repeat mode, shuffle state, and last position between launches
 - **Safe relaunch behavior** restores the last session in a stopped state, never surprise-autoplays on app launch
+- **Backend offline mode** now switches automatically when the homeserver becomes unreachable, keeps the regular dashboard UI, hides online-only actions, and shows only downloaded tracks for offline playback until the backend comes back
+- **Automatic backend reconnect** checks run quietly in the background, so backend mode can move between online and offline without needing a manual Settings health check
+- **Wake-from-sleep backend recovery** now re-checks the homeserver as soon as the app becomes visible or focused again, so backend mode is less likely to stay stuck offline after a laptop suspend
+- **Backend offline download feedback** now shows per-track progress directly on track numbers and marks albums as fully or partially downloaded with the same badge language used on Android
+- **Remote backend offline downloads** now use streaming-friendly timeouts, so public homeserver downloads do not trip the same short request deadline used for heartbeat checks
 - **Repeat modes**: off · one · all
 - **Shuffle state** is visible and persistent
 - **Artwork-first mini player** with full-bleed cover art, drag-to-move behavior, pinned always-on-top mode, and an expandable / resizable Up Next queue
 - **Hover ▶ on the dashboard**: album cards (Recently added & Featured), artist tiles, and a "Play all" button on Quick picks
 - **Per-track play counts** and `last_played_at` recorded automatically
+- **Per-track favourites** saved locally with a heart toggle, separate from star ratings
 - **Per-track user star ratings** saved locally and reusable across the app
 - **Opt-in volume leveling** based on local FFmpeg loudness analysis, with gentler per-track gain applied through mpv while leaving your main listening volume untouched
+- **Volume leveling stays fully out of the way when disabled**, so track changes no longer trigger per-track gain updates unless you explicitly turn leveling on
+- **True gapless album playback** for consecutive queue entries, with mpv playlist prefetching tuned so live albums and continuous records keep their intended flow
 - **Now-playing bar** with cover, metadata, transport controls, seek/progress scrubbing, volume + mute, and output-device selection — synced to actual mpv track changes during queue playback
+- **AirPlay now-playing artwork** publishes the active track's cover art through mpv's selected album-art track and macOS Now Playing metadata, so iPhone and Apple TV receivers can show album covers while desktop playback is streaming
 - **Safer startup volume** defaults to 80% to reduce surprise-blast playback on first launch
 - **Animated current-track indicator** in both the main track list and the album track list
 - **Robust shutdown**: mpv is killed whenever the app exits via Drop, Tauri's exit event, *and* a SIGINT/SIGTERM/SIGHUP handler — with a `pkill` fallback so playback can never outlive the app
@@ -75,7 +98,9 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Filtered playlist creation** from library metadata such as artist and genre
 - **Playlist management**: rename, delete, reorder tracks, remove tracks
 - **Smart playlists** surfaced as first-class library views generated from your collection and listening history
+- **Favourites smart playlist** automatically keeps a heart-marked mix in sync with your library
 - **Ratings-driven smart playlist** automatically keeps a `Top rated` mix in sync with your own stars
+- **Library-signature smart playlists** derive decade + genre mixes from the depth and diversity of your own collection, then round-robin albums so shuffle play stays varied
 - **Smart-playlist genre focus pills** let you narrow a generated mix to the genres currently present in that playlist, including multi-select combinations like pop + r&b
 - **Embedded-BPM vibe playlists** quietly map tempo into mood buckets instead of turning the library into a wall of raw numbers
 
@@ -90,6 +115,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - Cached in SQLite (`artist_images`) for 30 days, including misses so we don't keep hammering the API
 - Cached in SQLite (`artist_info`) for 90 days on successful lookups, while empty misses expire quickly so transient upstream failures do not stick around for months
 - **Artist-page recovery tools** are hidden behind a right-click menu on the hero portrait for Refresh photo / Refresh bio, with loading feedback during background refreshes
+- **Backend-mode custom artist photos** can be uploaded from that same right-click portrait menu when automatic enrichment picks a poor image, and you can switch back to the automatic source later without leaving the artist page
 - **Graceful artwork fallback** uses the artist's album art across the artist page and Artists browser before falling back to a gradient initial when no portrait loads
 - **Artists browser performance** favors cached portraits and lazy offscreen loading so large artist grids feel fast without hammering remote lookups up front
 
@@ -98,12 +124,16 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Tracks** with live search, sorting, and filters for artist / genre / year range, plus album / artist / playlist context
 - **Normalized genre filters** collapse casing and common formatting variants into one clean vocabulary, so `Pop`, `pop`, and similar duplicates do not fragment browsing
 - **Compact BPM details** on track rows, album pages, and artist pages, with a click-to-open editor for set / edit plus quick halve / double actions
+- **Tap-tempo BPM helper** inside the BPM editor lets you tap `Space` or click along with the current song to estimate a BPM before saving it
+- **BPM sanity check** in Settings under Maintenance with a review queue for suspicious tempo tags and missing BPMs, inline halve / double fixes, playback-assisted review mode, bulk suggestion apply, and “mark intentional” dismissals for false positives
+- **Album-aware BPM confidence scoring** can identify strong half/double-time spikes against an album's median tempo and offer best-effort high-confidence auto-fixes
 - **Albums** with cover art, sorting, direct playlist actions, and album-wide genre editing
 - **Large library browsers** lazily load offscreen covers / portraits and stage media work near the viewport instead of trying to resolve every image at once
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
 - **Vinyl-rip badge support** detects `vinyl-rip` tags from your files and marks matching albums with a small record badge on album artwork
 - **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
-- **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, loudness analysis with live progress output, structured progress counts, failed-file review/copy tools, live equalizer presets, manual 10-band EQ, and a metadata save-mode switch for `Needle only` vs `Write to files`
+- **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, loudness analysis with live progress output, structured progress counts, failed-file review/copy tools, live equalizer presets, manual 10-band EQ, an in-app backend version readout, and a metadata save-mode switch for `Needle only` vs `Write to files`
+- **Needle backend setup and migration prep** in Settings: choose `Local folders` or `Needle backend`, verify backend health, configure the backend URL plus Needle account credentials, and migrate playlists, favourites/history, metadata caches, loudness-analysis data, and shared playback session state into the backend
 
 ### Album info
 - **Background album notes** pulled via **MusicBrainz release-group → Wikidata → Wikipedia**
@@ -124,7 +154,7 @@ A local-first, hi-fi music player for macOS built with **Tauri**, **React + Type
 - **Themes**: System, Light, Dark
 - **Custom accent color** persisted in SQLite and applied across playback controls, queue highlights, buttons, and selection states
 - **Theme-aware branding** with separate light/dark app icons and a dock-tuned macOS icon set
-- **Top-right toast notifications** now surface success, warning, and error states in a clear app-level notification card instead of hiding transient messages in the sidebar footer, with success confirmations auto-dismissing after a short delay
+- **Top-right toast notifications** now surface success, warning, and error states in a clear app-level notification card instead of hiding transient messages in the sidebar footer, with info and success confirmations auto-dismissing after a short delay
 - **Mini player runtime dark override** keeps the compact artwork-first window in a dark presentation without changing the user's saved theme preference
 - **Wikipedia links** from album and artist metadata open in the system browser instead of relying on webview behavior
 - **Equalizer presets** wired through **mpv** audio filters: Flat, Bass Boost, Bass/Treble Boost, Vocal, Treble Boost, Lounge
@@ -201,20 +231,64 @@ On first launch after the rename from `Resonance`, Needle copies the existing da
 
 Maintenance and remove-folder actions only touch the database — your audio files are never modified or deleted.
 
+## Backend transition status
+
+Needle now supports a real desktop `Needle backend` mode in addition to `Local folders`.
+
+What works today:
+
+- backend URL, Needle username/password, and health checks in Settings
+- desktop-to-backend migration for playlists, favourites/history, artist and album cache data, metadata overrides, loudness-analysis rows, and shared playback session state
+- backend-backed library bootstrap in the Tauri app
+- offline-safe backend startup that falls back to cached library data or downloaded tracks instead of failing on a blank screen when the homeserver is unavailable
+- authenticated backend API access for bootstrap, playlists, metadata/state sync, and maintenance calls
+- backend-mode playlist management, including rename, delete, add tracks, remove tracks, and reorder tracks against the shared homeserver playlists
+- backend-backed playback while still keeping native `mpv` playback on desktop
+- backend-mode loudness analysis from the desktop app, reusing offline downloads when present and falling back to backend streams when needed
+- backend-mode album genre editing, including `Needle only` saves and backend file write-back when the server allows it
+- backend-mode MusicBrainz album metadata refresh, using the existing desktop matcher against backend library tracks
+- backend-owned artist photo and biography refresh in backend mode, with shared results stored once on the homeserver for every connected app
+- backend-owned album notes refresh in backend mode, with shared album descriptions and source links stored once on the homeserver for every connected app
+- selective offline downloads for backend-mode tracks and albums, with a local cache that playback prefers automatically
+- backend-aware Settings UI with tabbed organization for `Library`, `Playback`, and `Appearance`
+
+What this means in practice:
+
+- `Local folders` remains the rich local-first mode
+- the first Needle backend account is created from the web player on first launch, then reused by desktop clients
+- `Needle backend` now loads the shared library, playlists, favourites, loudness data, and migrated cache data from the backend
+- artist detail pages now auto-trigger a one-shot backend enrichment pass when the shared artist photo or biography is still missing, then repaint from the backend result when it arrives
+- album detail pages now auto-trigger a one-shot backend enrichment pass when the shared album notes are still missing, then repaint from the backend result when it arrives
+- protected backend APIs use the saved Needle credentials, while native `mpv` playback still pulls direct original media and artwork from the backend without a per-track login handshake
+- backend mode now keeps desktop-only quality-of-life behavior such as dashboard artist-art fallbacks and shared MusicBrainz cleanup workflows closer to local-mode expectations
+- native desktop listening features such as `mpv`, EQ, mini player, and deeper curation still stay on the desktop side
+
+Still intentionally incomplete:
+
+- backend-mode confidence checks still deserve more real-world use before treating the local desktop DB as fully optional
+- download progress is currently batch-oriented rather than true byte-stream progress
+- broader tag-contract alignment between desktop and backend is still being formalized
+
 ## Auto-playlists & metadata
 
 Needle generates dashboard recommendations and smart-playlist views from data we already have, no machine learning required:
 
 - **Play history** (`play_count`, `last_played_at`) drives Most played, Recently played, and Rediscover
 - **User ratings** (`rating`) drive a `Top rated` smart playlist built from the stars you assign
+- **Favourite flags** (`is_favorite`) drive a `Favourites` smart playlist built from the tracks you explicitly heart
+- **Genre tags + year metadata** drive `Library signatures`, pairing strong decade + genre pockets from your own collection into album-balanced mixes
 - **Embedded BPM tags** drive compact tempo details plus vibe buckets such as Slowdown, Cruise, Groove, Lift, Energy, and Chaos
 - **Vibe playlists use those BPM buckets directly**, so tracks without BPM stay out of tempo-led mixes instead of being guessed into one
 - **BPM editing** can stay local to Needle or write back to the embedded file tags, depending on the metadata save mode you choose in Settings
+- **BPM sanity review** compares genre-family expectations with album-local BPM medians so obvious half/double-time spikes can be reviewed, bulk-applied, auto-fixed when confidence is strong enough, while tracks with no BPM tag are pulled into the same maintenance flow for manual review
 - **Optional loudness analysis** stores LUFS / peak-derived gain data locally so Needle can level mixed queues when you enable volume leveling
+- **Backend-mode loudness analysis** can scan either cached offline downloads or authenticated backend streams, so volume leveling still works while the library itself lives on Needle backend
+- **Backend-mode volume leveling now prefers the desktop loudness cache first**, reducing late gain flips and keeping track-to-track leveling more consistent during backend playback
+- **Backend loudness cache fingerprints are stable across backend URLs**, so switching between local and remote backend addresses no longer forces a full-library reanalysis
 - **Two-worker loudness scans** make the first analysis pass much more practical on modern Macs without overcommitting the whole machine
+- **Version-aware loudness refresh messaging** calls out when a full-library rerun is expected because Needle upgraded its loudness-analysis method
 - **Playlist-local genre focus** lets smart playlists keep their generated order while narrowing the current mix to one or more genres already represented in that playlist
 - **Library state** (`play_count = 0`) drives Needs a first spin
-- **Genre tags** and Needle-local genre edits drive one top-genre mix when your collection has a clear favorite
 - **Vinyl-rip tags** (for example `vinyl-rip`) can mark your own transfers visually without rewriting how Needle handles the rest of your metadata
 - **Artist enrichment** (`gender` when MusicBrainz provides it) gives future artist-radio style mixes another optional signal without blocking playback when metadata is incomplete
 - **`added_at`** (preserved across rescans) drives the Recently added albums row
@@ -231,14 +305,15 @@ Needle already makes use of embedded BPM when your files provide it. A future op
 
 ## Roadmap
 
-- BPM + key analysis as an opt-in background step, with cached `audio_features` table
+- More backend-mode confidence testing before treating the desktop cache as fully optional
+- Better backend offline-download progress, including true byte-stream progress instead of batch-oriented feedback
+- Continued desktop / backend tag-contract alignment
+- BPM + key analysis as an opt-in background step for files with missing or suspicious metadata
 - EQ follow-ups such as per-album remembered curves and user-defined genre-to-preset suggestions/mappings, favoring opt-in guidance over unreliable auto-application
-- Gapless playback hand-off
 - Watch folders with incremental rescans
 - Custom smart-playlist rules and editor
 - Artist radio built from local genre/style context plus MusicBrainz artist enrichment
 - Smarter sidecar handling (hidden FLAC metadata files, `.cue` sheets)
-- Proper macOS / Windows / Linux icon set
 
 ## License
 

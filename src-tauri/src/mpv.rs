@@ -1,5 +1,7 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     fs,
+    hash::Hasher,
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -55,7 +57,7 @@ pub fn kill_all_mpv() {
     // dev). Pattern matches our exact spawn arguments so we don't kill an
     // unrelated mpv the user might be running.
     let _ = std::process::Command::new("pkill")
-        .args(["-f", "mpv --idle=yes --force-window=no --no-video"])
+        .args(["-f", "mpv --idle=yes --force-window=no --vo=null"])
         .status();
 }
 
@@ -71,10 +73,13 @@ const DEFAULT_VOLUME_PERCENT: u8 = 80;
 pub struct MpvController {
     socket_path: PathBuf,
     playlist_path: PathBuf,
+    artwork_dir: PathBuf,
+    current_artwork_path: Option<PathBuf>,
     child: Option<Child>,
     equalizer_preset: EqualizerPreset,
     equalizer_bands: [f32; 10],
     track_gain_db: Option<f32>,
+    keep_gain_filter: bool,
     #[allow(dead_code)]
     app_handle: Option<AppHandle>,
     #[allow(dead_code)]
@@ -89,11 +94,14 @@ impl MpvController {
     ) -> Self {
         Self {
             playlist_path: socket_path.with_extension("m3u8"),
+            artwork_dir: socket_path.with_extension("artwork"),
             socket_path,
+            current_artwork_path: None,
             child: None,
             equalizer_preset,
             equalizer_bands,
             track_gain_db: None,
+            keep_gain_filter: false,
             app_handle: None,
             listener_active: Arc::new(AtomicBool::new(false)),
         }
@@ -104,6 +112,9 @@ impl MpvController {
     }
 
     pub fn set_equalizer(&mut self, preset: EqualizerPreset, bands: [f32; 10]) -> Result<()> {
+        if self.equalizer_preset == preset && self.equalizer_bands == bands {
+            return Ok(());
+        }
         self.equalizer_preset = preset;
         self.equalizer_bands = bands;
         self.refresh_child_state()?;
@@ -117,8 +128,19 @@ impl MpvController {
         self.apply_audio_filters(&mut stream)
     }
 
-    pub fn set_track_gain_db(&mut self, gain_db: Option<f32>) -> Result<()> {
-        self.track_gain_db = normalize_track_gain(gain_db);
+    pub fn set_track_gain_db(
+        &mut self,
+        gain_db: Option<f32>,
+        keep_gain_filter: bool,
+    ) -> Result<()> {
+        let normalized_gain = normalize_track_gain(gain_db);
+        let gain_changed = self.track_gain_db != normalized_gain;
+        let keep_changed = self.keep_gain_filter != keep_gain_filter;
+        if !gain_changed && !keep_changed {
+            return Ok(());
+        }
+        self.track_gain_db = normalized_gain;
+        self.keep_gain_filter = keep_gain_filter;
         self.refresh_child_state()?;
 
         if !self.socket_path.exists() {
@@ -127,7 +149,24 @@ impl MpvController {
 
         let mut stream = UnixStream::connect(&self.socket_path)
             .context("Unable to connect to mpv IPC socket")?;
+        if gain_changed && !keep_changed && self.try_update_gain_filter(&mut stream).is_ok() {
+            return Ok(());
+        }
+
         self.apply_audio_filters(&mut stream)
+    }
+
+    pub fn current_path(&mut self) -> Result<Option<String>> {
+        self.refresh_child_state()?;
+
+        if !self.socket_path.exists() {
+            return Ok(None);
+        }
+
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .context("Unable to connect to mpv IPC socket")?;
+        self.start_listener();
+        self.property::<Option<String>>(&mut stream, "path")
     }
 
     pub fn play(&mut self, path: &str) -> Result<()> {
@@ -163,7 +202,7 @@ impl MpvController {
         let paths: Vec<String> = session
             .queue_paths
             .iter()
-            .filter(|path| Path::new(path).exists())
+            .filter(|path| is_playable_source(path))
             .cloned()
             .collect();
 
@@ -341,6 +380,105 @@ impl MpvController {
         self.apply_repeat_mode(&mut stream, repeat_mode)
     }
 
+    pub fn set_now_playing_artwork(
+        &mut self,
+        title: &str,
+        artwork: Option<(&[u8], &str)>,
+    ) -> Result<()> {
+        self.refresh_child_state()?;
+        if !self.socket_path.exists() {
+            return Ok(());
+        }
+
+        let artwork_path = match artwork {
+            Some((bytes, extension)) if !bytes.is_empty() => {
+                fs::create_dir_all(&self.artwork_dir).with_context(|| {
+                    format!(
+                        "Unable to create mpv artwork directory at {}",
+                        self.artwork_dir.display()
+                    )
+                })?;
+                let extension = match extension {
+                    "png" | "webp" | "jpg" | "jpeg" => extension,
+                    _ => "jpg",
+                };
+                let mut hasher = DefaultHasher::new();
+                hasher.write(title.as_bytes());
+                hasher.write(bytes);
+                let artwork_hash = hasher.finish();
+                let next_path = self
+                    .artwork_dir
+                    .join(format!("cover-{artwork_hash:016x}.{extension}"));
+                if let Some(previous) = self.current_artwork_path.take() {
+                    if previous != next_path {
+                        let _ = fs::remove_file(previous);
+                    }
+                }
+                fs::write(&next_path, bytes).with_context(|| {
+                    format!("Unable to write mpv artwork at {}", next_path.display())
+                })?;
+                self.current_artwork_path = Some(next_path.clone());
+                Some(next_path)
+            }
+            _ => {
+                if let Some(path) = self.current_artwork_path.take() {
+                    let _ = fs::remove_file(path);
+                }
+                None
+            }
+        };
+
+        let mut stream = self.connect_existing()?;
+        self.request(
+            &mut stream,
+            json!({ "command": ["set_property", "force-media-title", title] }),
+        )?;
+
+        self.remove_needle_album_art_tracks(&mut stream);
+
+        match artwork_path {
+            Some(path) => {
+                self.request(
+                    &mut stream,
+                    json!({ "command": ["set_property", "audio-display", "external-first"] }),
+                )?;
+                self.request(
+                    &mut stream,
+                    json!({ "command": [
+                        "video-add",
+                        path.to_string_lossy().to_string(),
+                        "select",
+                        "Needle artwork",
+                        "",
+                        true
+                    ] }),
+                )?;
+            }
+            None => {}
+        }
+
+        Ok(())
+    }
+
+    pub fn clear_now_playing_artwork(&mut self) -> Result<()> {
+        if let Some(path) = self.current_artwork_path.take() {
+            let _ = fs::remove_file(path);
+        }
+
+        self.refresh_child_state()?;
+        if !self.socket_path.exists() {
+            return Ok(());
+        }
+
+        let mut stream = self.connect_existing()?;
+        self.remove_needle_album_art_tracks(&mut stream);
+        let _ = self.request(
+            &mut stream,
+            json!({ "command": ["set_property", "force-media-title", ""] }),
+        );
+        Ok(())
+    }
+
     fn connect_or_spawn(&mut self) -> Result<UnixStream> {
         self.refresh_child_state()?;
 
@@ -405,6 +543,7 @@ impl MpvController {
     fn apply_audio_filters(&self, stream: &mut UnixStream) -> Result<()> {
         let command = match audio_filter_value(
             self.track_gain_db,
+            self.keep_gain_filter,
             &self.equalizer_preset,
             &self.equalizer_bands,
         ) {
@@ -412,6 +551,47 @@ impl MpvController {
             None => json!({ "command": ["set_property", "af", []] }),
         };
         self.request(stream, command).map(|_| ())
+    }
+
+    fn remove_needle_album_art_tracks(&self, stream: &mut UnixStream) {
+        let Ok(track_list) = self.property::<Vec<serde_json::Value>>(stream, "track-list") else {
+            return;
+        };
+
+        let ids = track_list
+            .into_iter()
+            .filter(|track| {
+                track.get("type").and_then(|value| value.as_str()) == Some("video")
+                    && track.get("albumart").and_then(|value| value.as_bool()) == Some(true)
+                    && track.get("external").and_then(|value| value.as_bool()) == Some(true)
+                    && track.get("title").and_then(|value| value.as_str()) == Some("Needle artwork")
+            })
+            .filter_map(|track| track.get("id").and_then(|value| value.as_i64()))
+            .collect::<Vec<_>>();
+
+        for id in ids {
+            let _ = self.request(stream, json!({ "command": ["video-remove", id] }));
+        }
+    }
+
+    fn try_update_gain_filter(&self, stream: &mut UnixStream) -> Result<()> {
+        let gain_expression = match self.track_gain_db {
+            Some(gain_db) => format!("{gain_db:.2}dB"),
+            None => "0.00dB".to_string(),
+        };
+        self.request(
+            stream,
+            json!({
+                "command": [
+                    "af-command",
+                    "needle_filters",
+                    "volume",
+                    gain_expression,
+                    "volume@needle_gain"
+                ]
+            }),
+        )
+        .map(|_| ())
     }
 
     fn send(&self, stream: &mut UnixStream, payload: serde_json::Value) -> Result<()> {
@@ -502,7 +682,14 @@ impl MpvController {
         let child = Command::new(&binary)
             .arg("--idle=yes")
             .arg("--force-window=no")
-            .arg("--no-video")
+            .arg("--vo=null")
+            .arg("--audio-display=external-first")
+            .arg("--cover-art-auto=all")
+            // Albums and live recordings need real continuous handoffs between
+            // playlist entries, so opt into full gapless mode and warm the next
+            // entry before the current one ends.
+            .arg("--gapless-audio=yes")
+            .arg("--prefetch-playlist=yes")
             .arg(format!("--volume={DEFAULT_VOLUME_PERCENT}"))
             .arg(format!("--input-ipc-server={}", self.socket_path.display()))
             .stdout(Stdio::null())
@@ -557,6 +744,9 @@ impl MpvController {
         if self.playlist_path.exists() {
             let _ = fs::remove_file(&self.playlist_path);
         }
+        if let Some(path) = self.current_artwork_path.take() {
+            let _ = fs::remove_file(path);
+        }
     }
 
     fn refresh_child_state(&mut self) -> Result<()> {
@@ -571,6 +761,10 @@ impl MpvController {
 
         Ok(())
     }
+}
+
+fn is_playable_source(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://") || Path::new(value).exists()
 }
 
 impl Drop for MpvController {
@@ -685,12 +879,16 @@ fn resolve_mpv_binary() -> Option<PathBuf> {
 
 fn audio_filter_value(
     track_gain_db: Option<f32>,
+    keep_gain_filter: bool,
     preset: &EqualizerPreset,
     manual_bands: &[f32; 10],
 ) -> Option<String> {
-    let mut filters = Vec::new();
-    if let Some(gain_db) = normalize_track_gain(track_gain_db) {
-        filters.push(format!("volume={gain_db:.2}dB"));
+    let mut filters = vec![];
+    if keep_gain_filter || normalize_track_gain(track_gain_db).is_some() {
+        let gain_db = normalize_track_gain(track_gain_db).unwrap_or(0.0);
+        filters.push(format!(
+            "volume@needle_gain=volume={gain_db:.2}dB:precision=float:eval=once"
+        ));
     }
     if let Some(graph) = equalizer_filter_value(preset, manual_bands) {
         filters.push(graph);

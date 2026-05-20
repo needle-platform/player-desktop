@@ -98,7 +98,7 @@ pub fn read_track(path: &Path) -> Track {
     }
 
     Track {
-        id: 0,
+        id: "0".to_string(),
         path: path.to_string_lossy().to_string(),
         title,
         artist,
@@ -122,6 +122,7 @@ pub fn read_track(path: &Path) -> Track {
         added_at: None,
         play_count: 0,
         last_played_at: None,
+        is_favorite: false,
         rating: None,
     }
 }

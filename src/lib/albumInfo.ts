@@ -3,6 +3,7 @@ import { getAlbumInfo, refreshAlbumInfo, type AlbumInfo } from './tauri';
 
 const cache = new Map<string, AlbumInfo | null>();
 const inflight = new Map<string, Promise<AlbumInfo | null>>();
+const autoRefreshAttempts = new Set<string>();
 
 const keyOf = (album: string, artist: string | null) =>
   `${album.toLowerCase()}|${(artist ?? '').toLowerCase()}`;
@@ -37,10 +38,16 @@ export interface AlbumInfoState {
   retry: () => Promise<void>;
 }
 
+interface UseAlbumInfoOptions {
+  autoRefreshOnMiss?: boolean;
+}
+
 export function useAlbumInfo(
   album: string | null | undefined,
   artist: string | null | undefined,
+  options?: UseAlbumInfoOptions,
 ): AlbumInfoState {
+  const autoRefreshOnMiss = options?.autoRefreshOnMiss === true;
   const [state, setState] = useState<Omit<AlbumInfoState, 'retry'>>(() => {
     if (!album) return { info: null, loading: false, retrying: false };
     const key = keyOf(album, artist ?? null);
@@ -70,6 +77,32 @@ export function useAlbumInfo(
       cancelled = true;
     };
   }, [album, artist]);
+
+  useEffect(() => {
+    if (!album || !autoRefreshOnMiss) {
+      return;
+    }
+
+    if (state.loading || state.retrying || state.info) {
+      return;
+    }
+
+    const key = keyOf(album, artist ?? null);
+    if (autoRefreshAttempts.has(key)) {
+      return;
+    }
+
+    autoRefreshAttempts.add(key);
+    setState((current) => ({ ...current, loading: true, retrying: true }));
+    void refreshAlbumInfo(album, artist ?? null)
+      .then((result) => {
+        cache.set(key, result);
+        setState({ info: result, loading: false, retrying: false });
+      })
+      .catch(() => {
+        setState((current) => ({ info: current.info, loading: false, retrying: false }));
+      });
+  }, [album, artist, autoRefreshOnMiss, state.info, state.loading, state.retrying]);
 
   const retry = async () => {
     if (!album) return;
