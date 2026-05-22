@@ -1647,6 +1647,7 @@ function App() {
   const offlineDownloadsSyncProgressRef = useRef<string | null>(null);
   const offlineCompletedTracksRef = useRef(0);
   const playbackSessionRef = useRef<PlaybackSession | null>(null);
+  const playbackTrackCacheRef = useRef<Map<string, Track>>(new Map());
 
   const applyBootstrapState = (nextState: AppBootstrapState) => {
     setData(nextState.bootstrap);
@@ -2818,6 +2819,15 @@ function App() {
   );
   const bpmAuditTrackPathSet = useMemo(() => new Set(bpmAuditTrackPaths), [bpmAuditTrackPaths]);
   const trackByPath = useMemo(() => new Map(allTracks.map((track) => [track.path, track])), [allTracks]);
+  const playbackTrackByPath = useMemo(() => {
+    const cached = new Map(playbackTrackCacheRef.current);
+    for (const track of allTracks) {
+      cached.set(track.path, track);
+    }
+    playbackTrackCacheRef.current = cached;
+    return cached;
+  }, [allTracks]);
+  const queueTrackByPath = isNeedleBackendMode ? playbackTrackByPath : trackByPath;
   const activeOfflineDownloadTrackPath =
     offlineDownloadProgress?.operation === 'download' && offlineDownloadProgress.status === 'running'
       ? offlineDownloadProgress.current_track_path
@@ -2880,9 +2890,9 @@ function App() {
     session: PlaybackSession,
     options?: { forcePaused?: boolean; deferBackendLoad?: boolean },
   ) => {
-    const filteredQueue = session.queue_paths.filter((path) => trackByPath.has(path));
+    const filteredQueue = session.queue_paths.filter((path) => queueTrackByPath.has(path));
     const filteredBase = (session.base_queue_paths.length > 0 ? session.base_queue_paths : session.queue_paths).filter(
-      (path) => trackByPath.has(path),
+      (path) => queueTrackByPath.has(path),
     );
     const nextIndex = clampIndex(session.current_index, filteredQueue.length);
     const normalizedBase = filteredBase.length > 0 ? filteredBase : filteredQueue.slice();
@@ -2934,13 +2944,13 @@ function App() {
     void restoreSession(session, { forcePaused: true, deferBackendLoad: true }).catch((error) => {
       setStatus(error instanceof Error ? error.message : String(error));
     });
-  }, [data, trackByPath]);
+  }, [data, queueTrackByPath]);
 
   useEffect(() => {
     if (!sessionHydratedRef.current) return;
 
-    const normalizedQueue = queuePaths.filter((path) => trackByPath.has(path));
-    const normalizedBase = baseQueuePaths.filter((path) => trackByPath.has(path));
+    const normalizedQueue = queuePaths.filter((path) => queueTrackByPath.has(path));
+    const normalizedBase = baseQueuePaths.filter((path) => queueTrackByPath.has(path));
     if (
       normalizedQueue.length !== queuePaths.length ||
       normalizedBase.length !== baseQueuePaths.length
@@ -2959,15 +2969,15 @@ function App() {
         setCurrentPath(fallbackPath ?? null);
       }
     }
-  }, [baseQueuePaths, currentPath, currentQueueIndex, queuePaths, trackByPath]);
+  }, [baseQueuePaths, currentPath, currentQueueIndex, queuePaths, queueTrackByPath]);
 
   const queueTracks = useMemo(
-    () => queuePaths.map((path) => trackByPath.get(path)).filter((track): track is Track => Boolean(track)),
-    [queuePaths, trackByPath],
+    () => queuePaths.map((path) => queueTrackByPath.get(path)).filter((track): track is Track => Boolean(track)),
+    [queuePaths, queueTrackByPath],
   );
   const baseQueueTracks = useMemo(
-    () => baseQueuePaths.map((path) => trackByPath.get(path)).filter((track): track is Track => Boolean(track)),
-    [baseQueuePaths, trackByPath],
+    () => baseQueuePaths.map((path) => queueTrackByPath.get(path)).filter((track): track is Track => Boolean(track)),
+    [baseQueuePaths, queueTrackByPath],
   );
   const currentQueueTrack = queueTracks[currentQueueIndex] ?? null;
 
@@ -3411,8 +3421,8 @@ function App() {
   }, [artistSort, filteredArtists]);
 
   const currentTrack = useMemo(
-    () => (currentPath ? trackByPath.get(currentPath) ?? null : currentQueueTrack),
-    [currentPath, currentQueueTrack, trackByPath],
+    () => (currentPath ? queueTrackByPath.get(currentPath) ?? null : currentQueueTrack),
+    [currentPath, currentQueueTrack, queueTrackByPath],
   );
   const currentTrackArtwork = useCoverArt(currentTrack?.path, {
     enabled: Boolean(currentTrack),
@@ -3421,8 +3431,8 @@ function App() {
     currentTrack && bpmAuditTrackPathSet.has(currentTrack.path) ? currentTrack.path : null;
   const currentTrackFavoritePending = currentTrack ? pendingTrackFavorites.includes(currentTrack.path) : false;
   const activeTrack = useMemo(
-    () => (currentPath ? trackByPath.get(currentPath) ?? currentQueueTrack ?? null : null),
-    [currentPath, currentQueueTrack, trackByPath],
+    () => (currentPath ? queueTrackByPath.get(currentPath) ?? currentQueueTrack ?? null : null),
+    [currentPath, currentQueueTrack, queueTrackByPath],
   );
   const selectedAlbumSummary = useMemo(
     () => albums.find((album) => album.key === selectedAlbum) ?? null,
@@ -4284,8 +4294,8 @@ function App() {
     nextBasePaths: string[],
     options?: { keepCurrentPath?: string | null },
   ) => {
-    const filteredQueue = nextQueuePaths.filter((path) => trackByPath.has(path));
-    const filteredBase = nextBasePaths.filter((path) => trackByPath.has(path));
+    const filteredQueue = nextQueuePaths.filter((path) => queueTrackByPath.has(path));
+    const filteredBase = nextBasePaths.filter((path) => queueTrackByPath.has(path));
     const keepCurrentPath = options?.keepCurrentPath ?? currentPath;
     const nextCurrentIndex = keepCurrentPath ? filteredQueue.indexOf(keepCurrentPath) : -1;
 
@@ -4383,8 +4393,8 @@ function App() {
       suppressRecordPath?: string | null;
     },
   ) => {
-    const filteredQueue = nextQueuePaths.filter((path) => trackByPath.has(path));
-    const filteredBase = nextBasePaths.filter((path) => trackByPath.has(path));
+    const filteredQueue = nextQueuePaths.filter((path) => queueTrackByPath.has(path));
+    const filteredBase = nextBasePaths.filter((path) => queueTrackByPath.has(path));
 
     if (filteredQueue.length === 0) {
       try {
