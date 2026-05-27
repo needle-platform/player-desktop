@@ -130,7 +130,7 @@ Just don’t expect democracy.
 - **Albums** with cover art, sorting, direct playlist actions, and album-wide genre editing
 - **Large library browsers** lazily load offscreen covers / portraits and stage media work near the viewport instead of trying to resolve every image at once
 - **Album detail page** with hero artwork, metadata, play/shuffle actions, multi-disc track grouping, editable primary genre, artist deep links, and background album info when available
-- **Album badges** surface source tags such as `vinyl` plus shared technical metadata such as codec, sample rate, and bit depth (`FLAC`, `192 kHz`, `24-bit`) across album cards and detail pages
+- **Album badges** surface source tags such as `vinyl`, `digital`, `CD`, and `LIVE` plus shared technical metadata such as codec, sample rate, and bit depth (`FLAC`, `192 kHz / 24-bit`) across album cards and detail pages
 - **Artists** with sorting, live search, list/grid display toggle, album-artist or all-artist browsing, album + track counts, dedicated artist pages, release-year-sorted album grids, most-played-track actions, inline bio actions, and photo-context refresh tools
 - **Settings** with theme switcher, custom accent color, library folders, passive watched-folder health hints, maintenance with live progress + last-run info, loudness analysis with live progress output, structured progress counts, failed-file review/copy tools, live equalizer presets, manual 10-band EQ, an in-app backend version readout, and a metadata save-mode switch for `Needle only` vs `Write to files`
 - **Needle backend setup and migration prep** in Settings: choose `Local folders` or `Needle backend`, verify backend health, configure the backend URL plus Needle account credentials, and migrate playlists, favourites/history, metadata caches, loudness-analysis data, and shared playback session state into the backend
@@ -289,7 +289,7 @@ Needle generates dashboard recommendations and smart-playlist views from data we
 - **Version-aware loudness refresh messaging** calls out when a full-library rerun is expected because Needle upgraded its loudness-analysis method
 - **Playlist-local genre focus** lets smart playlists keep their generated order while narrowing the current mix to one or more genres already represented in that playlist
 - **Library state** (`play_count = 0`) drives Needs a first spin
-- **Source tags** (for example `vinyl-rip`) can mark your own transfers visually without rewriting how Needle handles the rest of your metadata; backend-owned technical metadata powers codec, sample-rate, and bit-depth badges for every connected client
+- **Source tags** (for example `vinyl-rip`, `digital-purchase`, and `cd-rip`) plus backend-owned fields such as Is Live can mark your own transfers visually without rewriting how Needle handles the rest of your metadata; backend-owned technical metadata powers codec, sample-rate, and bit-depth badges for every connected client
 - **Artist enrichment** (`gender` when MusicBrainz provides it) gives future artist-radio style mixes another optional signal without blocking playback when metadata is incomplete
 - **`added_at`** (preserved across rescans) drives the Recently added albums row
 

@@ -652,10 +652,11 @@ const buildAlbumBadges = (tracks: Track[]) => {
 
   const topFormat = Array.from(formats.entries()).sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]))[0]?.[0];
   addAlbumBadge(badges, topFormat);
-  if (maxRate) {
+  if (maxRate && maxBits) {
+    addAlbumBadge(badges, `${formatAlbumSampleRateBadge(maxRate)} / ${maxBits}-bit`);
+  } else if (maxRate) {
     addAlbumBadge(badges, formatAlbumSampleRateBadge(maxRate));
-  }
-  if (maxBits) {
+  } else if (maxBits) {
     addAlbumBadge(badges, `${maxBits}-bit`);
   }
 
