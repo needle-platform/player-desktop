@@ -54,25 +54,37 @@ pub struct Track {
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
+    #[serde(alias = "albumArtist")]
     pub album_artist: Option<String>,
+    #[serde(alias = "durationSeconds")]
     pub duration_seconds: Option<u64>,
     pub format: Option<String>,
+    #[serde(alias = "sampleRate", alias = "samplingRate")]
     pub sample_rate: Option<u32>,
+    #[serde(alias = "bitDepth", alias = "bitsPerSample")]
     pub bit_depth: Option<u8>,
+    #[serde(alias = "discNumber")]
     pub disc_number: Option<i64>,
+    #[serde(alias = "trackNumber")]
     pub track_number: Option<i64>,
     pub bpm: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "bpmOverridden")]
     pub bpm_overridden: bool,
     pub genre: Option<String>,
+    #[serde(alias = "primaryGenre")]
     pub primary_genre: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "sourceTags")]
+    pub source_tags: Vec<String>,
+    #[serde(default, alias = "isVinylRip")]
     pub is_vinyl_rip: bool,
     pub year: Option<i64>,
+    #[serde(alias = "addedAt")]
     pub added_at: Option<String>,
+    #[serde(alias = "playCount")]
     pub play_count: i64,
+    #[serde(alias = "lastPlayedAt")]
     pub last_played_at: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "isFavorite")]
     pub is_favorite: bool,
     pub rating: Option<i64>,
 }

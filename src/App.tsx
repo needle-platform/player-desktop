@@ -98,7 +98,6 @@ import { formatBpm, VIBE_BUCKETS, vibeKeyForTrack, vibeLabelForTrack } from './l
 import dashboardIdleBackdrop from './assets/bg.jpg';
 import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
-import vinylRipBadgeIcon from './assets/vinyl-rip-badge.svg';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'artist' | 'settings';
 type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: string };
@@ -173,6 +172,7 @@ type AlbumSummary = {
   year: number | null;
   count: number;
   samplePath: string;
+  badges: string[];
   is_vinyl_rip: boolean;
   addedAt: string | null;
   offlineAvailability: OfflineAvailability;
@@ -612,6 +612,54 @@ const formatQuality = (track: Track) => {
     track.bit_depth ? `${track.bit_depth}-bit` : null,
   ].filter((v): v is string => Boolean(v));
   return parts.join(' · ') || null;
+};
+
+const normalizeBadgeText = (value: string) => value.trim().replace(/\s+/g, ' ');
+
+const addAlbumBadge = (badges: string[], label: string | null | undefined) => {
+  const normalized = normalizeBadgeText(label ?? '');
+  if (!normalized) return;
+  if (!badges.some((badge) => badge.toLocaleLowerCase() === normalized.toLocaleLowerCase())) {
+    badges.push(normalized);
+  }
+};
+
+const formatAlbumSampleRateBadge = (sampleRate: number) => {
+  const khz = sampleRate / 1000;
+  return `${Number.isInteger(khz) ? khz.toFixed(0) : khz.toFixed(1)} kHz`;
+};
+
+const buildAlbumBadges = (tracks: Track[]) => {
+  const badges: string[] = [];
+  const formats = new Map<string, number>();
+  let maxRate = 0;
+  let maxBits = 0;
+
+  for (const track of tracks) {
+    for (const tag of track.source_tags ?? []) {
+      addAlbumBadge(badges, tag);
+    }
+    if (track.is_vinyl_rip) {
+      addAlbumBadge(badges, 'vinyl');
+    }
+    if (track.format) {
+      const format = track.format.toUpperCase();
+      formats.set(format, (formats.get(format) ?? 0) + 1);
+    }
+    if (track.sample_rate && track.sample_rate > maxRate) maxRate = track.sample_rate;
+    if (track.bit_depth && track.bit_depth > maxBits) maxBits = track.bit_depth;
+  }
+
+  const topFormat = Array.from(formats.entries()).sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]))[0]?.[0];
+  addAlbumBadge(badges, topFormat);
+  if (maxRate) {
+    addAlbumBadge(badges, formatAlbumSampleRateBadge(maxRate));
+  }
+  if (maxBits) {
+    addAlbumBadge(badges, `${maxBits}-bit`);
+  }
+
+  return badges;
 };
 
 const formatTrackPace = (track: Pick<Track, 'bpm'>) => {
@@ -3267,13 +3315,14 @@ function App() {
   }, [selectedSmartPlaylist, smartPlaylistGenreOptions]);
 
   const albums = useMemo(() => {
-    const map = new Map<string, AlbumSummary & { downloadedCount: number }>();
+    const map = new Map<string, AlbumSummary & { downloadedCount: number; badgeTracks: Track[] }>();
     for (const t of allTracks) {
       const key = trackAlbumKey(t);
       if (!key || !t.album) continue;
       const existing = map.get(key);
       if (existing) {
         existing.count += 1;
+        existing.badgeTracks.push(t);
         if (offlineAvailableTrackPathSet.has(t.path)) existing.downloadedCount += 1;
         if (t.added_at && (!existing.addedAt || t.added_at > existing.addedAt)) {
           existing.addedAt = t.added_at;
@@ -3292,15 +3341,18 @@ function App() {
           year: t.year ?? null,
           count: 1,
           samplePath: t.path,
+          badges: [],
           is_vinyl_rip: t.is_vinyl_rip,
           addedAt: t.added_at ?? null,
           downloadedCount: offlineAvailableTrackPathSet.has(t.path) ? 1 : 0,
+          badgeTracks: [t],
           offlineAvailability: 'none',
         });
       }
     }
-    return Array.from(map.values()).map(({ downloadedCount, ...album }) => ({
+    return Array.from(map.values()).map(({ downloadedCount, badgeTracks, ...album }) => ({
       ...album,
+      badges: buildAlbumBadges(badgeTracks),
       offlineAvailability: offlineAvailabilityFromCounts(downloadedCount, album.count),
     }));
   }, [allTracks, offlineAvailableTrackPathSet]);
@@ -5501,7 +5553,6 @@ function App() {
             album={selectedAlbumSummary.album}
             albumKey={selectedAlbum}
             albumArtist={selectedAlbumSummary.artist}
-            isVinylRip={selectedAlbumSummary.is_vinyl_rip}
             tracks={allTracks}
             isMetadataRefreshing={metadataRefreshAlbumKey === selectedAlbum}
             currentPath={currentPath}
@@ -7775,7 +7826,6 @@ interface AlbumDetailViewProps {
   album: string;
   albumKey: string;
   albumArtist: string | null;
-  isVinylRip: boolean;
   tracks: Track[];
   isMetadataRefreshing: boolean;
   currentPath: string | null;
@@ -7820,7 +7870,6 @@ function AlbumDetailView({
   album,
   albumKey,
   albumArtist,
-  isVinylRip,
   tracks,
   isMetadataRefreshing,
   currentPath,
@@ -7930,24 +7979,7 @@ function AlbumDetailView({
   const currentGenreValue =
     suggestedGenreValues.length === 1 ? suggestedGenreValues[0] : (suggestedGenreValues[0] ?? null);
 
-  const qualityHint = useMemo(() => {
-    if (albumTracks.length === 0) return null;
-    const formats = new Map<string, number>();
-    let maxRate = 0;
-    let maxBits = 0;
-    for (const t of albumTracks) {
-      if (t.format) formats.set(t.format, (formats.get(t.format) ?? 0) + 1);
-      if (t.sample_rate && t.sample_rate > maxRate) maxRate = t.sample_rate;
-      if (t.bit_depth && t.bit_depth > maxBits) maxBits = t.bit_depth;
-    }
-    const topFormat =
-      Array.from(formats.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
-    const parts: string[] = [];
-    if (topFormat) parts.push(topFormat);
-    if (maxRate) parts.push(`${(maxRate / 1000).toFixed(1)} kHz`);
-    if (maxBits) parts.push(`${maxBits}-bit`);
-    return parts.length ? parts.join(' · ') : null;
-  }, [albumTracks]);
+  const albumBadges = useMemo(() => buildAlbumBadges(albumTracks), [albumTracks]);
 
   const samplePath = albumTracks[0]?.path ?? null;
   const albumOfflineAvailability = areAllTracksOffline ? 'full' : hasAnyOfflineTracks ? 'partial' : 'none';
@@ -8014,7 +8046,6 @@ function AlbumDetailView({
             trackPath={samplePath}
             fallback={album[0]?.toUpperCase() ?? '◉'}
             size="hero"
-            vinylRip={isVinylRip}
             offlineAvailability={albumOfflineAvailability}
           />
           {isMetadataRefreshing && (
@@ -8055,11 +8086,11 @@ function AlbumDetailView({
               year,
               `${albumTracks.length} track${albumTracks.length === 1 ? '' : 's'}`,
               formatTotalDuration(totalSeconds),
-              qualityHint,
             ]
               .filter(Boolean)
               .join(' · ')}
           </div>
+          <AlbumBadges badges={albumBadges} variant="hero" />
           <div className="album-primary-genre">
             <span className="album-primary-genre-label">Genres</span>
             <span className={`album-primary-genre-pill ${genres.length > 0 ? 'is-set' : ''}`}>
@@ -8682,12 +8713,12 @@ function ArtistDetailView({
                     trackPath={album.samplePath}
                     fallback={album.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
-                    vinylRip={album.is_vinyl_rip}
                     offlineAvailability={album.offlineAvailability}
                   />
                   <div className="card-title">{album.album}</div>
                   <div className="card-sub">{album.year ?? relativeAdded(album.addedAt)}</div>
                   <div className="card-meta">{album.count} tracks</div>
+                  <AlbumBadges badges={album.badges} variant="card" />
                 </button>
                 <div className="card-actions">
                   <button
@@ -8905,7 +8936,6 @@ function AlbumsView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
-                    vinylRip={a.is_vinyl_rip}
                     offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
@@ -8913,6 +8943,7 @@ function AlbumsView({
                 <div className="card-title">{a.album}</div>
                 <div className="card-sub">{a.artist ?? 'Various artists'}</div>
                 <div className="card-meta">{a.count} tracks</div>
+                <AlbumBadges badges={a.badges} variant="card" />
               </button>
               <div className="card-actions">
                 <button
@@ -8952,7 +8983,6 @@ interface CoverProps {
   trackPath: string | null;
   fallback: string;
   size: 'md' | 'card' | 'hero' | 'queue' | 'mini';
-  vinylRip?: boolean;
   offlineAvailability?: OfflineAvailability;
   imageMode?: 'default' | 'cache_only' | 'deferred';
   lazyLoad?: boolean;
@@ -8962,7 +8992,6 @@ function Cover({
   trackPath,
   fallback,
   size,
-  vinylRip = false,
   offlineAvailability = 'none',
   imageMode = 'default',
   lazyLoad = false,
@@ -8989,7 +9018,6 @@ function Cover({
       <div className={className} ref={ref}>
         <img src={url} alt="" className="cover-img" />
         <OfflineAvailableBadge availability={offlineAvailability} size={size} />
-        {vinylRip && <VinylRipBadge size={size} />}
       </div>
     );
   }
@@ -8998,16 +9026,20 @@ function Cover({
     <div className={className} ref={ref}>
       {fallback}
       <OfflineAvailableBadge availability={offlineAvailability} size={size} />
-      {vinylRip && <VinylRipBadge size={size} />}
     </div>
   );
 }
 
-function VinylRipBadge({ size }: { size: CoverProps['size'] }) {
+function AlbumBadges({ badges, variant }: { badges: string[]; variant: 'card' | 'hero' }) {
+  if (badges.length === 0) return null;
   return (
-    <span className={`vinyl-rip-badge vinyl-rip-badge-${size}`} title="Vinyl rip" aria-label="Vinyl rip">
-      <img src={vinylRipBadgeIcon} alt="" className="vinyl-rip-badge-img" />
-    </span>
+    <div className={`album-badges album-badges-${variant}`} aria-label="Album badges">
+      {badges.map((badge) => (
+        <span key={badge} className="album-badge">
+          {badge}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -10983,7 +11015,6 @@ function DashboardView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
-                    vinylRip={a.is_vinyl_rip}
                     offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
@@ -10991,6 +11022,7 @@ function DashboardView({
                   <div className="card-title">{a.album}</div>
                   <div className="card-sub">{a.artist ?? 'Various artists'}</div>
                   <div className="card-meta">{relativeAdded(a.addedAt)} · {a.count} tracks</div>
+                  <AlbumBadges badges={a.badges} variant="card" />
                 </button>
                 <button
                   className="card-play"
@@ -11046,7 +11078,6 @@ function DashboardView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
-                    vinylRip={a.is_vinyl_rip}
                     offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
@@ -11054,6 +11085,7 @@ function DashboardView({
                   <div className="card-title">{a.album}</div>
                   <div className="card-sub">{a.artist ?? 'Various artists'}</div>
                   <div className="card-meta">{a.count} tracks</div>
+                  <AlbumBadges badges={a.badges} variant="card" />
                 </button>
                 <button
                   className="card-play"

@@ -30,6 +30,7 @@ export interface Track {
   bpm_overridden: boolean;
   genre: string | null;
   primary_genre: string | null;
+  source_tags: string[];
   is_vinyl_rip: boolean;
   year: number | null;
   added_at: string | null;

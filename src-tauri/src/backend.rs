@@ -138,12 +138,20 @@ struct RawSubsonicTrack {
     album: Option<String>,
     album_artist: Option<String>,
     duration: Option<f64>,
+    #[serde(alias = "duration_seconds")]
+    duration_seconds: Option<f64>,
+    #[serde(alias = "sample_rate", alias = "samplingRate")]
+    sample_rate: Option<u32>,
+    #[serde(alias = "bit_depth", alias = "bitsPerSample")]
+    bit_depth: Option<u8>,
     disc_number: Option<i64>,
     track: Option<i64>,
     bpm: Option<i64>,
     bpm_overridden: Option<bool>,
     genre: Option<String>,
     primary_genre: Option<String>,
+    #[serde(alias = "source_tags")]
+    source_tags: Option<Vec<String>>,
     is_vinyl_rip: Option<bool>,
     year: Option<i64>,
     suffix: Option<String>,
@@ -958,16 +966,20 @@ pub async fn load_backend_album_tracks(
                 artist: track.artist,
                 album: track.album,
                 album_artist: track.album_artist,
-                duration_seconds: track.duration.map(|value| value.max(0.0).round() as u64),
+                duration_seconds: track
+                    .duration
+                    .or(track.duration_seconds)
+                    .map(|value| value.max(0.0).round() as u64),
                 format: track.suffix,
-                sample_rate: None,
-                bit_depth: None,
+                sample_rate: track.sample_rate,
+                bit_depth: track.bit_depth,
                 disc_number: track.disc_number,
                 track_number: track.track,
                 bpm: track.bpm,
                 bpm_overridden: track.bpm_overridden.unwrap_or(false),
                 genre: track.genre,
                 primary_genre: track.primary_genre,
+                source_tags: track.source_tags.unwrap_or_default(),
                 is_vinyl_rip: track.is_vinyl_rip.unwrap_or(false),
                 year: track.year,
                 added_at: None,
