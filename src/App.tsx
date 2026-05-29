@@ -8547,33 +8547,34 @@ function AlbumDetailView({
                 </button>
               ))}
             </div>
-          ) : (
-            <>
-              <div className="album-primary-genre">
-                <span className="album-primary-genre-label">Source tags</span>
-                <span className="album-primary-genre-pill">Not set</span>
-                <button
-                  className="album-primary-genre-edit"
-                  onClick={() => onEditSourceTags(sourceTags, sourceTags, albumTracks.map((track) => track.path))}
-                  title="Edit source tags"
-                  aria-label="Edit source tags"
-                >
-                  <PencilIcon />
-                </button>
-              </div>
-              <div className="album-primary-genre">
-                <span className="album-primary-genre-label">Genres</span>
-                <span className="album-primary-genre-pill">Not set</span>
-                <button
-                  className="album-primary-genre-edit"
-                  onClick={() => onEditGenre(currentGenreValue, suggestedGenreValues, albumTracks.map((track) => track.path))}
-                  title="Edit genres"
-                  aria-label="Edit genres"
-                >
-                  <PencilIcon />
-                </button>
-              </div>
-            </>
+          ) : null}
+          {sourceTags.length === 0 && (
+            <div className="album-primary-genre">
+              <span className="album-primary-genre-label">Source tags</span>
+              <span className="album-primary-genre-pill">Not set</span>
+              <button
+                className="album-primary-genre-edit"
+                onClick={() => onEditSourceTags(sourceTags, sourceTags, albumTracks.map((track) => track.path))}
+                title="Edit source tags"
+                aria-label="Edit source tags"
+              >
+                <PencilIcon />
+              </button>
+            </div>
+          )}
+          {genres.length === 0 && (
+            <div className="album-primary-genre">
+              <span className="album-primary-genre-label">Genres</span>
+              <span className="album-primary-genre-pill">Not set</span>
+              <button
+                className="album-primary-genre-edit"
+                onClick={() => onEditGenre(currentGenreValue, suggestedGenreValues, albumTracks.map((track) => track.path))}
+                title="Edit genres"
+                aria-label="Edit genres"
+              >
+                <PencilIcon />
+              </button>
+            </div>
           )}
           <div className="album-hero-actions">
             <button className="primary-button" onClick={onPlayAlbum}>
