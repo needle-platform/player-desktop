@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::File,
     io::Write,
     path::{Path, PathBuf},
@@ -979,6 +980,7 @@ pub async fn load_backend_album_tracks(
             Track {
                 id: track.id.clone(),
                 path: format!("{TRACK_TOKEN_PREFIX}{}", track.id),
+                album_id: None,
                 relative_path: None,
                 title: display_title,
                 artist: track.artist,
@@ -1199,17 +1201,22 @@ pub async fn save_backend_album_genre(
     settings: &AppSettings,
     album_name: &str,
     artist_name: Option<&str>,
+    track_paths: &[String],
     genre: Option<&str>,
     mode: MetadataEditMode,
 ) -> Result<BootstrapPayload> {
     let url = backend_mode_url(settings)
         .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
-    let albums = get_json::<Vec<RawSubsonicAlbum>>(&client, settings, &url, "/api/albums").await?;
-    let target = albums
-        .into_iter()
-        .find(|album| album_matches(album, album_name, artist_name))
-        .ok_or_else(|| anyhow!("Album not found in Needle backend"))?;
+    let target = select_backend_album(
+        &client,
+        settings,
+        &url,
+        album_name,
+        artist_name,
+        track_paths,
+    )
+    .await?;
 
     let mode_name = match mode {
         MetadataEditMode::NeedleOnly => "needle_only",
@@ -1236,17 +1243,22 @@ pub async fn save_backend_album_source_tags(
     settings: &AppSettings,
     album_name: &str,
     artist_name: Option<&str>,
+    track_paths: &[String],
     source_tags: &[String],
     mode: MetadataEditMode,
 ) -> Result<BootstrapPayload> {
     let url = backend_mode_url(settings)
         .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
-    let albums = get_json::<Vec<RawSubsonicAlbum>>(&client, settings, &url, "/api/albums").await?;
-    let target = albums
-        .into_iter()
-        .find(|album| album_matches(album, album_name, artist_name))
-        .ok_or_else(|| anyhow!("Album not found in Needle backend"))?;
+    let target = select_backend_album(
+        &client,
+        settings,
+        &url,
+        album_name,
+        artist_name,
+        track_paths,
+    )
+    .await?;
 
     let mode_name = match mode {
         MetadataEditMode::NeedleOnly => "needle_only",
@@ -1933,6 +1945,50 @@ fn album_matches(
             .unwrap_or(false),
         None => true,
     }
+}
+
+async fn select_backend_album(
+    client: &Client,
+    settings: &AppSettings,
+    url: &str,
+    album_name: &str,
+    artist_name: Option<&str>,
+    track_paths: &[String],
+) -> Result<RawSubsonicAlbum> {
+    let selected_track_ids = track_paths
+        .iter()
+        .filter_map(|path| backend_track_id_from_path(path).map(ToOwned::to_owned))
+        .collect::<HashSet<_>>();
+    let albums = get_json::<Vec<RawSubsonicAlbum>>(client, settings, url, "/api/albums").await?;
+    let mut fallback = None;
+
+    for album in albums
+        .into_iter()
+        .filter(|album| album_matches(album, album_name, artist_name))
+    {
+        if !selected_track_ids.is_empty() {
+            let detail = get_json::<RawAlbumDetailPayload>(
+                client,
+                settings,
+                url,
+                &format!("/api/album/{}", album.id),
+            )
+            .await?;
+            if detail
+                .album
+                .song
+                .iter()
+                .any(|track| selected_track_ids.contains(&track.id))
+            {
+                return Ok(album);
+            }
+        }
+        if fallback.is_none() {
+            fallback = Some(album);
+        }
+    }
+
+    fallback.ok_or_else(|| anyhow!("Album not found in Needle backend"))
 }
 
 fn extension_from_content_type(content_type: Option<&str>) -> Option<&'static str> {

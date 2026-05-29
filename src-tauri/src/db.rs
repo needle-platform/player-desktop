@@ -897,6 +897,7 @@ pub fn load_album_tracks_for_match(
             Ok(Track {
                 id: row.get::<_, i64>(0)?.to_string(),
                 path: row.get(1)?,
+                album_id: None,
                 relative_path: None,
                 title: row.get(2)?,
                 artist: row.get(3)?,
@@ -2134,6 +2135,7 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
             Ok(Track {
                 id: row.get::<_, i64>(0)?.to_string(),
                 path: row.get(1)?,
+                album_id: None,
                 relative_path: None,
                 title: row.get(2)?,
                 artist: row.get(3)?,
@@ -2206,18 +2208,17 @@ fn album_edition_count(tracks: &[Track]) -> usize {
 }
 
 fn album_edition_key(track: &Track) -> String {
+    let folder = album_edition_folder(track.relative_path.as_deref().unwrap_or(&track.path));
+    if !folder.is_empty() {
+        return format!("folder:{}", folder.to_lowercase());
+    }
     if !track.source_tags.is_empty() {
         return format!("source:{}", track.source_tags.join("+").to_lowercase());
     }
     if track.is_vinyl_rip {
         return "source:vinyl-rip".to_string();
     }
-    let folder = album_edition_folder(track.relative_path.as_deref().unwrap_or(&track.path));
-    if folder.is_empty() {
-        String::new()
-    } else {
-        format!("folder:{}", folder.to_lowercase())
-    }
+    String::new()
 }
 
 fn album_edition_folder(value: &str) -> String {

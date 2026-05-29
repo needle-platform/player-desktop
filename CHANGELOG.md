@@ -21,6 +21,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Album grouping now treats source-tagged editions as separate albums, so a digital purchase and vinyl rip of the same release no longer collapse into one duplicated album view.
 
 ### Fixed
+- Fixed backend-mode album grouping so albums with the same title and artist stay separated when the backend exposes distinct album identities, such as CD, vinyl, and digital editions in separate folders.
 - Fixed backend-mode playlist management so desktop rename, delete, add, remove, and reorder actions call homeserver playlist APIs instead of being blocked by leftover backend-mode guards.
 - Fixed desktop backend mode so homeserver outages no longer hang the app indefinitely, and the app now switches itself into a downloaded-only offline mode with a calm in-app notice instead of freezing or waiting for a manual backend check.
 - Fixed backend-mode reconnects after laptop sleep so wake, focus, and visibility changes now force a fresh backend check instead of leaving the app stranded in offline mode until restart.

@@ -16,6 +16,7 @@ export type LibrarySource = 'local_folders' | 'needle_backend';
 export interface Track {
   id: string;
   path: string;
+  album_id: string | null;
   relative_path: string | null;
   title: string;
   artist: string | null;

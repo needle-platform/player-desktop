@@ -739,15 +739,16 @@ const albumEditionFolder = (value: string | null | undefined) => {
 const trackAlbumEditionKey = (
   track: Pick<Track, 'path' | 'relative_path' | 'source_tags' | 'is_vinyl_rip'>,
 ) => {
+  const folder = albumEditionFolder(track.relative_path ?? track.path);
+  if (folder) return `folder:${folder.toLocaleLowerCase()}`;
   const sourceKeys = splitSourceTagEntries(track.source_tags).map((entry) => entry.key);
   if (sourceKeys.length > 0) return `source:${sourceKeys.join('+')}`;
   if (track.is_vinyl_rip) return 'source:vinyl-rip';
-  const folder = albumEditionFolder(track.relative_path ?? track.path);
-  return folder ? `folder:${folder.toLocaleLowerCase()}` : '';
+  return '';
 };
 const trackAlbumKey = (
-  track: Pick<Track, 'album' | 'album_artist' | 'artist' | 'path' | 'relative_path' | 'source_tags' | 'is_vinyl_rip'>,
-) => (track.album ? albumKey(track.album, albumArtistForTrack(track), trackAlbumEditionKey(track)) : null);
+  track: Pick<Track, 'album' | 'album_artist' | 'artist' | 'album_id' | 'path' | 'relative_path' | 'source_tags' | 'is_vinyl_rip'>,
+) => (track.album ? albumKey(track.album, albumArtistForTrack(track), track.album_id ? `backend:${track.album_id}` : trackAlbumEditionKey(track)) : null);
 const albumTitleFromKey = (key: string) => key.split(albumIdentitySeparator)[0] ?? key;
 const albumEditionFromKey = (key: string) => key.split(albumIdentitySeparator)[2] ?? '';
 const offlineAvailabilityFromCounts = (downloadedCount: number, totalCount: number): OfflineAvailability => {
@@ -4508,6 +4509,13 @@ function App() {
       setBusy('Saving source tags…');
       const next = await persistAlbumSourceTags(album, albumArtist, trackPaths, sourceTags, metadataEditMode);
       setData(next);
+      const editedTrackPaths = new Set(trackPaths);
+      const updatedAlbumKey = next.library.tracks
+        .map((track) => (editedTrackPaths.has(track.path) ? trackAlbumKey(track) : null))
+        .find((key): key is string => Boolean(key));
+      if (updatedAlbumKey) {
+        setSelectedAlbum(updatedAlbumKey);
+      }
       setAlbumSourceTagsEditor(null);
       setStatus(
         sourceTags.length > 0

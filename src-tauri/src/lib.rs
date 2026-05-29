@@ -290,6 +290,7 @@ fn offline_track_from_download(entry: &OfflineDownloadEntry) -> Track {
         .unwrap_or(&entry.track_path)
         .to_string();
     track.path = entry.track_path.clone();
+    track.album_id = None;
     track.relative_path = None;
     track.added_at = Some(entry.downloaded_at.clone());
     track
@@ -1417,6 +1418,7 @@ fn set_album_primary_genre(
             &settings,
             &album,
             album_artist.as_deref(),
+            &[],
             primary_genre.as_deref(),
             MetadataEditMode::NeedleOnly,
         ))
@@ -1448,6 +1450,7 @@ fn save_album_genre(
             &settings,
             &album,
             album_artist.as_deref(),
+            &track_paths,
             genre.as_deref(),
             mode,
         ))
@@ -1506,6 +1509,7 @@ fn save_album_source_tags(
             &settings,
             &album,
             album_artist.as_deref(),
+            &track_paths,
             &source_tags,
             mode,
         ))

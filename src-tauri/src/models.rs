@@ -51,6 +51,8 @@ pub enum LibrarySource {
 pub struct Track {
     pub id: String,
     pub path: String,
+    #[serde(default, alias = "albumId")]
+    pub album_id: Option<String>,
     #[serde(default, alias = "relativePath")]
     pub relative_path: Option<String>,
     pub title: String,
