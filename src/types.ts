@@ -104,6 +104,12 @@ export interface AudioDevice {
 }
 
 export interface PlaybackState {
+  path: string | null;
+  paused: boolean;
+  idle: boolean;
+  position_seconds: number;
+  duration_seconds: number;
+  playlist_position: number | null;
   volume: number;
   muted: boolean;
   audio_device: string;

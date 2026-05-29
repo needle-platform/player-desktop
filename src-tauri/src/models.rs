@@ -190,6 +190,12 @@ pub struct AudioDevice {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaybackState {
+    pub path: Option<String>,
+    pub paused: bool,
+    pub idle: bool,
+    pub position_seconds: f64,
+    pub duration_seconds: f64,
+    pub playlist_position: Option<usize>,
     pub volume: f64,
     pub muted: bool,
     pub audio_device: String,

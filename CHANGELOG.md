@@ -28,6 +28,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Fixed backend-mode offline downloads so tracks and albums now surface active download progress and partial/full offline availability directly in the library UI.
 - Fixed remote backend offline downloads so track streaming no longer uses the same short total-request timeout as lightweight backend heartbeat checks.
 - Fixed backend-mode queue state so temporary offline or reconnect library snapshots no longer clear the visible Up Next queue while mpv playback continues.
+- Fixed desktop playback recovery after sleep or background throttling by periodically resyncing the UI from mpv's current track, position, duration, volume, mute state, output device, and queue position.
 
 ## [0.1.2] - 2026-05-04
 

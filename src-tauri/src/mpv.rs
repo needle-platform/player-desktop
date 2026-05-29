@@ -338,7 +338,23 @@ impl MpvController {
 
     pub fn playback_state(&mut self) -> Result<PlaybackState> {
         let mut stream = self.connect_or_spawn()?;
+        let playlist_position = self
+            .property::<Option<i64>>(&mut stream, "playlist-pos")?
+            .and_then(|value| usize::try_from(value).ok());
+
         Ok(PlaybackState {
+            path: self.property::<Option<String>>(&mut stream, "path")?,
+            paused: self.property::<bool>(&mut stream, "pause")?,
+            idle: self.property::<bool>(&mut stream, "idle-active")?,
+            position_seconds: self
+                .property::<Option<f64>>(&mut stream, "time-pos")?
+                .unwrap_or(0.0)
+                .max(0.0),
+            duration_seconds: self
+                .property::<Option<f64>>(&mut stream, "duration")?
+                .unwrap_or(0.0)
+                .max(0.0),
+            playlist_position,
             volume: self
                 .property::<f64>(&mut stream, "volume")?
                 .clamp(0.0, 100.0),

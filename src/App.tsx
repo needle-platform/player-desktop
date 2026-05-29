@@ -73,6 +73,7 @@ import type {
   OfflineDownloadEntry,
   OfflineDownloadProgress,
   PlaybackSession,
+  PlaybackState,
   RepeatMode,
   RuntimeInfo,
   SavedPlaylist,
@@ -1750,6 +1751,109 @@ function App() {
     );
   };
 
+  const applyPlaybackPath = (
+    rawPath: string | null,
+    options?: {
+      paused?: boolean;
+      idle?: boolean;
+      positionSeconds?: number | null;
+      durationSeconds?: number | null;
+      playlistPosition?: number | null;
+      clearStatusOnNull?: boolean;
+    },
+  ) => {
+    const path = normalizeNeedleBackendPlaybackPath(rawPath, data?.settings ?? null, offlineDownloadByLocalPath);
+
+    backendPathRef.current = path;
+    if (typeof options?.paused === 'boolean') {
+      backendPausedRef.current = options.paused;
+    }
+    backendIdleRef.current =
+      typeof options?.idle === 'boolean' ? options.idle || path == null : path == null;
+
+    setCurrentPath(path);
+    if (!path) {
+      scrubPositionRef.current = null;
+      setScrubPosition(null);
+      setPlaybackPosition(0);
+      setPlaybackDuration(0);
+      syncConfirmedPlaybackState();
+      if (options?.clearStatusOnNull ?? true) {
+        setStatus('');
+      }
+      return;
+    }
+
+    setIsBackendPlaybackLoaded(true);
+    const snapshotQueueIndex =
+      typeof options?.playlistPosition === 'number' &&
+      options.playlistPosition >= 0 &&
+      queuePaths[options.playlistPosition] === path
+        ? options.playlistPosition
+        : -1;
+    const queueIndex = snapshotQueueIndex >= 0 ? snapshotQueueIndex : queuePaths.indexOf(path);
+    if (queueIndex >= 0) {
+      setCurrentQueueIndex(queueIndex);
+    }
+
+    scrubPositionRef.current = null;
+    setScrubPosition(null);
+    if (typeof options?.positionSeconds === 'number' && Number.isFinite(options.positionSeconds)) {
+      setPlaybackPosition(Math.max(0, options.positionSeconds));
+    } else {
+      setPlaybackPosition(0);
+    }
+    if (typeof options?.durationSeconds === 'number' && Number.isFinite(options.durationSeconds)) {
+      setPlaybackDuration(Math.max(0, options.durationSeconds));
+    }
+    syncConfirmedPlaybackState();
+
+    if (suppressRecordPathRef.current === path) {
+      suppressRecordPathRef.current = null;
+      lastRecordedPath.current = path;
+      return;
+    }
+    if (lastRecordedPath.current !== path) {
+      lastRecordedPath.current = path;
+      const nowIso = new Date().toISOString();
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              library: {
+                ...prev.library,
+                tracks: prev.library.tracks.map((t) =>
+                  t.path === path
+                    ? {
+                        ...t,
+                        play_count: (t.play_count ?? 0) + 1,
+                        last_played_at: nowIso,
+                      }
+                    : t,
+                ),
+              },
+            }
+          : prev,
+      );
+      void recordPlay(path).catch(() => {});
+    }
+  };
+
+  const applyPlaybackSnapshot = (playback: PlaybackState) => {
+    setVolumeLevel(clampVolume(playback.volume));
+    setIsMuted(playback.muted);
+    setSelectedAudioDevice(playback.audio_device || defaultAudioDevice.name);
+    setAudioDevices(playback.audio_devices.length > 0 ? playback.audio_devices : [defaultAudioDevice]);
+    applyPlaybackPath(playback.path, {
+      paused: playback.paused,
+      idle: playback.idle,
+      positionSeconds: playback.position_seconds,
+      durationSeconds: playback.duration_seconds,
+      playlistPosition: playback.playlist_position,
+      clearStatusOnNull: false,
+    });
+  };
+
   const openAlbum = (album: string) => {
     albumReturnView.current = view;
     setSelectedAlbum(album);
@@ -2088,8 +2192,6 @@ function App() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    const appSettings = data?.settings ?? null;
-    const offlinePathMap = offlineDownloadByLocalPath;
     void (async () => {
       const dispose = await listen<{ name: string; data: unknown }>(
         'mpv-property',
@@ -2097,57 +2199,7 @@ function App() {
           const { name, data } = event.payload;
           if (name === 'path') {
             const rawPath = typeof data === 'string' ? data : null;
-            const path = normalizeNeedleBackendPlaybackPath(rawPath, appSettings, offlinePathMap);
-            backendPathRef.current = path;
-            backendIdleRef.current = path == null;
-            setCurrentPath(path);
-            if (!path) {
-              scrubPositionRef.current = null;
-              setScrubPosition(null);
-              setPlaybackPosition(0);
-              setPlaybackDuration(0);
-              syncConfirmedPlaybackState();
-              setStatus('');
-              return;
-            }
-            setIsBackendPlaybackLoaded(true);
-            const queueIndex = queuePaths.indexOf(path);
-            if (queueIndex >= 0) {
-              setCurrentQueueIndex(queueIndex);
-            }
-            scrubPositionRef.current = null;
-            setScrubPosition(null);
-            setPlaybackPosition(0);
-            syncConfirmedPlaybackState();
-            if (suppressRecordPathRef.current === path) {
-              suppressRecordPathRef.current = null;
-              lastRecordedPath.current = path;
-              return;
-            }
-            if (lastRecordedPath.current !== path) {
-              lastRecordedPath.current = path;
-              const nowIso = new Date().toISOString();
-              setData((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      library: {
-                        ...prev.library,
-                        tracks: prev.library.tracks.map((t) =>
-                          t.path === path
-                            ? {
-                                ...t,
-                                play_count: (t.play_count ?? 0) + 1,
-                                last_played_at: nowIso,
-                              }
-                            : t,
-                        ),
-                      },
-                    }
-                  : prev,
-              );
-              void recordPlay(path).catch(() => {});
-            }
+            applyPlaybackPath(rawPath);
           } else if (name === 'pause') {
             backendPausedRef.current = data === true;
             syncConfirmedPlaybackState();
@@ -2186,7 +2238,7 @@ function App() {
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [data, offlineDownloadByLocalPath, queuePaths]);
+  }, [data?.settings, offlineDownloadByLocalPath, queuePaths]);
 
   useEffect(() => {
     void (async () => {
@@ -2689,6 +2741,63 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!data) return;
+
+    let cancelled = false;
+    let inFlight = false;
+    const refreshPlaybackSnapshot = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const playback = await getPlaybackState();
+        if (!cancelled) {
+          applyPlaybackSnapshot(playback);
+        }
+      } catch {
+        // The regular mpv event stream remains primary. This only gives the UI
+        // a way back after macOS display sleep/background throttling.
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const intervalMs = currentPath || isPlaying ? 5000 : 15000;
+    const intervalId = window.setInterval(() => {
+      void refreshPlaybackSnapshot();
+    }, intervalMs);
+
+    const handleWakeLikeEvent = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      void refreshPlaybackSnapshot();
+    };
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void refreshPlaybackSnapshot();
+      }
+    };
+
+    window.addEventListener('focus', handleWakeLikeEvent);
+    window.addEventListener('pageshow', handleWakeLikeEvent);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+    void refreshPlaybackSnapshot();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleWakeLikeEvent);
+      window.removeEventListener('pageshow', handleWakeLikeEvent);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+    };
+  }, [data?.settings, offlineDownloadByLocalPath, queuePaths, currentPath, isPlaying]);
 
   useEffect(() => {
     let cancelled = false;

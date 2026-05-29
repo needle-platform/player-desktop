@@ -21,6 +21,11 @@ use crate::{
 };
 
 const TRACK_TOKEN_PREFIX: &str = "needle-track:";
+const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const BACKEND_STATUS_TIMEOUT: Duration = Duration::from_secs(12);
+const BACKEND_JSON_TIMEOUT: Duration = Duration::from_secs(30);
+const BACKEND_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(90);
+const BACKEND_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -341,7 +346,7 @@ pub async fn fetch_backend_status(
     raw_url_override: Option<&str>,
 ) -> Result<NeedleBackendStatus> {
     let url = backend_url_from_settings(settings, raw_url_override)?;
-    let client = http_client()?;
+    let client = status_http_client()?;
     let payload =
         get_json::<RawNeedleStatusResponse>(&client, settings, &url, "/api/needle/status")
             .await
@@ -371,7 +376,7 @@ pub async fn load_backend_bootstrap(settings: AppSettings) -> Result<BootstrapPa
         bail!("The configured Needle backend is not enabled for local library mode");
     }
 
-    let client = http_client()?;
+    let client = bootstrap_http_client()?;
     let mut payload = get_json::<RawDesktopBootstrap>(
         &client,
         &settings,
@@ -1537,20 +1542,32 @@ fn normalize_path(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn http_client() -> Result<Client> {
+fn http_client_with_timeout(timeout: Duration) -> Result<Client> {
     reqwest::Client::builder()
         .user_agent("NeedleDesktop/0.1")
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(5))
+        .connect_timeout(BACKEND_CONNECT_TIMEOUT)
+        .timeout(timeout)
         .build()
         .map_err(|error| anyhow!("Unable to create Needle backend HTTP client: {error}"))
+}
+
+fn http_client() -> Result<Client> {
+    http_client_with_timeout(BACKEND_JSON_TIMEOUT)
+}
+
+fn status_http_client() -> Result<Client> {
+    http_client_with_timeout(BACKEND_STATUS_TIMEOUT)
+}
+
+fn bootstrap_http_client() -> Result<Client> {
+    http_client_with_timeout(BACKEND_BOOTSTRAP_TIMEOUT)
 }
 
 fn stream_http_client() -> Result<Client> {
     reqwest::Client::builder()
         .user_agent("NeedleDesktop/0.1")
-        .connect_timeout(Duration::from_secs(2))
-        .read_timeout(Duration::from_secs(30))
+        .connect_timeout(BACKEND_CONNECT_TIMEOUT)
+        .read_timeout(BACKEND_STREAM_READ_TIMEOUT)
         .build()
         .map_err(|error| anyhow!("Unable to create Needle backend streaming HTTP client: {error}"))
 }
