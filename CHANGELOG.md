@@ -17,6 +17,8 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Artist-page enrichment in backend mode is now backend-owned for both photos and biographies, so clients share one source of truth instead of re-fetching artist data per app.
 - Album-page enrichment in backend mode is now backend-owned too, so shared album notes and source links come from the homeserver instead of being fetched separately by each client.
 - Backend-mode info toasts now dismiss themselves automatically after a short delay instead of lingering until manually closed.
+- Backend-mode heartbeat checks now watch the homeserver `libraryChange` version and refresh the desktop library snapshot automatically when shared library state changes.
+- Album grouping now treats source-tagged editions as separate albums, so a digital purchase and vinyl rip of the same release no longer collapse into one duplicated album view.
 
 ### Fixed
 - Fixed backend-mode playlist management so desktop rename, delete, add, remove, and reorder actions call homeserver playlist APIs instead of being blocked by leftover backend-mode guards.

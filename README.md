@@ -149,6 +149,8 @@ Just don’t expect democracy.
 - **Album-wide genre editing** can either stay local to Needle or write directly into the music files, depending on your Settings preference
 - **Searchable album-genre picker** speeds up metadata cleanup with reusable library genres, pill-style multi-select editing, and quick creation of new genres when needed
 - **Album-wide Vorbis `TAGS` editing** uses the same metadata save mode, with reusable source presets for `vinyl-rip`, `cd-rip`, and `digital-purchase` plus custom tags you add on the fly
+- **Source-aware album editions** keep tagged copies like `digital-purchase`, `cd-rip`, and `vinyl-rip` as separate album entries even when the album title and album artist match
+- **Backend-mode library refresh** watches the homeserver `libraryChange` version through the existing heartbeat and reloads the desktop snapshot when shared library state changes
 - **Refresh failures are now surfaced clearly** when MusicBrainz is temporarily rate-limiting or unavailable, so you get a friendly “try again later” message instead of a cryptic backend error
 - Graceful fallback when no article exists for obscure releases, compilations, or local-only metadata
 

@@ -290,6 +290,7 @@ fn offline_track_from_download(entry: &OfflineDownloadEntry) -> Track {
         .unwrap_or(&entry.track_path)
         .to_string();
     track.path = entry.track_path.clone();
+    track.relative_path = None;
     track.added_at = Some(entry.downloaded_at.clone());
     track
 }
@@ -423,6 +424,7 @@ fn build_offline_backend_bootstrap(
         library: library_data_from_tracks(tracks),
         playlists,
         playback_session,
+        library_change: None,
     })
 }
 

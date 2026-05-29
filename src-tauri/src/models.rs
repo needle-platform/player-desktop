@@ -51,6 +51,8 @@ pub enum LibrarySource {
 pub struct Track {
     pub id: String,
     pub path: String,
+    #[serde(default, alias = "relativePath")]
+    pub relative_path: Option<String>,
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
@@ -167,6 +169,8 @@ pub struct BootstrapPayload {
     pub library: LibraryData,
     pub playlists: Vec<SavedPlaylist>,
     pub playback_session: PlaybackSession,
+    #[serde(default)]
+    pub library_change: Option<LibraryChangeState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,7 +455,17 @@ pub struct NeedleBackendStatus {
     pub album_count: Option<usize>,
     pub artist_count: Option<usize>,
     pub last_scan_status: Option<String>,
+    pub library_change: Option<LibraryChangeState>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryChangeState {
+    pub version: i64,
+    pub changed_at: String,
+    pub change_source: Option<String>,
+    pub change_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -715,11 +715,41 @@ const albumArtistForTrack = (track: Pick<Track, 'album_artist' | 'artist'>) =>
   track.album_artist ?? track.artist ?? null;
 const artistNameForTrack = (track: Pick<Track, 'artist' | 'album_artist'>, mode: ArtistBrowseMode) =>
   mode === 'album' ? albumArtistForTrack(track) : track.artist;
-const albumKey = (album: string | null | undefined, albumArtist: string | null | undefined) =>
-  `${album ?? ''}${albumIdentitySeparator}${albumArtist ?? ''}`;
-const trackAlbumKey = (track: Pick<Track, 'album' | 'album_artist' | 'artist'>) =>
-  track.album ? albumKey(track.album, albumArtistForTrack(track)) : null;
+const albumKey = (
+  album: string | null | undefined,
+  albumArtist: string | null | undefined,
+  editionKey = '',
+) => `${album ?? ''}${albumIdentitySeparator}${albumArtist ?? ''}${albumIdentitySeparator}${editionKey}`;
+const pathParts = (value: string | null | undefined) => (value ?? '').split(/[\\/]+/).filter(Boolean);
+const parentPath = (value: string | null | undefined) => {
+  const parts = pathParts(value);
+  return parts.length > 1 ? parts.slice(0, -1).join('/') : '';
+};
+const isDiscFolderName = (value: string | null | undefined) =>
+  /^(?:cd|disc|disk|lp)\s*[-_. ]?\s*\d+$/i.test(value ?? '') || /^side\s*[-_. ]?\s*[a-z]$/i.test(value ?? '');
+const albumEditionFolder = (value: string | null | undefined) => {
+  const parent = parentPath(value);
+  if (!parent) return '';
+  const parts = pathParts(parent);
+  if (parts.length > 1 && isDiscFolderName(parts[parts.length - 1])) {
+    return parts.slice(0, -1).join('/');
+  }
+  return parent;
+};
+const trackAlbumEditionKey = (
+  track: Pick<Track, 'path' | 'relative_path' | 'source_tags' | 'is_vinyl_rip'>,
+) => {
+  const sourceKeys = splitSourceTagEntries(track.source_tags).map((entry) => entry.key);
+  if (sourceKeys.length > 0) return `source:${sourceKeys.join('+')}`;
+  if (track.is_vinyl_rip) return 'source:vinyl-rip';
+  const folder = albumEditionFolder(track.relative_path ?? track.path);
+  return folder ? `folder:${folder.toLocaleLowerCase()}` : '';
+};
+const trackAlbumKey = (
+  track: Pick<Track, 'album' | 'album_artist' | 'artist' | 'path' | 'relative_path' | 'source_tags' | 'is_vinyl_rip'>,
+) => (track.album ? albumKey(track.album, albumArtistForTrack(track), trackAlbumEditionKey(track)) : null);
 const albumTitleFromKey = (key: string) => key.split(albumIdentitySeparator)[0] ?? key;
+const albumEditionFromKey = (key: string) => key.split(albumIdentitySeparator)[2] ?? '';
 const offlineAvailabilityFromCounts = (downloadedCount: number, totalCount: number): OfflineAvailability => {
   if (downloadedCount <= 0 || totalCount <= 0) return 'none';
   return downloadedCount < totalCount ? 'partial' : 'full';
@@ -1713,6 +1743,8 @@ function App() {
   const backendOfflineRecoveryStartedAtRef = useRef<number | null>(null);
   const backendHeartbeatInFlightRef = useRef(false);
   const backendHeartbeatStartedAtRef = useRef<number | null>(null);
+  const backendLibraryRefreshInFlightRef = useRef(false);
+  const backendLibraryVersionRef = useRef<number | null>(null);
   const backendWakeHeartbeatAtRef = useRef(0);
   const offlineDownloadsSyncProgressRef = useRef<string | null>(null);
   const offlineCompletedTracksRef = useRef(0);
@@ -1721,6 +1753,11 @@ function App() {
 
   const applyBootstrapState = (nextState: AppBootstrapState) => {
     setData(nextState.bootstrap);
+    if (typeof nextState.bootstrap.library_change?.version === 'number') {
+      backendLibraryVersionRef.current = nextState.bootstrap.library_change.version;
+    } else if (nextState.bootstrap.settings.library_source !== 'needle_backend') {
+      backendLibraryVersionRef.current = null;
+    }
     setIsBackendOfflineMode(nextState.offline_mode);
     setBackendModeNotice(nextState.offline_mode ? nextState.startup_notice ?? null : null);
     setStartupError(null);
@@ -2375,6 +2412,14 @@ function App() {
         backendOfflineRecoveryRef.current = false;
         backendOfflineRecoveryStartedAtRef.current = null;
       }
+
+      if (
+        backendLibraryRefreshInFlightRef.current &&
+        backendHeartbeatStartedAtRef.current != null &&
+        now - backendHeartbeatStartedAtRef.current >= staleGuardAfterMs
+      ) {
+        backendLibraryRefreshInFlightRef.current = false;
+      }
     };
 
     const triggerOfflineRecovery = (message?: string) => {
@@ -2399,24 +2444,53 @@ function App() {
       backendHeartbeatInFlightRef.current = true;
       backendHeartbeatStartedAtRef.current = Date.now();
       try {
-        await getNeedleBackendStatus(data.settings.needle_backend_url);
-        if (cancelled || !options?.restoreIfOnline || !isBackendOfflineMode) {
-          return;
-        }
-
-        const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
-          bootstrapAppState(),
-          listOfflineDownloads(),
-        ]);
+        const backendStatus = await getNeedleBackendStatus(data.settings.needle_backend_url);
         if (cancelled) {
           return;
         }
-        applyBootstrapState(nextBootstrapState);
-        setOfflineDownloads(nextOfflineDownloads);
-        if (!nextBootstrapState.offline_mode) {
-          setStatus(
-            `Needle backend reconnected · ${nextBootstrapState.bootstrap.library.track_count} tracks`,
-          );
+
+        setNeedleBackendStatus(backendStatus);
+
+        const remoteLibraryVersion = backendStatus.library_change?.version;
+        const knownLibraryVersion = backendLibraryVersionRef.current;
+        const backendLibraryChanged =
+          backendStatus.enabled &&
+          !isBackendOfflineMode &&
+          typeof remoteLibraryVersion === 'number' &&
+          (knownLibraryVersion == null || remoteLibraryVersion > knownLibraryVersion);
+        const shouldRestoreOnline = Boolean(options?.restoreIfOnline && isBackendOfflineMode);
+
+        if (!backendLibraryChanged && !shouldRestoreOnline) {
+          return;
+        }
+
+        if (backendLibraryRefreshInFlightRef.current) {
+          return;
+        }
+
+        backendLibraryRefreshInFlightRef.current = true;
+        try {
+          const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
+            bootstrapAppState(),
+            listOfflineDownloads(),
+          ]);
+          if (cancelled) {
+            return;
+          }
+          applyBootstrapState(nextBootstrapState);
+          if (typeof remoteLibraryVersion === 'number') {
+            backendLibraryVersionRef.current = remoteLibraryVersion;
+          }
+          setOfflineDownloads(nextOfflineDownloads);
+          if (!nextBootstrapState.offline_mode) {
+            setStatus(
+              shouldRestoreOnline
+                ? `Needle backend reconnected · ${nextBootstrapState.bootstrap.library.track_count} tracks`
+                : `Needle library refreshed · ${nextBootstrapState.bootstrap.library.track_count} tracks`,
+            );
+          }
+        } finally {
+          backendLibraryRefreshInFlightRef.current = false;
         }
       } catch (error) {
         if (cancelled) {
@@ -4074,7 +4148,7 @@ function App() {
       const result = await refreshAlbumMetadataFromMusicBrainz(album, albumArtist);
       setData(result.bootstrap);
       if (result.status === 'matched') {
-        setSelectedAlbum(albumKey(result.release_title ?? album, result.release_artist ?? albumArtist));
+        setSelectedAlbum(albumKey(result.release_title ?? album, result.release_artist ?? albumArtist, albumEditionFromKey(albumKeyValue)));
       }
       if (result.status === 'matched') {
         setStatus(

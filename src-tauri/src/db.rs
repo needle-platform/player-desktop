@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use anyhow::Result;
 use anyhow::{anyhow, bail};
@@ -304,6 +304,7 @@ pub fn load_bootstrap(db_path: &Path) -> Result<BootstrapPayload> {
         library: load_library(db_path)?,
         playlists: load_playlists(db_path)?,
         playback_session: load_playback_session(db_path)?,
+        library_change: None,
     })
 }
 
@@ -896,6 +897,7 @@ pub fn load_album_tracks_for_match(
             Ok(Track {
                 id: row.get::<_, i64>(0)?.to_string(),
                 path: row.get(1)?,
+                relative_path: None,
                 title: row.get(2)?,
                 artist: row.get(3)?,
                 album: row.get(4)?,
@@ -2132,6 +2134,7 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
             Ok(Track {
                 id: row.get::<_, i64>(0)?.to_string(),
                 path: row.get(1)?,
+                relative_path: None,
                 title: row.get(2)?,
                 artist: row.get(3)?,
                 album: row.get(4)?,
@@ -2160,13 +2163,7 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let track_count = query_count(&connection, "SELECT COUNT(*) FROM tracks")?;
-    let album_count = query_count(
-        &connection,
-        "SELECT COUNT(DISTINCT COALESCE(tmo.album, t.album, '') || char(31) || COALESCE(tmo.album_artist, tmo.artist, t.album_artist, t.artist, ''))
-         FROM tracks t
-         LEFT JOIN track_metadata_overrides tmo ON tmo.track_path = t.path
-         WHERE COALESCE(tmo.album, t.album, '') != ''",
-    )?;
+    let album_count = album_edition_count(&tracks);
     let artist_count = query_count(
         &connection,
         "SELECT COUNT(DISTINCT COALESCE(tmo.artist, t.artist, ''))
@@ -2181,6 +2178,95 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
         album_count,
         artist_count,
     })
+}
+
+fn album_edition_count(tracks: &[Track]) -> usize {
+    tracks
+        .iter()
+        .filter_map(|track| {
+            let album = track.album.as_deref()?.trim();
+            if album.is_empty() {
+                return None;
+            }
+            let artist = track
+                .album_artist
+                .as_deref()
+                .or(track.artist.as_deref())
+                .unwrap_or("")
+                .trim();
+            Some(format!(
+                "{}\u{1f}{}\u{1f}{}",
+                album.to_lowercase(),
+                artist.to_lowercase(),
+                album_edition_key(track)
+            ))
+        })
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn album_edition_key(track: &Track) -> String {
+    if !track.source_tags.is_empty() {
+        return format!("source:{}", track.source_tags.join("+").to_lowercase());
+    }
+    if track.is_vinyl_rip {
+        return "source:vinyl-rip".to_string();
+    }
+    let folder = album_edition_folder(track.relative_path.as_deref().unwrap_or(&track.path));
+    if folder.is_empty() {
+        String::new()
+    } else {
+        format!("folder:{}", folder.to_lowercase())
+    }
+}
+
+fn album_edition_folder(value: &str) -> String {
+    let parent = parent_path(value);
+    if parent.is_empty() {
+        return String::new();
+    }
+    let mut parts = path_parts(&parent);
+    if parts.len() > 1 && parts.last().is_some_and(|part| is_disc_folder_name(part)) {
+        parts.pop();
+        return parts.join("/");
+    }
+    parent
+}
+
+fn parent_path(value: &str) -> String {
+    let parts = path_parts(value);
+    if parts.len() > 1 {
+        parts[..parts.len() - 1].join("/")
+    } else {
+        String::new()
+    }
+}
+
+fn path_parts(value: &str) -> Vec<&str> {
+    value
+        .split(|ch| ch == '/' || ch == '\\')
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn is_disc_folder_name(value: &str) -> bool {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', '_', '.'], " ");
+    let compact = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let number_suffix = compact
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if !number_suffix.is_empty() {
+        return compact.starts_with("cd ")
+            || compact.starts_with("disc ")
+            || compact.starts_with("disk ")
+            || compact.starts_with("lp ");
+    }
+    compact.starts_with("side ") && compact.len() == "side a".len()
 }
 
 fn query_count(connection: &Connection, sql: &str) -> Result<usize> {

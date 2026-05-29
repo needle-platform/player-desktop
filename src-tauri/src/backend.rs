@@ -14,9 +14,9 @@ use crate::{
     album, artist, cover, db,
     models::{
         AppSettings, BootstrapPayload, DesktopStateImportPayload, ImportedDesktopPlaybackSession,
-        LibraryData, MetadataEditMode, NeedleBackendImportSummary, NeedleBackendMigrationReport,
-        NeedleBackendStatus, OfflineDownloadEntry, PlaybackSession, RootPathMapping, SavedPlaylist,
-        Track, TrackMetadataOverride,
+        LibraryChangeState, LibraryData, MetadataEditMode, NeedleBackendImportSummary,
+        NeedleBackendMigrationReport, NeedleBackendStatus, OfflineDownloadEntry, PlaybackSession,
+        RootPathMapping, SavedPlaylist, Track, TrackMetadataOverride,
     },
 };
 
@@ -40,6 +40,7 @@ struct RawNeedleStatusResponse {
     album_count: Option<usize>,
     artist_count: Option<usize>,
     last_scan: Option<RawNeedleScan>,
+    library_change: Option<LibraryChangeState>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +79,7 @@ struct RawDesktopBootstrap {
     library: LibraryData,
     playlists: Vec<SavedPlaylist>,
     playback_session: PlaybackSession,
+    library_change: Option<LibraryChangeState>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,6 +374,7 @@ pub async fn fetch_backend_status(
         album_count: payload.album_count,
         artist_count: payload.artist_count,
         last_scan_status: payload.last_scan.and_then(|scan| scan.status),
+        library_change: payload.library_change,
         error: None,
     })
 }
@@ -399,6 +402,7 @@ pub async fn load_backend_bootstrap(settings: AppSettings) -> Result<BootstrapPa
         library: payload.library,
         playlists: payload.playlists,
         playback_session: payload.playback_session,
+        library_change: payload.library_change,
     })
 }
 
@@ -975,6 +979,7 @@ pub async fn load_backend_album_tracks(
             Track {
                 id: track.id.clone(),
                 path: format!("{TRACK_TOKEN_PREFIX}{}", track.id),
+                relative_path: None,
                 title: display_title,
                 artist: track.artist,
                 album: track.album,
