@@ -197,6 +197,14 @@ struct RawAlbumGenrePayload<'a> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RawAlbumSourceTagsPayload<'a> {
+    id: &'a str,
+    source_tags: &'a [String],
+    mode: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RawTrackBpmPayload<'a> {
     id: &'a str,
     bpm: Option<i64>,
@@ -1211,6 +1219,43 @@ pub async fn save_backend_album_genre(
         &RawAlbumGenrePayload {
             id: &target.id,
             genre,
+            mode: mode_name,
+        },
+    )
+    .await?;
+
+    load_backend_bootstrap(settings.clone()).await
+}
+
+pub async fn save_backend_album_source_tags(
+    settings: &AppSettings,
+    album_name: &str,
+    artist_name: Option<&str>,
+    source_tags: &[String],
+    mode: MetadataEditMode,
+) -> Result<BootstrapPayload> {
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    let albums = get_json::<Vec<RawSubsonicAlbum>>(&client, settings, &url, "/api/albums").await?;
+    let target = albums
+        .into_iter()
+        .find(|album| album_matches(album, album_name, artist_name))
+        .ok_or_else(|| anyhow!("Album not found in Needle backend"))?;
+
+    let mode_name = match mode {
+        MetadataEditMode::NeedleOnly => "needle_only",
+        MetadataEditMode::WriteToFiles => "write_to_files",
+    };
+
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/albums/source-tags",
+        &RawAlbumSourceTagsPayload {
+            id: &target.id,
+            source_tags,
             mode: mode_name,
         },
     )

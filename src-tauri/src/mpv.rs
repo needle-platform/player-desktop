@@ -166,7 +166,7 @@ impl MpvController {
         let mut stream = UnixStream::connect(&self.socket_path)
             .context("Unable to connect to mpv IPC socket")?;
         self.start_listener();
-        self.property::<Option<String>>(&mut stream, "path")
+        self.optional_property::<String>(&mut stream, "path")
     }
 
     pub fn play(&mut self, path: &str) -> Result<()> {
@@ -339,28 +339,38 @@ impl MpvController {
     pub fn playback_state(&mut self) -> Result<PlaybackState> {
         let mut stream = self.connect_or_spawn()?;
         let playlist_position = self
-            .property::<Option<i64>>(&mut stream, "playlist-pos")?
+            .optional_property::<i64>(&mut stream, "playlist-pos")?
             .and_then(|value| usize::try_from(value).ok());
+        let path = self.optional_property::<String>(&mut stream, "path")?;
+        let paused = self
+            .optional_property::<bool>(&mut stream, "pause")?
+            .unwrap_or(true);
+        let idle = self
+            .optional_property::<bool>(&mut stream, "idle-active")?
+            .unwrap_or(path.is_none());
 
         Ok(PlaybackState {
-            path: self.property::<Option<String>>(&mut stream, "path")?,
-            paused: self.property::<bool>(&mut stream, "pause")?,
-            idle: self.property::<bool>(&mut stream, "idle-active")?,
+            path,
+            paused,
+            idle,
             position_seconds: self
-                .property::<Option<f64>>(&mut stream, "time-pos")?
+                .optional_property::<f64>(&mut stream, "time-pos")?
                 .unwrap_or(0.0)
                 .max(0.0),
             duration_seconds: self
-                .property::<Option<f64>>(&mut stream, "duration")?
+                .optional_property::<f64>(&mut stream, "duration")?
                 .unwrap_or(0.0)
                 .max(0.0),
             playlist_position,
             volume: self
-                .property::<f64>(&mut stream, "volume")?
+                .optional_property::<f64>(&mut stream, "volume")?
+                .unwrap_or(DEFAULT_VOLUME_PERCENT as f64)
                 .clamp(0.0, 100.0),
-            muted: self.property::<bool>(&mut stream, "mute")?,
+            muted: self
+                .optional_property::<bool>(&mut stream, "mute")?
+                .unwrap_or(false),
             audio_device: self
-                .property::<Option<String>>(&mut stream, "audio-device")?
+                .optional_property::<String>(&mut stream, "audio-device")?
                 .unwrap_or_else(|| "auto".to_string()),
             audio_devices: self.audio_devices(&mut stream)?,
         })
@@ -656,6 +666,21 @@ impl MpvController {
         let data = self.request(stream, json!({ "command": ["get_property", name] }))?;
         serde_json::from_value(data)
             .with_context(|| format!("Unable to parse mpv property `{name}`"))
+    }
+
+    fn optional_property<T: DeserializeOwned>(
+        &self,
+        stream: &mut UnixStream,
+        name: &str,
+    ) -> Result<Option<T>> {
+        match self.request(stream, json!({ "command": ["get_property", name] })) {
+            Ok(serde_json::Value::Null) => Ok(None),
+            Ok(data) => serde_json::from_value(data)
+                .map(Some)
+                .with_context(|| format!("Unable to parse mpv property `{name}`")),
+            Err(error) if error.to_string().contains("property unavailable") => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn audio_devices(&self, stream: &mut UnixStream) -> Result<Vec<AudioDevice>> {

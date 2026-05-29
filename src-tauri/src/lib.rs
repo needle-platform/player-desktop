@@ -1490,6 +1490,64 @@ fn save_album_genre(
 }
 
 #[tauri::command]
+fn save_album_source_tags(
+    album: String,
+    album_artist: Option<String>,
+    track_paths: Vec<String>,
+    source_tags: Vec<String>,
+    mode: MetadataEditMode,
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapPayload, String> {
+    let settings = load_settings_for_current_mode(&state.db_path)?;
+    if matches!(settings.library_source, LibrarySource::NeedleBackend) {
+        let bootstrap = tauri::async_runtime::block_on(backend::save_backend_album_source_tags(
+            &settings,
+            &album,
+            album_artist.as_deref(),
+            &source_tags,
+            mode,
+        ))
+        .map_err(|error| error.to_string())?;
+        return finalize_loaded_backend_bootstrap(&state.db_path, bootstrap);
+    }
+    if track_paths.is_empty() {
+        return Err("No tracks were provided for this album edit".to_string());
+    }
+
+    let normalized_tags: Vec<String> = source_tags
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+
+    match mode {
+        MetadataEditMode::NeedleOnly => {
+            db::set_album_source_tags_override(
+                &state.db_path,
+                &track_paths,
+                Some(&normalized_tags),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        MetadataEditMode::WriteToFiles => {
+            let mut updated_tracks = Vec::with_capacity(track_paths.len());
+            for path in &track_paths {
+                updated_tracks.push(
+                    library::write_track_source_tags(Path::new(path), &normalized_tags)
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            db::sync_tracks_from_files(&state.db_path, &updated_tracks)
+                .map_err(|error| error.to_string())?;
+            db::set_album_source_tags_override(&state.db_path, &track_paths, None)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    db::load_bootstrap(&state.db_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn set_track_rating(
     path: String,
     rating: Option<i64>,
@@ -2719,6 +2777,7 @@ pub fn run() {
             move_playlist_track,
             set_album_primary_genre,
             save_album_genre,
+            save_album_source_tags,
             set_track_rating,
             set_track_favorite,
             save_track_bpm,

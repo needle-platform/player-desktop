@@ -374,6 +374,7 @@ pub struct ImportedTrackMetadataOverride {
     pub track_number: Option<i64>,
     pub bpm: Option<i64>,
     pub genre: Option<String>,
+    pub source_tags: Option<Vec<String>>,
     pub year: Option<i64>,
     pub recording_mbid: Option<String>,
     pub release_track_mbid: Option<String>,

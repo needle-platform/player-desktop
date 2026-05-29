@@ -40,6 +40,7 @@ import {
   listOfflineDownloads,
   setAudioDevice as setPlaybackAudioDevice,
   saveAlbumGenre as persistAlbumGenre,
+  saveAlbumSourceTags as persistAlbumSourceTags,
   saveTrackBpm as persistTrackBpmValue,
   setTrackFavorite as persistTrackFavorite,
   setTrackRating as persistTrackRating,
@@ -94,6 +95,14 @@ import {
   splitTrackGenreKeys,
   splitTrackGenres,
 } from './lib/genres';
+import {
+  normalizeSourceTagKey,
+  sourceTagDisplayLabelFromKey,
+  sourceTagLabelFromKey,
+  sourceTagPresets,
+  splitSourceTagEntries,
+  splitSourceTags,
+} from './lib/sourceTags';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
 import { formatBpm, VIBE_BUCKETS, vibeKeyForTrack, vibeLabelForTrack } from './lib/vibes';
 import dashboardIdleBackdrop from './assets/bg.jpg';
@@ -147,6 +156,13 @@ type AlbumGenreEditorState = {
   trackPaths: string[];
   currentGenre: string | null;
   suggestedGenres: string[];
+};
+type AlbumSourceTagsEditorState = {
+  album: string;
+  albumArtist: string | null;
+  trackPaths: string[];
+  currentTags: string[];
+  suggestedTags: string[];
 };
 type TrackBpmEditorState = {
   track: Track;
@@ -630,18 +646,21 @@ const formatAlbumSampleRateBadge = (sampleRate: number) => {
   return `${Number.isInteger(khz) ? khz.toFixed(0) : khz.toFixed(1)} kHz`;
 };
 
-const buildAlbumBadges = (tracks: Track[]) => {
+const buildAlbumBadges = (tracks: Track[], options?: { includeSourceTags?: boolean }) => {
   const badges: string[] = [];
   const formats = new Map<string, number>();
   let maxRate = 0;
   let maxBits = 0;
+  const includeSourceTags = options?.includeSourceTags ?? true;
 
   for (const track of tracks) {
-    for (const tag of track.source_tags ?? []) {
-      addAlbumBadge(badges, tag);
-    }
-    if (track.is_vinyl_rip) {
-      addAlbumBadge(badges, 'vinyl');
+    if (includeSourceTags) {
+      for (const tag of splitSourceTagEntries(track.source_tags)) {
+        addAlbumBadge(badges, sourceTagDisplayLabelFromKey(tag.key));
+      }
+      if (track.is_vinyl_rip) {
+        addAlbumBadge(badges, 'vinyl');
+      }
     }
     if (track.format) {
       const format = track.format.toUpperCase();
@@ -1558,6 +1577,7 @@ function App() {
   const [playlistComposer, setPlaylistComposer] = useState<PlaylistComposerState | null>(null);
   const [playlistTarget, setPlaylistTarget] = useState<PlaylistTargetState | null>(null);
   const [albumGenreEditor, setAlbumGenreEditor] = useState<AlbumGenreEditorState | null>(null);
+  const [albumSourceTagsEditor, setAlbumSourceTagsEditor] = useState<AlbumSourceTagsEditorState | null>(null);
   const [trackBpmEditor, setTrackBpmEditor] = useState<TrackBpmEditorState | null>(null);
   const [queuePaths, setQueuePaths] = useState<string[]>([]);
   const [baseQueuePaths, setBaseQueuePaths] = useState<string[]>([]);
@@ -3321,6 +3341,14 @@ function App() {
     () => uniqueSorted(allTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
     [allTracks],
   );
+  const librarySourceTagOptions = useMemo(
+    () =>
+      uniqueSorted([
+        ...sourceTagPresets,
+        ...allTracks.flatMap((track) => splitSourceTags(track.source_tags)),
+      ]),
+    [allTracks],
+  );
   const trackGenreOptions = useMemo(
     () => uniqueSorted(scopedTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
     [scopedTracks],
@@ -4388,6 +4416,29 @@ function App() {
         genre
           ? `${metadataEditMode === 'write_to_files' ? 'Updated file genres' : 'Saved Needle genres'} · ${album}`
           : `${metadataEditMode === 'write_to_files' ? 'Cleared file genres' : 'Cleared Needle genres'} · ${album}`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveAlbumSourceTags = async (
+    album: string,
+    albumArtist: string | null,
+    trackPaths: string[],
+    sourceTags: string[],
+  ) => {
+    try {
+      setBusy('Saving source tags…');
+      const next = await persistAlbumSourceTags(album, albumArtist, trackPaths, sourceTags, metadataEditMode);
+      setData(next);
+      setAlbumSourceTagsEditor(null);
+      setStatus(
+        sourceTags.length > 0
+          ? `${metadataEditMode === 'write_to_files' ? 'Updated file source tags' : 'Saved Needle source tags'} · ${album}`
+          : `${metadataEditMode === 'write_to_files' ? 'Cleared file source tags' : 'Cleared Needle source tags'} · ${album}`,
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -5722,6 +5773,15 @@ function App() {
                 suggestedGenres,
               })
             }
+            onEditSourceTags={(currentTags, suggestedTags, trackPaths) =>
+              setAlbumSourceTagsEditor({
+                album: selectedAlbumSummary.album,
+                albumArtist: selectedAlbumSummary.artist,
+                trackPaths,
+                currentTags,
+                suggestedTags,
+              })
+            }
             onRefreshMetadata={() =>
               void refreshAlbumMetadata(
                 selectedAlbumSummary.album,
@@ -5939,6 +5999,24 @@ function App() {
               albumGenreEditor.albumArtist,
               albumGenreEditor.trackPaths,
               genre,
+            )
+          }
+        />
+      )}
+
+      {albumSourceTagsEditor && (
+        <AlbumSourceTagsEditorModal
+          state={albumSourceTagsEditor}
+          availableSourceTags={librarySourceTagOptions}
+          metadataEditMode={metadataEditMode}
+          busy={busy === 'Saving source tags…'}
+          onClose={() => setAlbumSourceTagsEditor(null)}
+          onSubmit={(sourceTags) =>
+            void saveAlbumSourceTags(
+              albumSourceTagsEditor.album,
+              albumSourceTagsEditor.albumArtist,
+              albumSourceTagsEditor.trackPaths,
+              sourceTags,
             )
           }
         />
@@ -6772,6 +6850,233 @@ function AlbumGenreEditorModal({
             disabled={!genreString || busy}
           >
             {busy ? 'Saving…' : metadataEditMode === 'write_to_files' ? 'Write genres' : 'Save in Needle'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface AlbumSourceTagsEditorModalProps {
+  state: AlbumSourceTagsEditorState;
+  availableSourceTags: string[];
+  metadataEditMode: MetadataEditMode;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (sourceTags: string[]) => void;
+}
+
+function AlbumSourceTagsEditorModal({
+  state,
+  availableSourceTags,
+  metadataEditMode,
+  busy,
+  onClose,
+  onSubmit,
+}: AlbumSourceTagsEditorModalProps) {
+  const initialTags = useMemo(
+    () => splitSourceTags(state.currentTags.length > 0 ? state.currentTags : state.suggestedTags),
+    [state.currentTags, state.suggestedTags],
+  );
+  const [selectedTags, setSelectedTags] = useState<string[]>(initialTags);
+  const [query, setQuery] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    setSelectedTags(splitSourceTags(state.currentTags.length > 0 ? state.currentTags : state.suggestedTags));
+    setQuery('');
+  }, [state.currentTags, state.suggestedTags]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) {
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [busy, onClose]);
+
+  const selectedTagKeys = new Set(selectedTags.map((tag) => normalizeSourceTagKey(tag)).filter(Boolean));
+  const suggestedTags = useMemo(
+    () => uniqueSorted([...sourceTagPresets, ...state.currentTags, ...state.suggestedTags].flatMap((value) => splitSourceTags(value))),
+    [state.currentTags, state.suggestedTags],
+  );
+  const normalizedQuery = normalizeSourceTagKey(query);
+  const pendingTags = useMemo(
+    () =>
+      uniqueSorted(splitSourceTags(query)).filter(
+        (tag) => !selectedTagKeys.has(normalizeSourceTagKey(tag) ?? ''),
+      ),
+    [query, selectedTagKeys],
+  );
+  const filteredTags = useMemo(() => {
+    const source = uniqueSorted([...suggestedTags, ...availableSourceTags]);
+    const loweredQuery = query.trim().toLocaleLowerCase();
+    return source.filter((tag) => {
+      const key = normalizeSourceTagKey(tag);
+      if (!key || selectedTagKeys.has(key)) return false;
+      if (!loweredQuery) return true;
+      return (
+        tag.toLocaleLowerCase().includes(loweredQuery) ||
+        key.includes(loweredQuery) ||
+        (normalizedQuery ? key.includes(normalizedQuery) : false)
+      );
+    });
+  }, [availableSourceTags, normalizedQuery, query, selectedTagKeys, suggestedTags]);
+  const modeCopy =
+    metadataEditMode === 'write_to_files'
+      ? 'This will update the embedded Vorbis TAGS field on every track on this album.'
+      : 'This will stay inside Needle and leave the audio files untouched.';
+  const addTags = (tags: string[]) => {
+    if (tags.length === 0) return;
+    setSelectedTags((current) => {
+      const next = current.slice();
+      const seen = new Set(current.map((tag) => normalizeSourceTagKey(tag)).filter(Boolean));
+      for (const tag of tags) {
+        const key = normalizeSourceTagKey(tag);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        next.push(sourceTagLabelFromKey(key));
+      }
+      return next;
+    });
+    setQuery('');
+    inputRef.current?.focus();
+  };
+  const addTag = (tag: string) => addTags([tag]);
+  const addTagsFromText = (value: string) => {
+    const parsed = splitSourceTags(value);
+    if (parsed.length > 0) {
+      addTags(parsed);
+      return;
+    }
+    if (normalizedQuery) {
+      addTags([sourceTagLabelFromKey(normalizedQuery)]);
+    }
+  };
+  const removeTag = (tag: string) => {
+    const key = normalizeSourceTagKey(tag);
+    setSelectedTags((current) => current.filter((entry) => normalizeSourceTagKey(entry) !== key));
+    inputRef.current?.focus();
+  };
+
+  return (
+    <div className="modal-scrim" onClick={() => !busy && onClose()}>
+      <div
+        className="modal-card genre-editor"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="album-source-tags-editor-title"
+      >
+        <div className="modal-head">
+          <div>
+            <div className="view-eyebrow">Metadata</div>
+            <h2 className="modal-title" id="album-source-tags-editor-title">
+              Album source tags
+            </h2>
+            <p className="modal-copy">
+              Edit the Vorbis TAGS field for this album. {modeCopy} Change the save mode in Settings.
+            </p>
+          </div>
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+        </div>
+
+        <div className="field">
+          <div className="field-label">Source presets</div>
+          <div className="genre-choice-grid">
+            {sourceTagPresets.map((tag) => (
+              <button
+                key={tag}
+                className={`genre-choice ${
+                  selectedTagKeys.has(normalizeSourceTagKey(tag) ?? '') ? 'is-selected' : ''
+                }`}
+                onClick={() => addTag(tag)}
+              >
+                {tag}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="field">
+          <span className="field-label">Source tags for every track on this album</span>
+          <div className="genre-multiselect" onClick={() => inputRef.current?.focus()}>
+            <div className="genre-multiselect-values">
+              {selectedTags.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  className="genre-token"
+                  onClick={() => removeTag(tag)}
+                  disabled={busy}
+                  aria-label={`Remove ${tag}`}
+                  title={`Remove ${tag}`}
+                >
+                  <span>{tag}</span>
+                  <span className="genre-token-remove" aria-hidden="true">
+                    ×
+                  </span>
+                </button>
+              ))}
+              <input
+                ref={inputRef}
+                className="genre-multiselect-input"
+                value={query}
+                onChange={(event) => setQuery(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    if (query.trim()) addTagsFromText(query);
+                  } else if (event.key === 'Backspace' && !query && selectedTags.length > 0) {
+                    event.preventDefault();
+                    setSelectedTags((current) => current.slice(0, -1));
+                  }
+                }}
+                placeholder={selectedTags.length > 0 ? 'Add another source…' : 'Search or add source tags…'}
+                autoFocus
+                disabled={busy}
+              />
+            </div>
+          </div>
+          <div className="genre-picker-panel" role="listbox" aria-label="Available source tags">
+            {pendingTags.length > 0 &&
+              !pendingTags.every((tag) => filteredTags.some((option) => normalizeSourceTagKey(option) === normalizeSourceTagKey(tag))) && (
+              <button type="button" className="genre-picker-option is-create" onClick={() => addTags(pendingTags)}>
+                Add <strong>{pendingTags.length === 1 ? pendingTags[0] : `${pendingTags.length} source tags`}</strong>
+              </button>
+              )}
+            {filteredTags.slice(0, 24).map((tag) => (
+              <button
+                key={tag}
+                type="button"
+                className="genre-picker-option"
+                onClick={() => addTag(tag)}
+              >
+                {tag}
+              </button>
+            ))}
+            {pendingTags.length === 0 && filteredTags.length === 0 && (
+              <div className="genre-picker-empty">No matching source tags yet. Type a new one and press Enter.</div>
+            )}
+          </div>
+          <div className="field-help">Needle will save this as: {selectedTags.join('; ') || 'No source tags selected'}</div>
+        </div>
+
+        <div className="modal-actions">
+          <button className="ghost-button" onClick={() => onSubmit([])} disabled={selectedTags.length === 0 || busy}>
+            {metadataEditMode === 'write_to_files' ? 'Clear file source tags' : 'Clear Needle source tags'}
+          </button>
+          <button
+            className="primary-button"
+            onClick={() => onSubmit(selectedTags)}
+            disabled={busy}
+          >
+            {busy ? 'Saving…' : metadataEditMode === 'write_to_files' ? 'Write source tags' : 'Save in Needle'}
           </button>
         </div>
       </div>
@@ -7970,6 +8275,7 @@ interface AlbumDetailViewProps {
   onOpenBpmEditor: (track: Track) => void;
   pendingBpmPaths: string[];
   onEditGenre: (currentGenre: string | null, suggestedGenres: string[], trackPaths: string[]) => void;
+  onEditSourceTags: (currentTags: string[], suggestedTags: string[], trackPaths: string[]) => void;
   onRefreshMetadata: () => void;
   onPlayAlbum: () => void;
   onShuffleAlbum: () => void;
@@ -8014,6 +8320,7 @@ function AlbumDetailView({
   onOpenBpmEditor,
   pendingBpmPaths,
   onEditGenre,
+  onEditSourceTags,
   onRefreshMetadata,
   onPlayAlbum,
   onShuffleAlbum,
@@ -8089,7 +8396,19 @@ function AlbumDetailView({
   const currentGenreValue =
     suggestedGenreValues.length === 1 ? suggestedGenreValues[0] : (suggestedGenreValues[0] ?? null);
 
-  const albumBadges = useMemo(() => buildAlbumBadges(albumTracks), [albumTracks]);
+  const albumBadges = useMemo(() => buildAlbumBadges(albumTracks, { includeSourceTags: false }), [albumTracks]);
+  const sourceTags = useMemo(
+    () => uniqueSorted(albumTracks.flatMap((track) => splitSourceTags(track.source_tags))),
+    [albumTracks],
+  );
+  const sourceTagDisplayLabels = useMemo(
+    () =>
+      sourceTags.map((tag) => ({
+        value: tag,
+        label: sourceTagDisplayLabelFromKey(normalizeSourceTagKey(tag) ?? tag),
+      })),
+    [sourceTags],
+  );
 
   const samplePath = albumTracks[0]?.path ?? null;
   const albumOfflineAvailability = areAllTracksOffline ? 'full' : hasAnyOfflineTracks ? 'partial' : 'none';
@@ -8201,28 +8520,60 @@ function AlbumDetailView({
               .join(' · ')}
           </div>
           <AlbumBadges badges={albumBadges} variant="hero" />
-          <div className="album-primary-genre">
-            <span className="album-primary-genre-label">Genres</span>
-            <span className={`album-primary-genre-pill ${genres.length > 0 ? 'is-set' : ''}`}>
-              {genres.length === 0 ? 'Not set' : `${genres.length} tag${genres.length === 1 ? '' : 's'}`}
-            </span>
-            <button
-              className="album-primary-genre-edit"
-              onClick={() => onEditGenre(currentGenreValue, suggestedGenreValues, albumTracks.map((track) => track.path))}
-              title={currentGenreValue ? `Edit genres · ${currentGenreValue}` : 'Edit genres'}
-              aria-label={currentGenreValue ? `Edit genres · ${currentGenreValue}` : 'Edit genres'}
-            >
-              <PencilIcon />
-            </button>
-          </div>
-          {genres.length > 0 && (
+          {sourceTags.length > 0 || genres.length > 0 ? (
             <div className="album-hero-genres">
+              {sourceTagDisplayLabels.map((tag) => (
+                <button
+                  key={tag.value}
+                  type="button"
+                  className="album-genre-pill album-genre-pill-button"
+                  onClick={() => onEditSourceTags(sourceTags, sourceTags, albumTracks.map((track) => track.path))}
+                  title={`Edit source tags · ${sourceTags.join(', ')}`}
+                  aria-label={`Edit source tags · ${sourceTags.join(', ')}`}
+                >
+                  {tag.label}
+                </button>
+              ))}
               {genres.map((g) => (
-                <span key={g} className="album-genre-pill">
+                <button
+                  key={g}
+                  type="button"
+                  className="album-genre-pill album-genre-pill-button"
+                  onClick={() => onEditGenre(currentGenreValue, suggestedGenreValues, albumTracks.map((track) => track.path))}
+                  title={`Edit genres · ${currentGenreValue ?? g}`}
+                  aria-label={`Edit genres · ${currentGenreValue ?? g}`}
+                >
                   {g}
-                </span>
+                </button>
               ))}
             </div>
+          ) : (
+            <>
+              <div className="album-primary-genre">
+                <span className="album-primary-genre-label">Source tags</span>
+                <span className="album-primary-genre-pill">Not set</span>
+                <button
+                  className="album-primary-genre-edit"
+                  onClick={() => onEditSourceTags(sourceTags, sourceTags, albumTracks.map((track) => track.path))}
+                  title="Edit source tags"
+                  aria-label="Edit source tags"
+                >
+                  <PencilIcon />
+                </button>
+              </div>
+              <div className="album-primary-genre">
+                <span className="album-primary-genre-label">Genres</span>
+                <span className="album-primary-genre-pill">Not set</span>
+                <button
+                  className="album-primary-genre-edit"
+                  onClick={() => onEditGenre(currentGenreValue, suggestedGenreValues, albumTracks.map((track) => track.path))}
+                  title="Edit genres"
+                  aria-label="Edit genres"
+                >
+                  <PencilIcon />
+                </button>
+              </div>
+            </>
           )}
           <div className="album-hero-actions">
             <button className="primary-button" onClick={onPlayAlbum}>

@@ -176,6 +176,23 @@ pub fn write_track_bpm(path: &Path, bpm: Option<i64>) -> Result<Track> {
     Ok(read_track(path))
 }
 
+pub fn write_track_source_tags(path: &Path, source_tags: &[String]) -> Result<Track> {
+    let mut tagged_file = Probe::open(path)?.read()?;
+    let normalized = normalize_source_tags(source_tags.iter().map(String::as_str));
+    let tag = editable_tag(&mut tagged_file);
+
+    for key in source_tag_item_keys() {
+        tag.take(&key).for_each(drop);
+    }
+
+    if !normalized.is_empty() {
+        let _ = tag.insert_text(ItemKey::Unknown("TAGS".to_string()), normalized.join("; "));
+    }
+
+    tagged_file.save_to_path(path, WriteOptions::default())?;
+    Ok(read_track(path))
+}
+
 fn editable_tag(tagged_file: &mut lofty::file::TaggedFile) -> &mut Tag {
     if tagged_file.primary_tag().is_none() && tagged_file.first_tag().is_none() {
         tagged_file.insert_tag(Tag::new(tagged_file.primary_tag_type()));
@@ -320,34 +337,16 @@ fn tag_marks_vinyl_rip(tag: &lofty::tag::Tag) -> bool {
 }
 
 fn read_source_tags(tag: &Tag) -> Vec<String> {
-    let mut tags: Vec<String> = Vec::new();
+    let mut raw_tags: Vec<String> = Vec::new();
     for item in tag.items() {
-        let matches_key = match item.key() {
-            ItemKey::PodcastKeywords => true,
-            ItemKey::Unknown(key) => {
-                let normalized = key.trim().to_ascii_lowercase();
-                matches!(
-                    normalized.as_str(),
-                    "tags" | "tag" | "keywords" | "source" | "media_source" | "release_source"
-                )
-            }
-            _ => false,
-        };
-        if !matches_key {
+        if !source_tag_item_key_matches(item.key()) {
             continue;
         }
         if let Some(value) = item.value().text() {
-            for part in split_source_tag_value(value) {
-                if !tags
-                    .iter()
-                    .any(|existing| existing.eq_ignore_ascii_case(&part))
-                {
-                    tags.push(part);
-                }
-            }
+            raw_tags.extend(split_source_tag_value(value));
         }
     }
-    tags
+    normalize_source_tags(raw_tags.iter().map(String::as_str))
 }
 
 fn split_source_tag_value(value: &str) -> impl Iterator<Item = String> + '_ {
@@ -355,8 +354,25 @@ fn split_source_tag_value(value: &str) -> impl Iterator<Item = String> + '_ {
         .split(|ch| matches!(ch, ',' | ';' | '/' | '|' | '\n'))
         .map(str::trim)
         .filter(|part| !part.is_empty())
-        .map(normalize_source_tag_label)
+        .map(ToOwned::to_owned)
         .filter(|part| !part.is_empty())
+}
+
+fn normalize_source_tags<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut tags = Vec::new();
+    for value in values {
+        let normalized = normalize_source_tag_label(value);
+        if normalized.is_empty() {
+            continue;
+        }
+        if !tags
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&normalized))
+        {
+            tags.push(normalized);
+        }
+    }
+    tags
 }
 
 fn normalize_source_tag_label(value: &str) -> String {
@@ -368,14 +384,50 @@ fn normalize_source_tag_label(value: &str) -> String {
         .join(" ");
     let lower = normalized.to_ascii_lowercase();
     match lower.as_str() {
-        "vinyl" | "vinyl rip" | "needledrop" | "needle drop" => "vinyl".to_string(),
-        "cd" | "cd rip" => "CD".to_string(),
+        "vinyl" | "vinyl rip" | "needledrop" | "needle drop" => "vinyl-rip".to_string(),
+        "cd" | "cd rip" => "cd-rip".to_string(),
         "flac" | "alac" | "wav" | "aiff" | "aif" | "aac" | "mp3" | "ogg" | "opus" => {
             lower.to_ascii_uppercase()
         }
-        "digital purchase" | "download" | "digital download" => "digital".to_string(),
-        _ => normalized,
+        "digital purchase" | "download" | "digital download" => "digital-purchase".to_string(),
+        _ => lower.replace(' ', "-"),
     }
+}
+
+fn source_tag_item_key_matches(key: &ItemKey) -> bool {
+    match key {
+        ItemKey::PodcastKeywords => true,
+        ItemKey::Unknown(key) => {
+            let normalized = key.trim().to_ascii_lowercase();
+            matches!(
+                normalized.as_str(),
+                "tags" | "tag" | "keywords" | "source" | "media_source" | "release_source"
+            )
+        }
+        _ => false,
+    }
+}
+
+fn source_tag_item_keys() -> Vec<ItemKey> {
+    vec![
+        ItemKey::PodcastKeywords,
+        ItemKey::Unknown("TAGS".to_string()),
+        ItemKey::Unknown("Tags".to_string()),
+        ItemKey::Unknown("tags".to_string()),
+        ItemKey::Unknown("TAG".to_string()),
+        ItemKey::Unknown("Tag".to_string()),
+        ItemKey::Unknown("tag".to_string()),
+        ItemKey::Unknown("KEYWORDS".to_string()),
+        ItemKey::Unknown("Keywords".to_string()),
+        ItemKey::Unknown("keywords".to_string()),
+        ItemKey::Unknown("SOURCE".to_string()),
+        ItemKey::Unknown("Source".to_string()),
+        ItemKey::Unknown("source".to_string()),
+        ItemKey::Unknown("MEDIA_SOURCE".to_string()),
+        ItemKey::Unknown("media_source".to_string()),
+        ItemKey::Unknown("RELEASE_SOURCE".to_string()),
+        ItemKey::Unknown("release_source".to_string()),
+    ]
 }
 
 fn source_tag_marks_vinyl(value: &str) -> bool {

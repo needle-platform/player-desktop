@@ -4830,12 +4830,39 @@ input, select {
   margin-top: 4px;
 }
 .album-genre-pill {
+  appearance: none;
+  min-height: 28px;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
   font-size: 11px;
-  padding: 3px 9px;
-  border: 1px solid var(--border);
+  font-family: inherit;
+  font-weight: 700;
+  line-height: 1;
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
   border-radius: 999px;
-  color: var(--muted);
-  background: var(--panel);
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.album-genre-pill-button {
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.album-genre-pill-button:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: var(--row-hover);
+}
+
+.album-genre-pill-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  outline-offset: 2px;
 }
 
 .album-hero-actions {

@@ -9,6 +9,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 ### Added
 - Added backend runtime details in Settings so the current Needle app version and loudness-analysis version are visible in-app.
 - Added backend-mode custom artist photo uploads from the artist page, including a quick “use automatic photo again” reset path.
+- Added album-wide Vorbis `TAGS` editing for source labels, with `vinyl-rip`, `cd-rip`, and `digital-purchase` presets plus custom source tags.
 
 ### Changed
 - Loudness analysis now runs from desktop backend mode too, using cached offline files when available and authenticated backend streams for the rest.

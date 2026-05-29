@@ -164,6 +164,7 @@ pub fn init_database(db_path: &Path) -> Result<()> {
             track_number INTEGER,
             bpm INTEGER,
             genre TEXT,
+            source_tags TEXT,
             year INTEGER,
             recording_mbid TEXT,
             release_track_mbid TEXT,
@@ -275,6 +276,10 @@ pub fn init_database(db_path: &Path) -> Result<()> {
     );
     let _ = connection.execute(
         "ALTER TABLE track_metadata_overrides ADD COLUMN genre TEXT",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE track_metadata_overrides ADD COLUMN source_tags TEXT",
         [],
     );
     let _ = connection.execute(
@@ -859,8 +864,9 @@ pub fn load_album_tracks_for_match(
                tmo.bpm IS NOT NULL AS bpm_overridden,
                COALESCE(tmo.genre, t.genre) AS genre,
                apg.primary_genre,
-               t.source_tags,
+               COALESCE(tmo.source_tags, t.source_tags) AS source_tags,
                t.is_vinyl_rip,
+               tmo.source_tags IS NOT NULL AS source_tags_overridden,
                COALESCE(tmo.year, t.year) AS year,
                t.added_at,
                t.play_count,
@@ -884,6 +890,9 @@ pub fn load_album_tracks_for_match(
 
     let tracks = statement
         .query_map(params![normalized_album, normalized_album_artist], |row| {
+            let source_tags = track_source_tags_from_db(row.get(16)?);
+            let raw_is_vinyl = row.get::<_, i64>(17)? != 0;
+            let source_tags_overridden = row.get::<_, i64>(18)? != 0;
             Ok(Track {
                 id: row.get::<_, i64>(0)?.to_string(),
                 path: row.get(1)?,
@@ -901,14 +910,15 @@ pub fn load_album_tracks_for_match(
                 bpm_overridden: row.get::<_, i64>(13)? != 0,
                 genre: row.get(14)?,
                 primary_genre: row.get(15)?,
-                source_tags: track_source_tags_from_db(row.get(16)?),
-                is_vinyl_rip: row.get::<_, i64>(17)? != 0,
-                year: row.get(18)?,
-                added_at: row.get(19)?,
-                play_count: row.get::<_, i64>(20)?,
-                last_played_at: row.get(21)?,
-                is_favorite: row.get::<_, i64>(22)? != 0,
-                rating: row.get(23)?,
+                is_vinyl_rip: source_tags_mark_vinyl(&source_tags)
+                    || (!source_tags_overridden && raw_is_vinyl),
+                source_tags,
+                year: row.get(19)?,
+                added_at: row.get(20)?,
+                play_count: row.get::<_, i64>(21)?,
+                last_played_at: row.get(22)?,
+                is_favorite: row.get::<_, i64>(23)? != 0,
+                rating: row.get(24)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -924,6 +934,15 @@ fn track_source_tags_from_db(value: Option<String>) -> Vec<String> {
     value
         .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
         .unwrap_or_default()
+}
+
+fn source_tags_mark_vinyl(tags: &[String]) -> bool {
+    tags.iter().any(|tag| {
+        matches!(
+            tag.trim().to_ascii_lowercase().as_str(),
+            "vinyl" | "vinyl rip" | "vinyl-rip" | "needledrop" | "needle drop" | "needle-drop"
+        )
+    })
 }
 
 pub fn replace_track_metadata_overrides(
@@ -948,6 +967,7 @@ pub fn replace_track_metadata_overrides(
             track_number,
             bpm,
             genre,
+            source_tags,
             year,
             recording_mbid,
             release_track_mbid,
@@ -955,7 +975,7 @@ pub fn replace_track_metadata_overrides(
             release_group_mbid,
             confidence,
             updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, CURRENT_TIMESTAMP)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, CURRENT_TIMESTAMP)
         ON CONFLICT(track_path) DO UPDATE SET
             title = excluded.title,
             artist = excluded.artist,
@@ -965,6 +985,7 @@ pub fn replace_track_metadata_overrides(
             track_number = excluded.track_number,
             bpm = COALESCE(excluded.bpm, track_metadata_overrides.bpm),
             genre = COALESCE(excluded.genre, track_metadata_overrides.genre),
+            source_tags = COALESCE(excluded.source_tags, track_metadata_overrides.source_tags),
             year = excluded.year,
             recording_mbid = excluded.recording_mbid,
             release_track_mbid = excluded.release_track_mbid,
@@ -986,6 +1007,7 @@ pub fn replace_track_metadata_overrides(
             item.track_number,
             item.bpm,
             item.genre,
+            None::<String>,
             item.year,
             item.recording_mbid,
             item.release_track_mbid,
@@ -1106,6 +1128,44 @@ pub fn set_album_genre_override(
         "DELETE FROM album_primary_genres WHERE album = ?1 AND album_artist = ?2",
         params![album.trim(), album_artist.unwrap_or("").trim()],
     )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+pub fn set_album_source_tags_override(
+    db_path: &Path,
+    track_paths: &[String],
+    source_tags: Option<&[String]>,
+) -> Result<()> {
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+
+    if let Some(tags) = source_tags {
+        let source_tags_json = track_source_tags_to_db(tags)?;
+        for path in track_paths {
+            transaction.execute(
+                "
+                INSERT INTO track_metadata_overrides (track_path, source_tags, source, updated_at)
+                VALUES (?1, ?2, 'user', CURRENT_TIMESTAMP)
+                ON CONFLICT(track_path) DO UPDATE SET
+                    source_tags = excluded.source_tags,
+                    source = 'user',
+                    updated_at = excluded.updated_at
+                ",
+                params![path, source_tags_json],
+            )?;
+        }
+    } else {
+        for path in track_paths {
+            transaction.execute(
+                "UPDATE track_metadata_overrides
+                 SET source_tags = NULL, updated_at = CURRENT_TIMESTAMP
+                 WHERE track_path = ?1",
+                params![path],
+            )?;
+        }
+    }
+
     transaction.commit()?;
     Ok(())
 }
@@ -1682,7 +1742,7 @@ pub fn list_track_metadata_overrides_for_backend(
     let mut stmt = connection.prepare(
         "
         SELECT track_path, title, artist, album, album_artist, disc_number, track_number,
-               bpm, genre, year, recording_mbid, release_track_mbid, release_mbid,
+               bpm, genre, source_tags, year, recording_mbid, release_track_mbid, release_mbid,
                release_group_mbid, confidence, source, updated_at
         FROM track_metadata_overrides
         ORDER BY track_path
@@ -1700,14 +1760,17 @@ pub fn list_track_metadata_overrides_for_backend(
             track_number: row.get(6)?,
             bpm: row.get(7)?,
             genre: row.get(8)?,
-            year: row.get(9)?,
-            recording_mbid: row.get(10)?,
-            release_track_mbid: row.get(11)?,
-            release_mbid: row.get(12)?,
-            release_group_mbid: row.get(13)?,
-            confidence: row.get(14)?,
-            source: row.get(15)?,
-            updated_at: row.get(16)?,
+            source_tags: row
+                .get::<_, Option<String>>(9)?
+                .map(|json| track_source_tags_from_db(Some(json))),
+            year: row.get(10)?,
+            recording_mbid: row.get(11)?,
+            release_track_mbid: row.get(12)?,
+            release_mbid: row.get(13)?,
+            release_group_mbid: row.get(14)?,
+            confidence: row.get(15)?,
+            source: row.get(16)?,
+            updated_at: row.get(17)?,
         })
     })?;
 
@@ -2036,8 +2099,9 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                tmo.bpm IS NOT NULL AS bpm_overridden,
                COALESCE(tmo.genre, t.genre) AS genre,
                apg.primary_genre,
-               t.source_tags,
+               COALESCE(tmo.source_tags, t.source_tags) AS source_tags,
                t.is_vinyl_rip,
+               tmo.source_tags IS NOT NULL AS source_tags_overridden,
                COALESCE(tmo.year, t.year) AS year,
                t.added_at,
                t.play_count,
@@ -2062,6 +2126,9 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
 
     let tracks = statement
         .query_map([], |row| {
+            let source_tags = track_source_tags_from_db(row.get(16)?);
+            let raw_is_vinyl = row.get::<_, i64>(17)? != 0;
+            let source_tags_overridden = row.get::<_, i64>(18)? != 0;
             Ok(Track {
                 id: row.get::<_, i64>(0)?.to_string(),
                 path: row.get(1)?,
@@ -2079,14 +2146,15 @@ pub fn load_library(db_path: &Path) -> Result<LibraryData> {
                 bpm_overridden: row.get::<_, i64>(13)? != 0,
                 genre: row.get(14)?,
                 primary_genre: row.get(15)?,
-                source_tags: track_source_tags_from_db(row.get(16)?),
-                is_vinyl_rip: row.get::<_, i64>(17)? != 0,
-                year: row.get(18)?,
-                added_at: row.get(19)?,
-                play_count: row.get::<_, i64>(20)?,
-                last_played_at: row.get(21)?,
-                is_favorite: row.get::<_, i64>(22)? != 0,
-                rating: row.get(23)?,
+                is_vinyl_rip: source_tags_mark_vinyl(&source_tags)
+                    || (!source_tags_overridden && raw_is_vinyl),
+                source_tags,
+                year: row.get(19)?,
+                added_at: row.get(20)?,
+                play_count: row.get::<_, i64>(21)?,
+                last_played_at: row.get(22)?,
+                is_favorite: row.get::<_, i64>(23)? != 0,
+                rating: row.get(24)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
