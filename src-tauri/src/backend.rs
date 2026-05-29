@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::File,
     io::Write,
     path::{Path, PathBuf},
@@ -14,13 +15,18 @@ use crate::{
     album, artist, cover, db,
     models::{
         AppSettings, BootstrapPayload, DesktopStateImportPayload, ImportedDesktopPlaybackSession,
-        LibraryData, MetadataEditMode, NeedleBackendImportSummary, NeedleBackendMigrationReport,
-        NeedleBackendStatus, OfflineDownloadEntry, PlaybackSession, RootPathMapping, SavedPlaylist,
-        Track, TrackMetadataOverride,
+        LibraryChangeState, LibraryData, MetadataEditMode, NeedleBackendImportSummary,
+        NeedleBackendMigrationReport, NeedleBackendStatus, OfflineDownloadEntry, PlaybackSession,
+        RootPathMapping, SavedPlaylist, Track, TrackMetadataOverride,
     },
 };
 
 const TRACK_TOKEN_PREFIX: &str = "needle-track:";
+const BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const BACKEND_STATUS_TIMEOUT: Duration = Duration::from_secs(12);
+const BACKEND_JSON_TIMEOUT: Duration = Duration::from_secs(30);
+const BACKEND_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(90);
+const BACKEND_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +41,7 @@ struct RawNeedleStatusResponse {
     album_count: Option<usize>,
     artist_count: Option<usize>,
     last_scan: Option<RawNeedleScan>,
+    library_change: Option<LibraryChangeState>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +80,7 @@ struct RawDesktopBootstrap {
     library: LibraryData,
     playlists: Vec<SavedPlaylist>,
     playback_session: PlaybackSession,
+    library_change: Option<LibraryChangeState>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,12 +146,20 @@ struct RawSubsonicTrack {
     album: Option<String>,
     album_artist: Option<String>,
     duration: Option<f64>,
+    #[serde(alias = "duration_seconds")]
+    duration_seconds: Option<f64>,
+    #[serde(alias = "sample_rate", alias = "samplingRate")]
+    sample_rate: Option<u32>,
+    #[serde(alias = "bit_depth", alias = "bitsPerSample")]
+    bit_depth: Option<u8>,
     disc_number: Option<i64>,
     track: Option<i64>,
     bpm: Option<i64>,
     bpm_overridden: Option<bool>,
     genre: Option<String>,
     primary_genre: Option<String>,
+    #[serde(alias = "source_tags")]
+    source_tags: Option<Vec<String>>,
     is_vinyl_rip: Option<bool>,
     year: Option<i64>,
     suffix: Option<String>,
@@ -179,6 +195,14 @@ struct RawScrobblePayload<'a> {
 struct RawAlbumGenrePayload<'a> {
     id: &'a str,
     genre: Option<&'a str>,
+    mode: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RawAlbumSourceTagsPayload<'a> {
+    id: &'a str,
+    source_tags: &'a [String],
     mode: &'a str,
 }
 
@@ -333,7 +357,7 @@ pub async fn fetch_backend_status(
     raw_url_override: Option<&str>,
 ) -> Result<NeedleBackendStatus> {
     let url = backend_url_from_settings(settings, raw_url_override)?;
-    let client = http_client()?;
+    let client = status_http_client()?;
     let payload =
         get_json::<RawNeedleStatusResponse>(&client, settings, &url, "/api/needle/status")
             .await
@@ -351,6 +375,7 @@ pub async fn fetch_backend_status(
         album_count: payload.album_count,
         artist_count: payload.artist_count,
         last_scan_status: payload.last_scan.and_then(|scan| scan.status),
+        library_change: payload.library_change,
         error: None,
     })
 }
@@ -363,7 +388,7 @@ pub async fn load_backend_bootstrap(settings: AppSettings) -> Result<BootstrapPa
         bail!("The configured Needle backend is not enabled for local library mode");
     }
 
-    let client = http_client()?;
+    let client = bootstrap_http_client()?;
     let mut payload = get_json::<RawDesktopBootstrap>(
         &client,
         &settings,
@@ -378,6 +403,7 @@ pub async fn load_backend_bootstrap(settings: AppSettings) -> Result<BootstrapPa
         library: payload.library,
         playlists: payload.playlists,
         playback_session: payload.playback_session,
+        library_change: payload.library_change,
     })
 }
 
@@ -954,20 +980,26 @@ pub async fn load_backend_album_tracks(
             Track {
                 id: track.id.clone(),
                 path: format!("{TRACK_TOKEN_PREFIX}{}", track.id),
+                album_id: None,
+                relative_path: None,
                 title: display_title,
                 artist: track.artist,
                 album: track.album,
                 album_artist: track.album_artist,
-                duration_seconds: track.duration.map(|value| value.max(0.0).round() as u64),
+                duration_seconds: track
+                    .duration
+                    .or(track.duration_seconds)
+                    .map(|value| value.max(0.0).round() as u64),
                 format: track.suffix,
-                sample_rate: None,
-                bit_depth: None,
+                sample_rate: track.sample_rate,
+                bit_depth: track.bit_depth,
                 disc_number: track.disc_number,
                 track_number: track.track,
                 bpm: track.bpm,
                 bpm_overridden: track.bpm_overridden.unwrap_or(false),
                 genre: track.genre,
                 primary_genre: track.primary_genre,
+                source_tags: track.source_tags.unwrap_or_default(),
                 is_vinyl_rip: track.is_vinyl_rip.unwrap_or(false),
                 year: track.year,
                 added_at: None,
@@ -1169,17 +1201,22 @@ pub async fn save_backend_album_genre(
     settings: &AppSettings,
     album_name: &str,
     artist_name: Option<&str>,
+    track_paths: &[String],
     genre: Option<&str>,
     mode: MetadataEditMode,
 ) -> Result<BootstrapPayload> {
     let url = backend_mode_url(settings)
         .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
     let client = http_client()?;
-    let albums = get_json::<Vec<RawSubsonicAlbum>>(&client, settings, &url, "/api/albums").await?;
-    let target = albums
-        .into_iter()
-        .find(|album| album_matches(album, album_name, artist_name))
-        .ok_or_else(|| anyhow!("Album not found in Needle backend"))?;
+    let target = select_backend_album(
+        &client,
+        settings,
+        &url,
+        album_name,
+        artist_name,
+        track_paths,
+    )
+    .await?;
 
     let mode_name = match mode {
         MetadataEditMode::NeedleOnly => "needle_only",
@@ -1194,6 +1231,48 @@ pub async fn save_backend_album_genre(
         &RawAlbumGenrePayload {
             id: &target.id,
             genre,
+            mode: mode_name,
+        },
+    )
+    .await?;
+
+    load_backend_bootstrap(settings.clone()).await
+}
+
+pub async fn save_backend_album_source_tags(
+    settings: &AppSettings,
+    album_name: &str,
+    artist_name: Option<&str>,
+    track_paths: &[String],
+    source_tags: &[String],
+    mode: MetadataEditMode,
+) -> Result<BootstrapPayload> {
+    let url = backend_mode_url(settings)
+        .ok_or_else(|| anyhow!("Needle backend URL is not configured"))?;
+    let client = http_client()?;
+    let target = select_backend_album(
+        &client,
+        settings,
+        &url,
+        album_name,
+        artist_name,
+        track_paths,
+    )
+    .await?;
+
+    let mode_name = match mode {
+        MetadataEditMode::NeedleOnly => "needle_only",
+        MetadataEditMode::WriteToFiles => "write_to_files",
+    };
+
+    post_json_expect_empty(
+        &client,
+        settings,
+        &url,
+        "/api/albums/source-tags",
+        &RawAlbumSourceTagsPayload {
+            id: &target.id,
+            source_tags,
             mode: mode_name,
         },
     )
@@ -1525,20 +1604,32 @@ fn normalize_path(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn http_client() -> Result<Client> {
+fn http_client_with_timeout(timeout: Duration) -> Result<Client> {
     reqwest::Client::builder()
         .user_agent("NeedleDesktop/0.1")
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(5))
+        .connect_timeout(BACKEND_CONNECT_TIMEOUT)
+        .timeout(timeout)
         .build()
         .map_err(|error| anyhow!("Unable to create Needle backend HTTP client: {error}"))
+}
+
+fn http_client() -> Result<Client> {
+    http_client_with_timeout(BACKEND_JSON_TIMEOUT)
+}
+
+fn status_http_client() -> Result<Client> {
+    http_client_with_timeout(BACKEND_STATUS_TIMEOUT)
+}
+
+fn bootstrap_http_client() -> Result<Client> {
+    http_client_with_timeout(BACKEND_BOOTSTRAP_TIMEOUT)
 }
 
 fn stream_http_client() -> Result<Client> {
     reqwest::Client::builder()
         .user_agent("NeedleDesktop/0.1")
-        .connect_timeout(Duration::from_secs(2))
-        .read_timeout(Duration::from_secs(30))
+        .connect_timeout(BACKEND_CONNECT_TIMEOUT)
+        .read_timeout(BACKEND_STREAM_READ_TIMEOUT)
         .build()
         .map_err(|error| anyhow!("Unable to create Needle backend streaming HTTP client: {error}"))
 }
@@ -1854,6 +1945,50 @@ fn album_matches(
             .unwrap_or(false),
         None => true,
     }
+}
+
+async fn select_backend_album(
+    client: &Client,
+    settings: &AppSettings,
+    url: &str,
+    album_name: &str,
+    artist_name: Option<&str>,
+    track_paths: &[String],
+) -> Result<RawSubsonicAlbum> {
+    let selected_track_ids = track_paths
+        .iter()
+        .filter_map(|path| backend_track_id_from_path(path).map(ToOwned::to_owned))
+        .collect::<HashSet<_>>();
+    let albums = get_json::<Vec<RawSubsonicAlbum>>(client, settings, url, "/api/albums").await?;
+    let mut fallback = None;
+
+    for album in albums
+        .into_iter()
+        .filter(|album| album_matches(album, album_name, artist_name))
+    {
+        if !selected_track_ids.is_empty() {
+            let detail = get_json::<RawAlbumDetailPayload>(
+                client,
+                settings,
+                url,
+                &format!("/api/album/{}", album.id),
+            )
+            .await?;
+            if detail
+                .album
+                .song
+                .iter()
+                .any(|track| selected_track_ids.contains(&track.id))
+            {
+                return Ok(album);
+            }
+        }
+        if fallback.is_none() {
+            fallback = Some(album);
+        }
+    }
+
+    fallback.ok_or_else(|| anyhow!("Album not found in Needle backend"))
 }
 
 fn extension_from_content_type(content_type: Option<&str>) -> Option<&'static str> {

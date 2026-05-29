@@ -16,6 +16,8 @@ export type LibrarySource = 'local_folders' | 'needle_backend';
 export interface Track {
   id: string;
   path: string;
+  album_id: string | null;
+  relative_path: string | null;
   title: string;
   artist: string | null;
   album: string | null;
@@ -30,6 +32,7 @@ export interface Track {
   bpm_overridden: boolean;
   genre: string | null;
   primary_genre: string | null;
+  source_tags: string[];
   is_vinyl_rip: boolean;
   year: number | null;
   added_at: string | null;
@@ -68,6 +71,7 @@ export interface BootstrapPayload {
   library: LibraryData;
   playlists: SavedPlaylist[];
   playback_session: PlaybackSession;
+  library_change: LibraryChangeState | null;
 }
 
 export interface AppBootstrapState {
@@ -103,6 +107,12 @@ export interface AudioDevice {
 }
 
 export interface PlaybackState {
+  path: string | null;
+  paused: boolean;
+  idle: boolean;
+  position_seconds: number;
+  duration_seconds: number;
+  playlist_position: number | null;
   volume: number;
   muted: boolean;
   audio_device: string;
@@ -177,7 +187,15 @@ export interface NeedleBackendStatus {
   album_count: number | null;
   artist_count: number | null;
   last_scan_status: string | null;
+  library_change: LibraryChangeState | null;
   error: string | null;
+}
+
+export interface LibraryChangeState {
+  version: number;
+  changedAt: string;
+  changeSource: string | null;
+  changeSummary: string | null;
 }
 
 export interface NeedleBackendImportSummary {

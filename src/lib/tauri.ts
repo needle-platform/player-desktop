@@ -198,6 +198,14 @@ export const saveAlbumGenre = (
   mode: MetadataEditMode,
 ) => invokeMonitored<BootstrapPayload>('save_album_genre', { album, albumArtist, trackPaths, genre, mode });
 
+export const saveAlbumSourceTags = (
+  album: string,
+  albumArtist: string | null,
+  trackPaths: string[],
+  sourceTags: string[],
+  mode: MetadataEditMode,
+) => invokeMonitored<BootstrapPayload>('save_album_source_tags', { album, albumArtist, trackPaths, sourceTags, mode });
+
 export const setTrackRating = (path: string, rating: number | null) =>
   invokeMonitored<BootstrapPayload>('set_track_rating', { path, rating });
 

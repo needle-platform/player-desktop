@@ -9,6 +9,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 ### Added
 - Added backend runtime details in Settings so the current Needle app version and loudness-analysis version are visible in-app.
 - Added backend-mode custom artist photo uploads from the artist page, including a quick “use automatic photo again” reset path.
+- Added album-wide Vorbis `TAGS` editing for source labels, with `vinyl-rip`, `cd-rip`, and `digital-purchase` presets plus custom source tags.
 
 ### Changed
 - Loudness analysis now runs from desktop backend mode too, using cached offline files when available and authenticated backend streams for the rest.
@@ -16,8 +17,11 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Artist-page enrichment in backend mode is now backend-owned for both photos and biographies, so clients share one source of truth instead of re-fetching artist data per app.
 - Album-page enrichment in backend mode is now backend-owned too, so shared album notes and source links come from the homeserver instead of being fetched separately by each client.
 - Backend-mode info toasts now dismiss themselves automatically after a short delay instead of lingering until manually closed.
+- Backend-mode heartbeat checks now watch the homeserver `libraryChange` version and refresh the desktop library snapshot automatically when shared library state changes.
+- Album grouping now treats source-tagged editions as separate albums, so a digital purchase and vinyl rip of the same release no longer collapse into one duplicated album view.
 
 ### Fixed
+- Fixed backend-mode album grouping so albums with the same title and artist stay separated when the backend exposes distinct album identities, such as CD, vinyl, and digital editions in separate folders.
 - Fixed backend-mode playlist management so desktop rename, delete, add, remove, and reorder actions call homeserver playlist APIs instead of being blocked by leftover backend-mode guards.
 - Fixed desktop backend mode so homeserver outages no longer hang the app indefinitely, and the app now switches itself into a downloaded-only offline mode with a calm in-app notice instead of freezing or waiting for a manual backend check.
 - Fixed backend-mode reconnects after laptop sleep so wake, focus, and visibility changes now force a fresh backend check instead of leaving the app stranded in offline mode until restart.
@@ -28,6 +32,7 @@ This changelog follows a lightweight Keep a Changelog-style format and is organi
 - Fixed backend-mode offline downloads so tracks and albums now surface active download progress and partial/full offline availability directly in the library UI.
 - Fixed remote backend offline downloads so track streaming no longer uses the same short total-request timeout as lightweight backend heartbeat checks.
 - Fixed backend-mode queue state so temporary offline or reconnect library snapshots no longer clear the visible Up Next queue while mpv playback continues.
+- Fixed desktop playback recovery after sleep or background throttling by periodically resyncing the UI from mpv's current track, position, duration, volume, mute state, output device, and queue position.
 
 ## [0.1.2] - 2026-05-04
 

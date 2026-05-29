@@ -51,28 +51,44 @@ pub enum LibrarySource {
 pub struct Track {
     pub id: String,
     pub path: String,
+    #[serde(default, alias = "albumId")]
+    pub album_id: Option<String>,
+    #[serde(default, alias = "relativePath")]
+    pub relative_path: Option<String>,
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
+    #[serde(alias = "albumArtist")]
     pub album_artist: Option<String>,
+    #[serde(alias = "durationSeconds")]
     pub duration_seconds: Option<u64>,
     pub format: Option<String>,
+    #[serde(alias = "sampleRate", alias = "samplingRate")]
     pub sample_rate: Option<u32>,
+    #[serde(alias = "bitDepth", alias = "bitsPerSample")]
     pub bit_depth: Option<u8>,
+    #[serde(alias = "discNumber")]
     pub disc_number: Option<i64>,
+    #[serde(alias = "trackNumber")]
     pub track_number: Option<i64>,
     pub bpm: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "bpmOverridden")]
     pub bpm_overridden: bool,
     pub genre: Option<String>,
+    #[serde(alias = "primaryGenre")]
     pub primary_genre: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "sourceTags")]
+    pub source_tags: Vec<String>,
+    #[serde(default, alias = "isVinylRip")]
     pub is_vinyl_rip: bool,
     pub year: Option<i64>,
+    #[serde(alias = "addedAt")]
     pub added_at: Option<String>,
+    #[serde(alias = "playCount")]
     pub play_count: i64,
+    #[serde(alias = "lastPlayedAt")]
     pub last_played_at: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "isFavorite")]
     pub is_favorite: bool,
     pub rating: Option<i64>,
 }
@@ -155,6 +171,8 @@ pub struct BootstrapPayload {
     pub library: LibraryData,
     pub playlists: Vec<SavedPlaylist>,
     pub playback_session: PlaybackSession,
+    #[serde(default)]
+    pub library_change: Option<LibraryChangeState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +196,12 @@ pub struct AudioDevice {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaybackState {
+    pub path: Option<String>,
+    pub paused: bool,
+    pub idle: bool,
+    pub position_seconds: f64,
+    pub duration_seconds: f64,
+    pub playlist_position: Option<usize>,
     pub volume: f64,
     pub muted: bool,
     pub audio_device: String,
@@ -356,6 +380,7 @@ pub struct ImportedTrackMetadataOverride {
     pub track_number: Option<i64>,
     pub bpm: Option<i64>,
     pub genre: Option<String>,
+    pub source_tags: Option<Vec<String>>,
     pub year: Option<i64>,
     pub recording_mbid: Option<String>,
     pub release_track_mbid: Option<String>,
@@ -432,7 +457,17 @@ pub struct NeedleBackendStatus {
     pub album_count: Option<usize>,
     pub artist_count: Option<usize>,
     pub last_scan_status: Option<String>,
+    pub library_change: Option<LibraryChangeState>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryChangeState {
+    pub version: i64,
+    pub changed_at: String,
+    pub change_source: Option<String>,
+    pub change_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

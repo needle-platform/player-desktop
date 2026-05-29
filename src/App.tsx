@@ -40,6 +40,7 @@ import {
   listOfflineDownloads,
   setAudioDevice as setPlaybackAudioDevice,
   saveAlbumGenre as persistAlbumGenre,
+  saveAlbumSourceTags as persistAlbumSourceTags,
   saveTrackBpm as persistTrackBpmValue,
   setTrackFavorite as persistTrackFavorite,
   setTrackRating as persistTrackRating,
@@ -73,6 +74,7 @@ import type {
   OfflineDownloadEntry,
   OfflineDownloadProgress,
   PlaybackSession,
+  PlaybackState,
   RepeatMode,
   RuntimeInfo,
   SavedPlaylist,
@@ -93,12 +95,19 @@ import {
   splitTrackGenreKeys,
   splitTrackGenres,
 } from './lib/genres';
+import {
+  normalizeSourceTagKey,
+  sourceTagDisplayLabelFromKey,
+  sourceTagLabelFromKey,
+  sourceTagPresets,
+  splitSourceTagEntries,
+  splitSourceTags,
+} from './lib/sourceTags';
 import { generateAutoPlaylists, type AutoPlaylist } from './lib/playlists';
 import { formatBpm, VIBE_BUCKETS, vibeKeyForTrack, vibeLabelForTrack } from './lib/vibes';
 import dashboardIdleBackdrop from './assets/bg.jpg';
 import needleBrandMarkDark from './assets/needle-icon-flat-dark.png';
 import needleBrandMarkLight from './assets/needle-icon-flat-light.png';
-import vinylRipBadgeIcon from './assets/vinyl-rip-badge.svg';
 
 type View = 'dashboard' | 'tracks' | 'albums' | 'album' | 'artists' | 'artist' | 'settings';
 type PlaylistSelection = { kind: 'smart'; id: string } | { kind: 'manual'; id: string };
@@ -148,6 +157,13 @@ type AlbumGenreEditorState = {
   currentGenre: string | null;
   suggestedGenres: string[];
 };
+type AlbumSourceTagsEditorState = {
+  album: string;
+  albumArtist: string | null;
+  trackPaths: string[];
+  currentTags: string[];
+  suggestedTags: string[];
+};
 type TrackBpmEditorState = {
   track: Track;
   dismissFromAudit?: boolean;
@@ -173,6 +189,7 @@ type AlbumSummary = {
   year: number | null;
   count: number;
   samplePath: string;
+  badges: string[];
   is_vinyl_rip: boolean;
   addedAt: string | null;
   offlineAvailability: OfflineAvailability;
@@ -614,6 +631,58 @@ const formatQuality = (track: Track) => {
   return parts.join(' · ') || null;
 };
 
+const normalizeBadgeText = (value: string) => value.trim().replace(/\s+/g, ' ');
+
+const addAlbumBadge = (badges: string[], label: string | null | undefined) => {
+  const normalized = normalizeBadgeText(label ?? '');
+  if (!normalized) return;
+  if (!badges.some((badge) => badge.toLocaleLowerCase() === normalized.toLocaleLowerCase())) {
+    badges.push(normalized);
+  }
+};
+
+const formatAlbumSampleRateBadge = (sampleRate: number) => {
+  const khz = sampleRate / 1000;
+  return `${Number.isInteger(khz) ? khz.toFixed(0) : khz.toFixed(1)} kHz`;
+};
+
+const buildAlbumBadges = (tracks: Track[], options?: { includeSourceTags?: boolean }) => {
+  const badges: string[] = [];
+  const formats = new Map<string, number>();
+  let maxRate = 0;
+  let maxBits = 0;
+  const includeSourceTags = options?.includeSourceTags ?? true;
+
+  for (const track of tracks) {
+    if (includeSourceTags) {
+      for (const tag of splitSourceTagEntries(track.source_tags)) {
+        addAlbumBadge(badges, sourceTagDisplayLabelFromKey(tag.key));
+      }
+      if (track.is_vinyl_rip) {
+        addAlbumBadge(badges, 'vinyl');
+      }
+    }
+    if (track.format) {
+      const format = track.format.toUpperCase();
+      formats.set(format, (formats.get(format) ?? 0) + 1);
+    }
+    if (track.sample_rate && track.sample_rate > maxRate) maxRate = track.sample_rate;
+    if (track.bit_depth && track.bit_depth > maxBits) maxBits = track.bit_depth;
+  }
+
+  const topFormat = Array.from(formats.entries()).sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]))[0]?.[0];
+  addAlbumBadge(badges, topFormat);
+  if (maxRate && maxBits) {
+    addAlbumBadge(badges, `${formatAlbumSampleRateBadge(maxRate)} / ${maxBits}-bit`);
+  } else if (maxRate) {
+    addAlbumBadge(badges, formatAlbumSampleRateBadge(maxRate));
+  } else if (maxBits) {
+    addAlbumBadge(badges, `${maxBits}-bit`);
+  }
+
+  return badges;
+};
+
 const formatTrackPace = (track: Pick<Track, 'bpm'>) => {
   const bpm = formatBpm(track.bpm);
   const vibe = vibeLabelForTrack(track);
@@ -646,11 +715,42 @@ const albumArtistForTrack = (track: Pick<Track, 'album_artist' | 'artist'>) =>
   track.album_artist ?? track.artist ?? null;
 const artistNameForTrack = (track: Pick<Track, 'artist' | 'album_artist'>, mode: ArtistBrowseMode) =>
   mode === 'album' ? albumArtistForTrack(track) : track.artist;
-const albumKey = (album: string | null | undefined, albumArtist: string | null | undefined) =>
-  `${album ?? ''}${albumIdentitySeparator}${albumArtist ?? ''}`;
-const trackAlbumKey = (track: Pick<Track, 'album' | 'album_artist' | 'artist'>) =>
-  track.album ? albumKey(track.album, albumArtistForTrack(track)) : null;
+const albumKey = (
+  album: string | null | undefined,
+  albumArtist: string | null | undefined,
+  editionKey = '',
+) => `${album ?? ''}${albumIdentitySeparator}${albumArtist ?? ''}${albumIdentitySeparator}${editionKey}`;
+const pathParts = (value: string | null | undefined) => (value ?? '').split(/[\\/]+/).filter(Boolean);
+const parentPath = (value: string | null | undefined) => {
+  const parts = pathParts(value);
+  return parts.length > 1 ? parts.slice(0, -1).join('/') : '';
+};
+const isDiscFolderName = (value: string | null | undefined) =>
+  /^(?:cd|disc|disk|lp)\s*[-_. ]?\s*\d+$/i.test(value ?? '') || /^side\s*[-_. ]?\s*[a-z]$/i.test(value ?? '');
+const albumEditionFolder = (value: string | null | undefined) => {
+  const parent = parentPath(value);
+  if (!parent) return '';
+  const parts = pathParts(parent);
+  if (parts.length > 1 && isDiscFolderName(parts[parts.length - 1])) {
+    return parts.slice(0, -1).join('/');
+  }
+  return parent;
+};
+const trackAlbumEditionKey = (
+  track: Pick<Track, 'path' | 'relative_path' | 'source_tags' | 'is_vinyl_rip'>,
+) => {
+  const folder = albumEditionFolder(track.relative_path ?? track.path);
+  if (folder) return `folder:${folder.toLocaleLowerCase()}`;
+  const sourceKeys = splitSourceTagEntries(track.source_tags).map((entry) => entry.key);
+  if (sourceKeys.length > 0) return `source:${sourceKeys.join('+')}`;
+  if (track.is_vinyl_rip) return 'source:vinyl-rip';
+  return '';
+};
+const trackAlbumKey = (
+  track: Pick<Track, 'album' | 'album_artist' | 'artist' | 'album_id' | 'path' | 'relative_path' | 'source_tags' | 'is_vinyl_rip'>,
+) => (track.album ? albumKey(track.album, albumArtistForTrack(track), track.album_id ? `backend:${track.album_id}` : trackAlbumEditionKey(track)) : null);
 const albumTitleFromKey = (key: string) => key.split(albumIdentitySeparator)[0] ?? key;
+const albumEditionFromKey = (key: string) => key.split(albumIdentitySeparator)[2] ?? '';
 const offlineAvailabilityFromCounts = (downloadedCount: number, totalCount: number): OfflineAvailability => {
   if (downloadedCount <= 0 || totalCount <= 0) return 'none';
   return downloadedCount < totalCount ? 'partial' : 'full';
@@ -1508,6 +1608,7 @@ function App() {
   const [playlistComposer, setPlaylistComposer] = useState<PlaylistComposerState | null>(null);
   const [playlistTarget, setPlaylistTarget] = useState<PlaylistTargetState | null>(null);
   const [albumGenreEditor, setAlbumGenreEditor] = useState<AlbumGenreEditorState | null>(null);
+  const [albumSourceTagsEditor, setAlbumSourceTagsEditor] = useState<AlbumSourceTagsEditorState | null>(null);
   const [trackBpmEditor, setTrackBpmEditor] = useState<TrackBpmEditorState | null>(null);
   const [queuePaths, setQueuePaths] = useState<string[]>([]);
   const [baseQueuePaths, setBaseQueuePaths] = useState<string[]>([]);
@@ -1643,6 +1744,8 @@ function App() {
   const backendOfflineRecoveryStartedAtRef = useRef<number | null>(null);
   const backendHeartbeatInFlightRef = useRef(false);
   const backendHeartbeatStartedAtRef = useRef<number | null>(null);
+  const backendLibraryRefreshInFlightRef = useRef(false);
+  const backendLibraryVersionRef = useRef<number | null>(null);
   const backendWakeHeartbeatAtRef = useRef(0);
   const offlineDownloadsSyncProgressRef = useRef<string | null>(null);
   const offlineCompletedTracksRef = useRef(0);
@@ -1651,6 +1754,11 @@ function App() {
 
   const applyBootstrapState = (nextState: AppBootstrapState) => {
     setData(nextState.bootstrap);
+    if (typeof nextState.bootstrap.library_change?.version === 'number') {
+      backendLibraryVersionRef.current = nextState.bootstrap.library_change.version;
+    } else if (nextState.bootstrap.settings.library_source !== 'needle_backend') {
+      backendLibraryVersionRef.current = null;
+    }
     setIsBackendOfflineMode(nextState.offline_mode);
     setBackendModeNotice(nextState.offline_mode ? nextState.startup_notice ?? null : null);
     setStartupError(null);
@@ -1699,6 +1807,109 @@ function App() {
     setIsPlaying(
       Boolean(backendPathRef.current) && !backendPausedRef.current && !backendIdleRef.current,
     );
+  };
+
+  const applyPlaybackPath = (
+    rawPath: string | null,
+    options?: {
+      paused?: boolean;
+      idle?: boolean;
+      positionSeconds?: number | null;
+      durationSeconds?: number | null;
+      playlistPosition?: number | null;
+      clearStatusOnNull?: boolean;
+    },
+  ) => {
+    const path = normalizeNeedleBackendPlaybackPath(rawPath, data?.settings ?? null, offlineDownloadByLocalPath);
+
+    backendPathRef.current = path;
+    if (typeof options?.paused === 'boolean') {
+      backendPausedRef.current = options.paused;
+    }
+    backendIdleRef.current =
+      typeof options?.idle === 'boolean' ? options.idle || path == null : path == null;
+
+    setCurrentPath(path);
+    if (!path) {
+      scrubPositionRef.current = null;
+      setScrubPosition(null);
+      setPlaybackPosition(0);
+      setPlaybackDuration(0);
+      syncConfirmedPlaybackState();
+      if (options?.clearStatusOnNull ?? true) {
+        setStatus('');
+      }
+      return;
+    }
+
+    setIsBackendPlaybackLoaded(true);
+    const snapshotQueueIndex =
+      typeof options?.playlistPosition === 'number' &&
+      options.playlistPosition >= 0 &&
+      queuePaths[options.playlistPosition] === path
+        ? options.playlistPosition
+        : -1;
+    const queueIndex = snapshotQueueIndex >= 0 ? snapshotQueueIndex : queuePaths.indexOf(path);
+    if (queueIndex >= 0) {
+      setCurrentQueueIndex(queueIndex);
+    }
+
+    scrubPositionRef.current = null;
+    setScrubPosition(null);
+    if (typeof options?.positionSeconds === 'number' && Number.isFinite(options.positionSeconds)) {
+      setPlaybackPosition(Math.max(0, options.positionSeconds));
+    } else {
+      setPlaybackPosition(0);
+    }
+    if (typeof options?.durationSeconds === 'number' && Number.isFinite(options.durationSeconds)) {
+      setPlaybackDuration(Math.max(0, options.durationSeconds));
+    }
+    syncConfirmedPlaybackState();
+
+    if (suppressRecordPathRef.current === path) {
+      suppressRecordPathRef.current = null;
+      lastRecordedPath.current = path;
+      return;
+    }
+    if (lastRecordedPath.current !== path) {
+      lastRecordedPath.current = path;
+      const nowIso = new Date().toISOString();
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              library: {
+                ...prev.library,
+                tracks: prev.library.tracks.map((t) =>
+                  t.path === path
+                    ? {
+                        ...t,
+                        play_count: (t.play_count ?? 0) + 1,
+                        last_played_at: nowIso,
+                      }
+                    : t,
+                ),
+              },
+            }
+          : prev,
+      );
+      void recordPlay(path).catch(() => {});
+    }
+  };
+
+  const applyPlaybackSnapshot = (playback: PlaybackState) => {
+    setVolumeLevel(clampVolume(playback.volume));
+    setIsMuted(playback.muted);
+    setSelectedAudioDevice(playback.audio_device || defaultAudioDevice.name);
+    setAudioDevices(playback.audio_devices.length > 0 ? playback.audio_devices : [defaultAudioDevice]);
+    applyPlaybackPath(playback.path, {
+      paused: playback.paused,
+      idle: playback.idle,
+      positionSeconds: playback.position_seconds,
+      durationSeconds: playback.duration_seconds,
+      playlistPosition: playback.playlist_position,
+      clearStatusOnNull: false,
+    });
   };
 
   const openAlbum = (album: string) => {
@@ -2039,8 +2250,6 @@ function App() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    const appSettings = data?.settings ?? null;
-    const offlinePathMap = offlineDownloadByLocalPath;
     void (async () => {
       const dispose = await listen<{ name: string; data: unknown }>(
         'mpv-property',
@@ -2048,57 +2257,7 @@ function App() {
           const { name, data } = event.payload;
           if (name === 'path') {
             const rawPath = typeof data === 'string' ? data : null;
-            const path = normalizeNeedleBackendPlaybackPath(rawPath, appSettings, offlinePathMap);
-            backendPathRef.current = path;
-            backendIdleRef.current = path == null;
-            setCurrentPath(path);
-            if (!path) {
-              scrubPositionRef.current = null;
-              setScrubPosition(null);
-              setPlaybackPosition(0);
-              setPlaybackDuration(0);
-              syncConfirmedPlaybackState();
-              setStatus('');
-              return;
-            }
-            setIsBackendPlaybackLoaded(true);
-            const queueIndex = queuePaths.indexOf(path);
-            if (queueIndex >= 0) {
-              setCurrentQueueIndex(queueIndex);
-            }
-            scrubPositionRef.current = null;
-            setScrubPosition(null);
-            setPlaybackPosition(0);
-            syncConfirmedPlaybackState();
-            if (suppressRecordPathRef.current === path) {
-              suppressRecordPathRef.current = null;
-              lastRecordedPath.current = path;
-              return;
-            }
-            if (lastRecordedPath.current !== path) {
-              lastRecordedPath.current = path;
-              const nowIso = new Date().toISOString();
-              setData((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      library: {
-                        ...prev.library,
-                        tracks: prev.library.tracks.map((t) =>
-                          t.path === path
-                            ? {
-                                ...t,
-                                play_count: (t.play_count ?? 0) + 1,
-                                last_played_at: nowIso,
-                              }
-                            : t,
-                        ),
-                      },
-                    }
-                  : prev,
-              );
-              void recordPlay(path).catch(() => {});
-            }
+            applyPlaybackPath(rawPath);
           } else if (name === 'pause') {
             backendPausedRef.current = data === true;
             syncConfirmedPlaybackState();
@@ -2137,7 +2296,7 @@ function App() {
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [data, offlineDownloadByLocalPath, queuePaths]);
+  }, [data?.settings, offlineDownloadByLocalPath, queuePaths]);
 
   useEffect(() => {
     void (async () => {
@@ -2254,6 +2413,14 @@ function App() {
         backendOfflineRecoveryRef.current = false;
         backendOfflineRecoveryStartedAtRef.current = null;
       }
+
+      if (
+        backendLibraryRefreshInFlightRef.current &&
+        backendHeartbeatStartedAtRef.current != null &&
+        now - backendHeartbeatStartedAtRef.current >= staleGuardAfterMs
+      ) {
+        backendLibraryRefreshInFlightRef.current = false;
+      }
     };
 
     const triggerOfflineRecovery = (message?: string) => {
@@ -2278,24 +2445,53 @@ function App() {
       backendHeartbeatInFlightRef.current = true;
       backendHeartbeatStartedAtRef.current = Date.now();
       try {
-        await getNeedleBackendStatus(data.settings.needle_backend_url);
-        if (cancelled || !options?.restoreIfOnline || !isBackendOfflineMode) {
-          return;
-        }
-
-        const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
-          bootstrapAppState(),
-          listOfflineDownloads(),
-        ]);
+        const backendStatus = await getNeedleBackendStatus(data.settings.needle_backend_url);
         if (cancelled) {
           return;
         }
-        applyBootstrapState(nextBootstrapState);
-        setOfflineDownloads(nextOfflineDownloads);
-        if (!nextBootstrapState.offline_mode) {
-          setStatus(
-            `Needle backend reconnected · ${nextBootstrapState.bootstrap.library.track_count} tracks`,
-          );
+
+        setNeedleBackendStatus(backendStatus);
+
+        const remoteLibraryVersion = backendStatus.library_change?.version;
+        const knownLibraryVersion = backendLibraryVersionRef.current;
+        const backendLibraryChanged =
+          backendStatus.enabled &&
+          !isBackendOfflineMode &&
+          typeof remoteLibraryVersion === 'number' &&
+          (knownLibraryVersion == null || remoteLibraryVersion > knownLibraryVersion);
+        const shouldRestoreOnline = Boolean(options?.restoreIfOnline && isBackendOfflineMode);
+
+        if (!backendLibraryChanged && !shouldRestoreOnline) {
+          return;
+        }
+
+        if (backendLibraryRefreshInFlightRef.current) {
+          return;
+        }
+
+        backendLibraryRefreshInFlightRef.current = true;
+        try {
+          const [nextBootstrapState, nextOfflineDownloads] = await Promise.all([
+            bootstrapAppState(),
+            listOfflineDownloads(),
+          ]);
+          if (cancelled) {
+            return;
+          }
+          applyBootstrapState(nextBootstrapState);
+          if (typeof remoteLibraryVersion === 'number') {
+            backendLibraryVersionRef.current = remoteLibraryVersion;
+          }
+          setOfflineDownloads(nextOfflineDownloads);
+          if (!nextBootstrapState.offline_mode) {
+            setStatus(
+              shouldRestoreOnline
+                ? `Needle backend reconnected · ${nextBootstrapState.bootstrap.library.track_count} tracks`
+                : `Needle library refreshed · ${nextBootstrapState.bootstrap.library.track_count} tracks`,
+            );
+          }
+        } finally {
+          backendLibraryRefreshInFlightRef.current = false;
         }
       } catch (error) {
         if (cancelled) {
@@ -2640,6 +2836,63 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!data) return;
+
+    let cancelled = false;
+    let inFlight = false;
+    const refreshPlaybackSnapshot = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const playback = await getPlaybackState();
+        if (!cancelled) {
+          applyPlaybackSnapshot(playback);
+        }
+      } catch {
+        // The regular mpv event stream remains primary. This only gives the UI
+        // a way back after macOS display sleep/background throttling.
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const intervalMs = currentPath || isPlaying ? 5000 : 15000;
+    const intervalId = window.setInterval(() => {
+      void refreshPlaybackSnapshot();
+    }, intervalMs);
+
+    const handleWakeLikeEvent = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      void refreshPlaybackSnapshot();
+    };
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void refreshPlaybackSnapshot();
+      }
+    };
+
+    window.addEventListener('focus', handleWakeLikeEvent);
+    window.addEventListener('pageshow', handleWakeLikeEvent);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+    void refreshPlaybackSnapshot();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleWakeLikeEvent);
+      window.removeEventListener('pageshow', handleWakeLikeEvent);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+    };
+  }, [data?.settings, offlineDownloadByLocalPath, queuePaths, currentPath, isPlaying]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3163,6 +3416,14 @@ function App() {
     () => uniqueSorted(allTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
     [allTracks],
   );
+  const librarySourceTagOptions = useMemo(
+    () =>
+      uniqueSorted([
+        ...sourceTagPresets,
+        ...allTracks.flatMap((track) => splitSourceTags(track.source_tags)),
+      ]),
+    [allTracks],
+  );
   const trackGenreOptions = useMemo(
     () => uniqueSorted(scopedTracks.flatMap((track) => splitTrackGenres(effectiveTrackGenre(track)))),
     [scopedTracks],
@@ -3267,13 +3528,14 @@ function App() {
   }, [selectedSmartPlaylist, smartPlaylistGenreOptions]);
 
   const albums = useMemo(() => {
-    const map = new Map<string, AlbumSummary & { downloadedCount: number }>();
+    const map = new Map<string, AlbumSummary & { downloadedCount: number; badgeTracks: Track[] }>();
     for (const t of allTracks) {
       const key = trackAlbumKey(t);
       if (!key || !t.album) continue;
       const existing = map.get(key);
       if (existing) {
         existing.count += 1;
+        existing.badgeTracks.push(t);
         if (offlineAvailableTrackPathSet.has(t.path)) existing.downloadedCount += 1;
         if (t.added_at && (!existing.addedAt || t.added_at > existing.addedAt)) {
           existing.addedAt = t.added_at;
@@ -3292,15 +3554,18 @@ function App() {
           year: t.year ?? null,
           count: 1,
           samplePath: t.path,
+          badges: [],
           is_vinyl_rip: t.is_vinyl_rip,
           addedAt: t.added_at ?? null,
           downloadedCount: offlineAvailableTrackPathSet.has(t.path) ? 1 : 0,
+          badgeTracks: [t],
           offlineAvailability: 'none',
         });
       }
     }
-    return Array.from(map.values()).map(({ downloadedCount, ...album }) => ({
+    return Array.from(map.values()).map(({ downloadedCount, badgeTracks, ...album }) => ({
       ...album,
+      badges: buildAlbumBadges(badgeTracks),
       offlineAvailability: offlineAvailabilityFromCounts(downloadedCount, album.count),
     }));
   }, [allTracks, offlineAvailableTrackPathSet]);
@@ -3884,7 +4149,7 @@ function App() {
       const result = await refreshAlbumMetadataFromMusicBrainz(album, albumArtist);
       setData(result.bootstrap);
       if (result.status === 'matched') {
-        setSelectedAlbum(albumKey(result.release_title ?? album, result.release_artist ?? albumArtist));
+        setSelectedAlbum(albumKey(result.release_title ?? album, result.release_artist ?? albumArtist, albumEditionFromKey(albumKeyValue)));
       }
       if (result.status === 'matched') {
         setStatus(
@@ -4226,6 +4491,36 @@ function App() {
         genre
           ? `${metadataEditMode === 'write_to_files' ? 'Updated file genres' : 'Saved Needle genres'} · ${album}`
           : `${metadataEditMode === 'write_to_files' ? 'Cleared file genres' : 'Cleared Needle genres'} · ${album}`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveAlbumSourceTags = async (
+    album: string,
+    albumArtist: string | null,
+    trackPaths: string[],
+    sourceTags: string[],
+  ) => {
+    try {
+      setBusy('Saving source tags…');
+      const next = await persistAlbumSourceTags(album, albumArtist, trackPaths, sourceTags, metadataEditMode);
+      setData(next);
+      const editedTrackPaths = new Set(trackPaths);
+      const updatedAlbumKey = next.library.tracks
+        .map((track) => (editedTrackPaths.has(track.path) ? trackAlbumKey(track) : null))
+        .find((key): key is string => Boolean(key));
+      if (updatedAlbumKey) {
+        setSelectedAlbum(updatedAlbumKey);
+      }
+      setAlbumSourceTagsEditor(null);
+      setStatus(
+        sourceTags.length > 0
+          ? `${metadataEditMode === 'write_to_files' ? 'Updated file source tags' : 'Saved Needle source tags'} · ${album}`
+          : `${metadataEditMode === 'write_to_files' ? 'Cleared file source tags' : 'Cleared Needle source tags'} · ${album}`,
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -5501,7 +5796,6 @@ function App() {
             album={selectedAlbumSummary.album}
             albumKey={selectedAlbum}
             albumArtist={selectedAlbumSummary.artist}
-            isVinylRip={selectedAlbumSummary.is_vinyl_rip}
             tracks={allTracks}
             isMetadataRefreshing={metadataRefreshAlbumKey === selectedAlbum}
             currentPath={currentPath}
@@ -5559,6 +5853,15 @@ function App() {
                 trackPaths,
                 currentGenre,
                 suggestedGenres,
+              })
+            }
+            onEditSourceTags={(currentTags, suggestedTags, trackPaths) =>
+              setAlbumSourceTagsEditor({
+                album: selectedAlbumSummary.album,
+                albumArtist: selectedAlbumSummary.artist,
+                trackPaths,
+                currentTags,
+                suggestedTags,
               })
             }
             onRefreshMetadata={() =>
@@ -5778,6 +6081,24 @@ function App() {
               albumGenreEditor.albumArtist,
               albumGenreEditor.trackPaths,
               genre,
+            )
+          }
+        />
+      )}
+
+      {albumSourceTagsEditor && (
+        <AlbumSourceTagsEditorModal
+          state={albumSourceTagsEditor}
+          availableSourceTags={librarySourceTagOptions}
+          metadataEditMode={metadataEditMode}
+          busy={busy === 'Saving source tags…'}
+          onClose={() => setAlbumSourceTagsEditor(null)}
+          onSubmit={(sourceTags) =>
+            void saveAlbumSourceTags(
+              albumSourceTagsEditor.album,
+              albumSourceTagsEditor.albumArtist,
+              albumSourceTagsEditor.trackPaths,
+              sourceTags,
             )
           }
         />
@@ -6611,6 +6932,233 @@ function AlbumGenreEditorModal({
             disabled={!genreString || busy}
           >
             {busy ? 'Saving…' : metadataEditMode === 'write_to_files' ? 'Write genres' : 'Save in Needle'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface AlbumSourceTagsEditorModalProps {
+  state: AlbumSourceTagsEditorState;
+  availableSourceTags: string[];
+  metadataEditMode: MetadataEditMode;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (sourceTags: string[]) => void;
+}
+
+function AlbumSourceTagsEditorModal({
+  state,
+  availableSourceTags,
+  metadataEditMode,
+  busy,
+  onClose,
+  onSubmit,
+}: AlbumSourceTagsEditorModalProps) {
+  const initialTags = useMemo(
+    () => splitSourceTags(state.currentTags.length > 0 ? state.currentTags : state.suggestedTags),
+    [state.currentTags, state.suggestedTags],
+  );
+  const [selectedTags, setSelectedTags] = useState<string[]>(initialTags);
+  const [query, setQuery] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    setSelectedTags(splitSourceTags(state.currentTags.length > 0 ? state.currentTags : state.suggestedTags));
+    setQuery('');
+  }, [state.currentTags, state.suggestedTags]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) {
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [busy, onClose]);
+
+  const selectedTagKeys = new Set(selectedTags.map((tag) => normalizeSourceTagKey(tag)).filter(Boolean));
+  const suggestedTags = useMemo(
+    () => uniqueSorted([...sourceTagPresets, ...state.currentTags, ...state.suggestedTags].flatMap((value) => splitSourceTags(value))),
+    [state.currentTags, state.suggestedTags],
+  );
+  const normalizedQuery = normalizeSourceTagKey(query);
+  const pendingTags = useMemo(
+    () =>
+      uniqueSorted(splitSourceTags(query)).filter(
+        (tag) => !selectedTagKeys.has(normalizeSourceTagKey(tag) ?? ''),
+      ),
+    [query, selectedTagKeys],
+  );
+  const filteredTags = useMemo(() => {
+    const source = uniqueSorted([...suggestedTags, ...availableSourceTags]);
+    const loweredQuery = query.trim().toLocaleLowerCase();
+    return source.filter((tag) => {
+      const key = normalizeSourceTagKey(tag);
+      if (!key || selectedTagKeys.has(key)) return false;
+      if (!loweredQuery) return true;
+      return (
+        tag.toLocaleLowerCase().includes(loweredQuery) ||
+        key.includes(loweredQuery) ||
+        (normalizedQuery ? key.includes(normalizedQuery) : false)
+      );
+    });
+  }, [availableSourceTags, normalizedQuery, query, selectedTagKeys, suggestedTags]);
+  const modeCopy =
+    metadataEditMode === 'write_to_files'
+      ? 'This will update the embedded Vorbis TAGS field on every track on this album.'
+      : 'This will stay inside Needle and leave the audio files untouched.';
+  const addTags = (tags: string[]) => {
+    if (tags.length === 0) return;
+    setSelectedTags((current) => {
+      const next = current.slice();
+      const seen = new Set(current.map((tag) => normalizeSourceTagKey(tag)).filter(Boolean));
+      for (const tag of tags) {
+        const key = normalizeSourceTagKey(tag);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        next.push(sourceTagLabelFromKey(key));
+      }
+      return next;
+    });
+    setQuery('');
+    inputRef.current?.focus();
+  };
+  const addTag = (tag: string) => addTags([tag]);
+  const addTagsFromText = (value: string) => {
+    const parsed = splitSourceTags(value);
+    if (parsed.length > 0) {
+      addTags(parsed);
+      return;
+    }
+    if (normalizedQuery) {
+      addTags([sourceTagLabelFromKey(normalizedQuery)]);
+    }
+  };
+  const removeTag = (tag: string) => {
+    const key = normalizeSourceTagKey(tag);
+    setSelectedTags((current) => current.filter((entry) => normalizeSourceTagKey(entry) !== key));
+    inputRef.current?.focus();
+  };
+
+  return (
+    <div className="modal-scrim" onClick={() => !busy && onClose()}>
+      <div
+        className="modal-card genre-editor"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="album-source-tags-editor-title"
+      >
+        <div className="modal-head">
+          <div>
+            <div className="view-eyebrow">Metadata</div>
+            <h2 className="modal-title" id="album-source-tags-editor-title">
+              Album source tags
+            </h2>
+            <p className="modal-copy">
+              Edit the Vorbis TAGS field for this album. {modeCopy} Change the save mode in Settings.
+            </p>
+          </div>
+          <button className="ghost-button" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+        </div>
+
+        <div className="field">
+          <div className="field-label">Source presets</div>
+          <div className="genre-choice-grid">
+            {sourceTagPresets.map((tag) => (
+              <button
+                key={tag}
+                className={`genre-choice ${
+                  selectedTagKeys.has(normalizeSourceTagKey(tag) ?? '') ? 'is-selected' : ''
+                }`}
+                onClick={() => addTag(tag)}
+              >
+                {tag}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="field">
+          <span className="field-label">Source tags for every track on this album</span>
+          <div className="genre-multiselect" onClick={() => inputRef.current?.focus()}>
+            <div className="genre-multiselect-values">
+              {selectedTags.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  className="genre-token"
+                  onClick={() => removeTag(tag)}
+                  disabled={busy}
+                  aria-label={`Remove ${tag}`}
+                  title={`Remove ${tag}`}
+                >
+                  <span>{tag}</span>
+                  <span className="genre-token-remove" aria-hidden="true">
+                    ×
+                  </span>
+                </button>
+              ))}
+              <input
+                ref={inputRef}
+                className="genre-multiselect-input"
+                value={query}
+                onChange={(event) => setQuery(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    if (query.trim()) addTagsFromText(query);
+                  } else if (event.key === 'Backspace' && !query && selectedTags.length > 0) {
+                    event.preventDefault();
+                    setSelectedTags((current) => current.slice(0, -1));
+                  }
+                }}
+                placeholder={selectedTags.length > 0 ? 'Add another source…' : 'Search or add source tags…'}
+                autoFocus
+                disabled={busy}
+              />
+            </div>
+          </div>
+          <div className="genre-picker-panel" role="listbox" aria-label="Available source tags">
+            {pendingTags.length > 0 &&
+              !pendingTags.every((tag) => filteredTags.some((option) => normalizeSourceTagKey(option) === normalizeSourceTagKey(tag))) && (
+              <button type="button" className="genre-picker-option is-create" onClick={() => addTags(pendingTags)}>
+                Add <strong>{pendingTags.length === 1 ? pendingTags[0] : `${pendingTags.length} source tags`}</strong>
+              </button>
+              )}
+            {filteredTags.slice(0, 24).map((tag) => (
+              <button
+                key={tag}
+                type="button"
+                className="genre-picker-option"
+                onClick={() => addTag(tag)}
+              >
+                {tag}
+              </button>
+            ))}
+            {pendingTags.length === 0 && filteredTags.length === 0 && (
+              <div className="genre-picker-empty">No matching source tags yet. Type a new one and press Enter.</div>
+            )}
+          </div>
+          <div className="field-help">Needle will save this as: {selectedTags.join('; ') || 'No source tags selected'}</div>
+        </div>
+
+        <div className="modal-actions">
+          <button className="ghost-button" onClick={() => onSubmit([])} disabled={selectedTags.length === 0 || busy}>
+            {metadataEditMode === 'write_to_files' ? 'Clear file source tags' : 'Clear Needle source tags'}
+          </button>
+          <button
+            className="primary-button"
+            onClick={() => onSubmit(selectedTags)}
+            disabled={busy}
+          >
+            {busy ? 'Saving…' : metadataEditMode === 'write_to_files' ? 'Write source tags' : 'Save in Needle'}
           </button>
         </div>
       </div>
@@ -7775,7 +8323,6 @@ interface AlbumDetailViewProps {
   album: string;
   albumKey: string;
   albumArtist: string | null;
-  isVinylRip: boolean;
   tracks: Track[];
   isMetadataRefreshing: boolean;
   currentPath: string | null;
@@ -7810,6 +8357,7 @@ interface AlbumDetailViewProps {
   onOpenBpmEditor: (track: Track) => void;
   pendingBpmPaths: string[];
   onEditGenre: (currentGenre: string | null, suggestedGenres: string[], trackPaths: string[]) => void;
+  onEditSourceTags: (currentTags: string[], suggestedTags: string[], trackPaths: string[]) => void;
   onRefreshMetadata: () => void;
   onPlayAlbum: () => void;
   onShuffleAlbum: () => void;
@@ -7820,7 +8368,6 @@ function AlbumDetailView({
   album,
   albumKey,
   albumArtist,
-  isVinylRip,
   tracks,
   isMetadataRefreshing,
   currentPath,
@@ -7855,6 +8402,7 @@ function AlbumDetailView({
   onOpenBpmEditor,
   pendingBpmPaths,
   onEditGenre,
+  onEditSourceTags,
   onRefreshMetadata,
   onPlayAlbum,
   onShuffleAlbum,
@@ -7930,24 +8478,19 @@ function AlbumDetailView({
   const currentGenreValue =
     suggestedGenreValues.length === 1 ? suggestedGenreValues[0] : (suggestedGenreValues[0] ?? null);
 
-  const qualityHint = useMemo(() => {
-    if (albumTracks.length === 0) return null;
-    const formats = new Map<string, number>();
-    let maxRate = 0;
-    let maxBits = 0;
-    for (const t of albumTracks) {
-      if (t.format) formats.set(t.format, (formats.get(t.format) ?? 0) + 1);
-      if (t.sample_rate && t.sample_rate > maxRate) maxRate = t.sample_rate;
-      if (t.bit_depth && t.bit_depth > maxBits) maxBits = t.bit_depth;
-    }
-    const topFormat =
-      Array.from(formats.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
-    const parts: string[] = [];
-    if (topFormat) parts.push(topFormat);
-    if (maxRate) parts.push(`${(maxRate / 1000).toFixed(1)} kHz`);
-    if (maxBits) parts.push(`${maxBits}-bit`);
-    return parts.length ? parts.join(' · ') : null;
-  }, [albumTracks]);
+  const albumBadges = useMemo(() => buildAlbumBadges(albumTracks, { includeSourceTags: false }), [albumTracks]);
+  const sourceTags = useMemo(
+    () => uniqueSorted(albumTracks.flatMap((track) => splitSourceTags(track.source_tags))),
+    [albumTracks],
+  );
+  const sourceTagDisplayLabels = useMemo(
+    () =>
+      sourceTags.map((tag) => ({
+        value: tag,
+        label: sourceTagDisplayLabelFromKey(normalizeSourceTagKey(tag) ?? tag),
+      })),
+    [sourceTags],
+  );
 
   const samplePath = albumTracks[0]?.path ?? null;
   const albumOfflineAvailability = areAllTracksOffline ? 'full' : hasAnyOfflineTracks ? 'partial' : 'none';
@@ -8014,7 +8557,6 @@ function AlbumDetailView({
             trackPath={samplePath}
             fallback={album[0]?.toUpperCase() ?? '◉'}
             size="hero"
-            vinylRip={isVinylRip}
             offlineAvailability={albumOfflineAvailability}
           />
           {isMetadataRefreshing && (
@@ -8055,32 +8597,65 @@ function AlbumDetailView({
               year,
               `${albumTracks.length} track${albumTracks.length === 1 ? '' : 's'}`,
               formatTotalDuration(totalSeconds),
-              qualityHint,
             ]
               .filter(Boolean)
               .join(' · ')}
           </div>
-          <div className="album-primary-genre">
-            <span className="album-primary-genre-label">Genres</span>
-            <span className={`album-primary-genre-pill ${genres.length > 0 ? 'is-set' : ''}`}>
-              {genres.length === 0 ? 'Not set' : `${genres.length} tag${genres.length === 1 ? '' : 's'}`}
-            </span>
-            <button
-              className="album-primary-genre-edit"
-              onClick={() => onEditGenre(currentGenreValue, suggestedGenreValues, albumTracks.map((track) => track.path))}
-              title={currentGenreValue ? `Edit genres · ${currentGenreValue}` : 'Edit genres'}
-              aria-label={currentGenreValue ? `Edit genres · ${currentGenreValue}` : 'Edit genres'}
-            >
-              <PencilIcon />
-            </button>
-          </div>
-          {genres.length > 0 && (
+          <AlbumBadges badges={albumBadges} variant="hero" />
+          {sourceTags.length > 0 || genres.length > 0 ? (
             <div className="album-hero-genres">
-              {genres.map((g) => (
-                <span key={g} className="album-genre-pill">
-                  {g}
-                </span>
+              {sourceTagDisplayLabels.map((tag) => (
+                <button
+                  key={tag.value}
+                  type="button"
+                  className="album-genre-pill album-genre-pill-button"
+                  onClick={() => onEditSourceTags(sourceTags, sourceTags, albumTracks.map((track) => track.path))}
+                  title={`Edit source tags · ${sourceTags.join(', ')}`}
+                  aria-label={`Edit source tags · ${sourceTags.join(', ')}`}
+                >
+                  {tag.label}
+                </button>
               ))}
+              {genres.map((g) => (
+                <button
+                  key={g}
+                  type="button"
+                  className="album-genre-pill album-genre-pill-button"
+                  onClick={() => onEditGenre(currentGenreValue, suggestedGenreValues, albumTracks.map((track) => track.path))}
+                  title={`Edit genres · ${currentGenreValue ?? g}`}
+                  aria-label={`Edit genres · ${currentGenreValue ?? g}`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {sourceTags.length === 0 && (
+            <div className="album-primary-genre">
+              <span className="album-primary-genre-label">Source tags</span>
+              <span className="album-primary-genre-pill">Not set</span>
+              <button
+                className="album-primary-genre-edit"
+                onClick={() => onEditSourceTags(sourceTags, sourceTags, albumTracks.map((track) => track.path))}
+                title="Edit source tags"
+                aria-label="Edit source tags"
+              >
+                <PencilIcon />
+              </button>
+            </div>
+          )}
+          {genres.length === 0 && (
+            <div className="album-primary-genre">
+              <span className="album-primary-genre-label">Genres</span>
+              <span className="album-primary-genre-pill">Not set</span>
+              <button
+                className="album-primary-genre-edit"
+                onClick={() => onEditGenre(currentGenreValue, suggestedGenreValues, albumTracks.map((track) => track.path))}
+                title="Edit genres"
+                aria-label="Edit genres"
+              >
+                <PencilIcon />
+              </button>
             </div>
           )}
           <div className="album-hero-actions">
@@ -8682,12 +9257,12 @@ function ArtistDetailView({
                     trackPath={album.samplePath}
                     fallback={album.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
-                    vinylRip={album.is_vinyl_rip}
                     offlineAvailability={album.offlineAvailability}
                   />
                   <div className="card-title">{album.album}</div>
                   <div className="card-sub">{album.year ?? relativeAdded(album.addedAt)}</div>
                   <div className="card-meta">{album.count} tracks</div>
+                  <AlbumBadges badges={album.badges} variant="card" />
                 </button>
                 <div className="card-actions">
                   <button
@@ -8905,7 +9480,6 @@ function AlbumsView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
-                    vinylRip={a.is_vinyl_rip}
                     offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
@@ -8913,6 +9487,7 @@ function AlbumsView({
                 <div className="card-title">{a.album}</div>
                 <div className="card-sub">{a.artist ?? 'Various artists'}</div>
                 <div className="card-meta">{a.count} tracks</div>
+                <AlbumBadges badges={a.badges} variant="card" />
               </button>
               <div className="card-actions">
                 <button
@@ -8952,7 +9527,6 @@ interface CoverProps {
   trackPath: string | null;
   fallback: string;
   size: 'md' | 'card' | 'hero' | 'queue' | 'mini';
-  vinylRip?: boolean;
   offlineAvailability?: OfflineAvailability;
   imageMode?: 'default' | 'cache_only' | 'deferred';
   lazyLoad?: boolean;
@@ -8962,7 +9536,6 @@ function Cover({
   trackPath,
   fallback,
   size,
-  vinylRip = false,
   offlineAvailability = 'none',
   imageMode = 'default',
   lazyLoad = false,
@@ -8989,7 +9562,6 @@ function Cover({
       <div className={className} ref={ref}>
         <img src={url} alt="" className="cover-img" />
         <OfflineAvailableBadge availability={offlineAvailability} size={size} />
-        {vinylRip && <VinylRipBadge size={size} />}
       </div>
     );
   }
@@ -8998,16 +9570,20 @@ function Cover({
     <div className={className} ref={ref}>
       {fallback}
       <OfflineAvailableBadge availability={offlineAvailability} size={size} />
-      {vinylRip && <VinylRipBadge size={size} />}
     </div>
   );
 }
 
-function VinylRipBadge({ size }: { size: CoverProps['size'] }) {
+function AlbumBadges({ badges, variant }: { badges: string[]; variant: 'card' | 'hero' }) {
+  if (badges.length === 0) return null;
   return (
-    <span className={`vinyl-rip-badge vinyl-rip-badge-${size}`} title="Vinyl rip" aria-label="Vinyl rip">
-      <img src={vinylRipBadgeIcon} alt="" className="vinyl-rip-badge-img" />
-    </span>
+    <div className={`album-badges album-badges-${variant}`} aria-label="Album badges">
+      {badges.map((badge) => (
+        <span key={badge} className="album-badge">
+          {badge}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -10983,7 +11559,6 @@ function DashboardView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
-                    vinylRip={a.is_vinyl_rip}
                     offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
@@ -10991,6 +11566,7 @@ function DashboardView({
                   <div className="card-title">{a.album}</div>
                   <div className="card-sub">{a.artist ?? 'Various artists'}</div>
                   <div className="card-meta">{relativeAdded(a.addedAt)} · {a.count} tracks</div>
+                  <AlbumBadges badges={a.badges} variant="card" />
                 </button>
                 <button
                   className="card-play"
@@ -11046,7 +11622,6 @@ function DashboardView({
                     trackPath={a.samplePath}
                     fallback={a.album[0]?.toUpperCase() ?? '◉'}
                     size="card"
-                    vinylRip={a.is_vinyl_rip}
                     offlineAvailability={a.offlineAvailability}
                     imageMode="deferred"
                     lazyLoad
@@ -11054,6 +11629,7 @@ function DashboardView({
                   <div className="card-title">{a.album}</div>
                   <div className="card-sub">{a.artist ?? 'Various artists'}</div>
                   <div className="card-meta">{a.count} tracks</div>
+                  <AlbumBadges badges={a.badges} variant="card" />
                 </button>
                 <button
                   className="card-play"
